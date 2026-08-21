@@ -6,7 +6,7 @@ const validationState = vi.hoisted(() => ({calls: 0}));
 vi.mock('../src/validation/index.js', () => ({
   validateProject: (): void => {
     validationState.calls += 1;
-    if (validationState.calls === 2) throw new Error('generated graph is invalid');
+    if (validationState.calls === 6) throw new Error('generated graph is invalid');
   }
 }));
 
@@ -16,7 +16,7 @@ describe('obfuscation output invariant', () => {
   it('classifies transformed-project validation failure as internal', () => {
     validationState.calls = 0;
     expect(() => obfuscateProject(project(), 'lossless', new Uint8Array(32))).toThrow(/internal validation rejected/);
-    expect(validationState.calls).toBe(2);
+    expect(validationState.calls).toBe(6);
   });
 });
 

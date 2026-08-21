@@ -114,7 +114,7 @@ describe('aggressive transforms', () => {
     validateProject(project);
   });
 
-  it('keeps cloud, Stage, monitored, sensed, and unsupported variable uses out of virtualization', () => {
+  it('keeps cloud, monitored, sensed, missing-input, and unsupported variable uses out of virtualization', () => {
     const project = fixtureProject();
     const sprite = project.targets[1];
     if (!sprite) throw new Error('fixture is missing its sprite');
@@ -247,7 +247,7 @@ describe('aggressive transforms', () => {
     expect(Object.is(Number(left[1]) * Number(right[1]), -0)).toBe(true);
     expect(setX.inputs['X']?.[2]).not.toEqual([4, '-0']);
     const rawStore = sprite.blocks['raw-store'];
-    expect(rawStore && isScratchBlock(rawStore) ? rawStore.inputs['VALUE']?.[1] : undefined).toEqual([4, '01']);
+    expect(rawStore && isScratchBlock(rawStore) ? rawStore.inputs['ITEM']?.[1] : undefined).toEqual([4, '01']);
 
     const dualRail = Object.values(sprite.blocks).find(value => {
       if (!isScratchBlock(value) || value.opcode !== 'control_if_else' || value.next !== 'set-x') return false;
@@ -364,7 +364,9 @@ describe('aggressive transforms', () => {
     const hat = sprite.blocks['green-flag'];
     expect(hat && isScratchBlock(hat) ? hat.next : undefined).not.toBe('set-1');
     const set = sprite.blocks['set-1'];
-    expect(typeof (set && isScratchBlock(set) ? set.inputs['VALUE']?.[1] : undefined)).toBe('string');
+    expect(set && isScratchBlock(set) ? set.opcode : undefined).toBe('data_replaceitemoflist');
+    expect(set && isScratchBlock(set) ? set.inputs['ITEM']?.[1] : undefined).toBeDefined();
+    expect(sprite.variables['original-variable-id']).toBeUndefined();
     const lossyPrototype = Object.values(sprite.blocks).find(value => isScratchBlock(value) && value.opcode === 'procedures_prototype');
     expect(lossyPrototype && isScratchBlock(lossyPrototype) ? lossyPrototype.mutation?.['warp'] : undefined).toBe('false');
     validateProject(project);
@@ -483,7 +485,7 @@ describe('aggressive transforms', () => {
     validateProject(project);
   });
 
-  it('accounts for default VALUE primitives before virtualizing variables at the exact cap', () => {
+  it('accounts for an explicit setter value and a missing change value at the exact cap', () => {
     const project: ScratchProject = {
       targets: [target(true, 'Stage'), target(false, 'Sprite1')],
       monitors: [],
@@ -494,10 +496,17 @@ describe('aggressive transforms', () => {
     if (!sprite) throw new Error('fixture is missing its sprite');
     sprite.variables['local'] = ['local', 0];
     sprite.blocks['hat'] = block('event_whenflagclicked', 'set', null, true);
-    sprite.blocks['set'] = block('data_setvariableto', 'change', 'hat', false, {}, {VARIABLE: ['local', 'local']});
+    sprite.blocks['set'] = block(
+      'data_setvariableto',
+      'change',
+      'hat',
+      false,
+      {VALUE: [1, [10, '']]},
+      {VARIABLE: ['local', 'local']}
+    );
     sprite.blocks['change'] = block('data_changevariableby', null, 'set', false, {}, {VARIABLE: ['local', 'local']});
     const before = countBlockEquivalents(project);
-    expect(collectVariableCandidates(project)).toMatchObject([{id: 'local', estimatedGrowth: 8}]);
+    expect(collectVariableCandidates(project)).toMatchObject([{id: 'local', estimatedGrowth: 7}]);
 
     applyAggressiveTransforms(project, 'no-preserve', generator(17), stats('no-preserve', project));
 
@@ -758,8 +767,9 @@ describe('aggressive transforms', () => {
     applyAggressiveTransforms(project, 'no-preserve', sourceRng, stats('no-preserve', project));
 
     expect(stage.blocks[collidingBlockId]).toEqual([12, 'dummy', 'dummy-variable']);
-    expect(stage.variables[collidingSymbolId]).toEqual([collidingName, 99]);
-    expect(Object.values(stage.variables).filter(declaration => declaration[0] === collidingName)).toHaveLength(1);
+    expect(stage.variables[collidingSymbolId]).toBeUndefined();
+    expect(Object.values(stage.lists).filter(declaration => Array.isArray(declaration[1]) && declaration[1].includes(99))).toHaveLength(1);
+    expect(Object.values(stage.variables).filter(declaration => declaration[0] === collidingName)).toHaveLength(0);
     validateProject(project);
   });
 
@@ -784,8 +794,7 @@ describe('aggressive transforms', () => {
     applyAggressiveTransforms(project, 'lossy', generator(72), resultStats);
 
     const originalBlocks = Array.from({length: 20}, (_, index) => sprite.blocks[`set-${index}`]).filter(isScratchBlock);
-    const activeLiterals = originalBlocks.flatMap(value => [value.inputs['VALUE']?.[1], value.inputs['MESSAGE']?.[1]]);
-    expect(activeLiterals.some(isPrimitive)).toBe(true);
+    const activeLiterals = originalBlocks.flatMap(value => [value.inputs['ITEM']?.[1], value.inputs['MESSAGE']?.[1]]);
     expect(activeLiterals.some(value => typeof value === 'string')).toBe(true);
     expect(originalBlocks.some((value, index) => value.next === `set-${index + 1}`)).toBe(true);
     expect(opcodes(project).some(opcode => opcode === 'control_if' || opcode === 'control_if_else')).toBe(true);
@@ -798,6 +807,7 @@ function fixtureProject(): ScratchProject {
   const sprite = target(false, 'Sprite1');
   sprite.variables['original-variable-id'] = ['score', 1];
   sprite.variables['shadow-variable-id'] = ['shadow', 7];
+  sprite.variables['missing-value-variable'] = ['missing value', 11];
   sprite.blocks['green-flag'] = block('event_whenflagclicked', 'set-1', null, true);
   sprite.blocks['set-1'] = block(
     'data_setvariableto',
@@ -871,7 +881,7 @@ function fixtureProject(): ScratchProject {
     null,
     true,
     {},
-    {VARIABLE: ['score', 'original-variable-id']}
+    {VARIABLE: ['missing value', 'missing-value-variable']}
   );
   sprite.blocks['change-with-default'] = block(
     'data_changevariableby',

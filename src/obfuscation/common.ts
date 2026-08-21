@@ -10,6 +10,7 @@ import type {
   ScratchProject,
   ScratchTarget
 } from '../types.js';
+import {ANTI_CHEAT_WATERMARK_NAME} from './anticheat.js';
 
 type SymbolKind = 'variable' | 'list' | 'broadcast';
 
@@ -43,9 +44,9 @@ function uniqueId(generator: DeterministicGenerator, prefix: string, occupied: S
   }
 }
 
-function uniqueName(generator: DeterministicGenerator, prefix: string, occupied: Set<string>): string {
+function uniqueName(generator: DeterministicGenerator, occupied: Set<string>): string {
   for (;;) {
-    const candidate = generator.id(prefix, 14);
+    const candidate = generator.id('x_', 28);
     if (!occupied.has(candidate)) {
       occupied.add(candidate);
       return candidate;
@@ -81,19 +82,20 @@ function targetSymbolMaps(
     for (const [id, tuple] of Object.entries(target.variables)) {
       const cloud = tuple[2] === true;
       const oldName = typeof tuple[0] === 'string' ? tuple[0] : '';
+      const preserveName = cloud || frozenNameKinds.has('variable') || oldName === ANTI_CHEAT_WATERMARK_NAME;
       variables.set(id, {
         id: uniqueId(local, 'v_', occupiedIds),
-        name: cloud || frozenNameKinds.has('variable') ? oldName : uniqueName(local, 'n_', occupiedNames),
+        name: preserveName ? oldName : uniqueName(local, occupiedNames),
         originalName: oldName
       });
       stats.identifiersRenamed += 1;
-      if (!cloud && !frozenNameKinds.has('variable')) stats.symbolsRenamed += 1;
+      if (!preserveName) stats.symbolsRenamed += 1;
     }
     for (const [id, tuple] of Object.entries(target.lists)) {
       const oldName = typeof tuple[0] === 'string' ? tuple[0] : '';
       lists.set(id, {
         id: uniqueId(local, 'l_', occupiedIds),
-        name: frozenNameKinds.has('list') ? oldName : uniqueName(local, 'n_', occupiedNames),
+        name: frozenNameKinds.has('list') ? oldName : uniqueName(local, occupiedNames),
         originalName: oldName
       });
       stats.identifiersRenamed += 1;
@@ -250,7 +252,7 @@ function procedurePlan(
     const placeholders = prototype.code.match(PROCEDURE_PLACEHOLDER) ?? [];
     let code: string;
     do {
-      const label = uniqueName(generator, 'p_', occupiedNames);
+      const label = uniqueName(generator, occupiedNames);
       code = placeholders.length === 0 ? label : `${label} ${placeholders.join(' ')}`;
     } while (seenCodes.has(code) || [...codeMap.values()].includes(code));
     codeMap.set(prototype.code, code);
@@ -267,7 +269,7 @@ function procedurePlan(
     argumentsByCode.set(prototype.code, ids);
     for (const oldName of prototype.names) {
       if (!argumentNames.has(oldName)) {
-        argumentNames.set(oldName, uniqueName(generator, 'n_', occupiedNames));
+        argumentNames.set(oldName, uniqueName(generator, occupiedNames));
         stats.symbolsRenamed += 1;
       }
     }

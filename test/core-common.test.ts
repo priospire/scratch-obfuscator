@@ -73,7 +73,8 @@ describe('common lossless transforms', () => {
     const result = obfuscateProject(source, 'lossless', new Uint8Array(32).fill(11));
     expect(JSON.stringify(source)).toBe(sourceJson);
     expect(result.stats.mode).toBe('lossless');
-    expect(result.stats.blocksAfter).toBe(result.stats.blocksBefore);
+    expect(result.stats.blocksAfter).toBe(result.stats.blocksBefore - 1);
+    expect(result.stats.inactiveFallbacksRemoved).toBe(1);
     expect(result.project).not.toBe(source);
     validateProject(result.project);
   });
@@ -344,7 +345,7 @@ describe('common lossless transforms', () => {
     const probe = new DeterministicGenerator(seed, domain).fork('symbols').fork('target:0:symbols');
     const collidingId = probe.id('v_');
     probe.id('v_');
-    const collidingName = probe.id('n_', 14);
+    const collidingName = probe.id('x_', 28);
     const project = projectFixture();
     const stage = project.targets[0];
     if (!stage) throw new Error('fixture Stage missing');
@@ -420,7 +421,7 @@ describe('common lossless transforms', () => {
     applyCommonTransforms(project, new DeterministicGenerator(new Uint8Array(32).fill(23), 'legacy-number'), resultStats);
 
     expect(resultStats.warnings).toEqual([]);
-    expect(prototype.mutation['proccode']).toMatch(/^p_.+ %s %b %n$/);
+    expect(prototype.mutation['proccode']).toMatch(/^x_.+ %s %b %n$/);
     expect(call.mutation['proccode']).toBe(prototype.mutation['proccode']);
     expect(prototype.mutation['argumentdefaults']).toBe('["",false,0]');
     expect(Object.keys(prototype.inputs)[0]).toMatch(/^a_/);

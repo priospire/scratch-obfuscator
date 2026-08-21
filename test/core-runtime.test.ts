@@ -1,6 +1,7 @@
 import {createRequire} from 'node:module';
 import {describe, expect, it} from 'vitest';
 import {isScratchBlock} from '../src/model/blocks.js';
+import {ANTI_CHEAT_WATERMARK_NAME} from '../src/obfuscation/anticheat.js';
 import {obfuscateProject} from '../src/obfuscation/index.js';
 import type {ScratchProject} from '../src/types.js';
 import {validateProject} from '../src/validation/index.js';
@@ -117,8 +118,11 @@ async function executeSnapshot(project: ScratchProject): Promise<Record<string, 
     const stage = vm.runtime.targets.find(target => target.isStage);
     const sprite = vm.runtime.targets.find(target => !target.isStage);
     if (!stage || !sprite) throw new Error('runtime targets missing');
+    const watermarkIds = new Set(Object.entries(project.targets.find(target => target.isStage)?.variables ?? {})
+      .filter(([, declaration]) => declaration[0] === ANTI_CHEAT_WATERMARK_NAME)
+      .map(([id]) => id));
     return {
-      stage: normalizedVariables(stage.variables),
+      stage: normalizedVariables(stage.variables, watermarkIds),
       sprite: normalizedVariables(sprite.variables),
       spriteX: sprite.x
     };
@@ -127,9 +131,13 @@ async function executeSnapshot(project: ScratchProject): Promise<Record<string, 
   }
 }
 
-function normalizedVariables(variables: Readonly<Record<string, RuntimeVariable>>): Array<Record<string, unknown>> {
-  return Object.values(variables)
-    .filter(variable => variable.type !== 'broadcast_msg')
+function normalizedVariables(
+  variables: Readonly<Record<string, RuntimeVariable>>,
+  excludedIds: ReadonlySet<string> = new Set()
+): Array<Record<string, unknown>> {
+  return Object.entries(variables)
+    .filter(([id, variable]) => variable.type !== 'broadcast_msg' && !excludedIds.has(id))
+    .map(([, variable]) => variable)
     .map(variable => ({type: variable.type, value: variable.value, isCloud: variable.isCloud}))
     .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
 }

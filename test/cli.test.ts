@@ -1,7 +1,7 @@
 import {mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
-import {zipSync} from 'fflate';
+import {unzipSync, zipSync} from 'fflate';
 import {afterEach, describe, expect, it} from 'vitest';
 import {parseCliArguments, runCli} from '../src/cli.js';
 import {UsageError} from '../src/errors.js';
@@ -14,9 +14,16 @@ afterEach(async () => {
 
 describe('CLI argument contract', () => {
   it('defaults to lossless and accepts requested single-hyphen flags', () => {
-    expect(parseCliArguments(['input.sb3'])).toMatchObject({kind: 'run', input: 'input.sb3', mode: 'lossless', force: false});
+    expect(parseCliArguments(['input.sb3'])).toMatchObject({kind: 'run', input: 'input.sb3', mode: 'lossless', antiCheat: false, force: false});
     expect(parseCliArguments(['input.sb3', '-lossy', '--force'])).toMatchObject({mode: 'lossy', force: true});
     expect(parseCliArguments(['-no-preserve', '-o', 'out.sb3', 'input.sb3'])).toMatchObject({mode: 'no-preserve', output: 'out.sb3'});
+  });
+
+  it('accepts anti-cheat independently of every mode', () => {
+    expect(parseCliArguments(['input.sb3', '-anticheat'])).toMatchObject({mode: 'lossless', antiCheat: true});
+    expect(parseCliArguments(['input.sb3', '--lossy', '--anticheat'])).toMatchObject({mode: 'lossy', antiCheat: true});
+    expect(parseCliArguments(['--no-preserve', '-anticheat', 'input.sb3'])).toMatchObject({mode: 'no-preserve', antiCheat: true});
+    expect(parseCliArguments(['input.sb3', '--anticheat', '-anticheat'])).toMatchObject({antiCheat: true});
   });
 
   it('rejects mode conflicts, missing values, unknown options, and extra inputs', () => {
@@ -37,9 +44,11 @@ describe('CLI argument contract', () => {
     const io = {stdout: (text: string) => stdout.push(text), stderr: (text: string) => stderr.push(text)};
     expect(await runCli(['--help'], io)).toBe(0);
     expect(stdout.join('')).toContain('Usage: scratch-obfuscator');
+    expect(stdout.join('')).toContain('-anticheat, --anticheat');
     stdout.length = 0;
     expect(await runCli(['--version'], io)).toBe(0);
-    expect(stdout.join('')).toMatch(/^0\.1\.0\n$/);
+    const packageMetadata = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {version: string};
+    expect(stdout.join('')).toBe(`${packageMetadata.version}\n`);
     expect(await runCli([], io)).toBe(2);
     expect(stderr.join('')).toContain('exactly one input');
   });
@@ -52,6 +61,7 @@ describe('CLI archive integration', () => {
     const input = join(directory, 'input.sb3');
     const first = join(directory, 'first.sb3');
     const second = join(directory, 'second.sb3');
+    const protectedOutput = join(directory, 'protected.sb3');
     const project = {
       targets: [{
         isStage: true,
@@ -86,6 +96,27 @@ describe('CLI archive integration', () => {
     expect(await runCli([input, '-o', first], io), errors.join('')).toBe(0);
     expect(await runCli([input, '--lossless', '-o', second], io)).toBe(0);
     expect(await readFile(first)).toEqual(await readFile(second));
+    const plainArchive = unzipSync(await readFile(first));
+    const plainProjectBytes = plainArchive['project.json'];
+    if (plainProjectBytes === undefined) throw new Error('plain output is missing project.json');
+    const plainProject = JSON.parse(Buffer.from(plainProjectBytes).toString('utf8')) as {
+      targets: Array<{variables: Record<string, [string, unknown]>}>;
+    };
+    expect(Object.values(plainProject.targets[0]?.variables ?? {})
+      .filter(([name]) => name === 'Obfuscated by PrioSDK Gen 4.')).toHaveLength(1);
+    expect(await runCli([input, '-anticheat', '-o', protectedOutput], io)).toBe(0);
+    const protectedArchive = unzipSync(await readFile(protectedOutput));
+    const projectBytes = protectedArchive['project.json'];
+    if (projectBytes === undefined) throw new Error('protected output is missing project.json');
+    const protectedProject = JSON.parse(Buffer.from(projectBytes).toString('utf8')) as {
+      targets: Array<{variables: Record<string, [string, unknown]>}>;
+    };
+    const protectedStage = protectedProject.targets[0];
+    expect(protectedStage).toBeDefined();
+    expect(Object.values(protectedStage?.variables ?? {})
+      .filter(([name]) => name === 'Obfuscated by PrioSDK Gen 4.')).toHaveLength(1);
+    expect(output.join('')).toContain('anticheat=on');
+    expect(output.join('')).toMatch(/packed=\d+, folded=\d+, fallbacks=\d+/u);
     expect(await runCli([input, '-o', first], io)).toBe(2);
     expect(errors.join('')).toContain('output already exists');
   });

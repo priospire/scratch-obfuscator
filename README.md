@@ -4,7 +4,8 @@
 Scratch 3 `.sb3` projects. It renames identifiers, obscures editor metadata and,
 in the stronger modes, adds bounded data/control-flow indirection. Every output
 is graph-validated before publication and every non-`project.json` archive
-member is preserved byte-for-byte.
+member is preserved byte-for-byte. Scratch Obfuscator retains its own product
+name and command-line interface, and is part of PrioSDK Gen 4.
 
 The package is private and is not published to the public npm registry. It
 requires Node.js 22 or newer and supports Windows, macOS, and Linux.
@@ -30,10 +31,10 @@ An internal tarball is also installable through npm:
 
 ```sh
 npm pack
-npm install --global ./scratch-obfuscator-0.1.0.tgz
+npm install --global ./scratch-obfuscator-0.2.0.tgz
 ```
 
-Both installed forms expose the `scratch-obfuscator` executable. Version 1 has
+Both installed forms expose the `scratch-obfuscator` executable. This release has
 no public JavaScript library API, configuration file, seed option, network
 operation, or stdin/stdout archive mode.
 
@@ -42,12 +43,14 @@ operation, or stdin/stdout archive mode.
 ```text
 scratch-obfuscator <input.sb3> [-o <output.sb3>]
   [-lossless | -lossy | -no-preserve]
+  [-anticheat]
   [--force]
 ```
 
-GNU spellings (`--lossless`, `--lossy`, and `--no-preserve`) are equivalent to
-the requested single-hyphen forms. Modes are mutually exclusive and default to
-`-lossless`. `--help` and `--version` are also available.
+GNU spellings (`--lossless`, `--lossy`, `--no-preserve`, and `--anticheat`) are
+equivalent to the requested single-hyphen forms. Modes are mutually exclusive
+and default to `-lossless`. The anti-cheat modifier is independent and can be
+combined with any mode. `--help` and `--version` are also available.
 
 Without `-o`, the output is `<input-stem>.obfuscated.sb3` beside the input. An
 existing output is rejected unless `--force` is present. Paths, symlinks, and
@@ -71,17 +74,24 @@ stderr; the identifier mapping is never printed.
 
 All modes remap block, variable, list, broadcast, and procedure-argument IDs;
 rename eligible non-cloud variables, lists, procedure labels, and arguments;
-strip comments; overlap top-level stacks; poison inactive obscured shadows; and
-minify `project.json`. Target order, block-map order, input/field order,
-declaration order, and hat order remain stable.
+strip comments; overlap top-level stacks; remove inactive saved defaults hidden
+under active reporters; and minify `project.json`. Every output also contains
+an intentionally readable Stage watermark variable. If that exact Stage
+watermark already exists, its value is retained. Target order, block-map order,
+input/field order, declaration order, and hat order remain stable. Every other
+renamable display symbol receives a long deterministic opaque name; names that
+Scratch resolves dynamically remain frozen when changing them could alter
+behavior.
 
 ### `-lossless`
 
-Lossless mode changes no executable operation graph, runtime state, stack
-frame, variable/list/monitor count, hat, or procedure count. It adds and removes
-zero block-equivalents. “No overhead” means the same executable opcode graph
-and VM step topology; exact wall-clock equality across machines is not a
-meaningful guarantee.
+Lossless mode changes no original executable operation graph, stack frame,
+list/monitor count, hat, or procedure count. It does not fold or insert an
+executed reporter or command. The mandatory watermark is the one deliberate
+added Stage variable, and inactive saved fallback primitives may be removed
+because Scratch never executes them. "No overhead" means the same executable
+opcode graph and VM step topology; exact wall-clock equality across machines is
+not a meaningful guarantee.
 
 ### `-lossy`
 
@@ -89,11 +99,14 @@ Lossy mode permits bounded CPU and archive-size overhead. A conservative static
 eligibility gate admits live rewrites only for a single-threaded core-block
 surface with no timer, randomness, live-input, asynchronous, clone, broadcast,
 extension, procedure, or yield hazard. Eligible regions receive custom-block
-outlining of maximal non-yielding top-level runs, interior string splitting,
-contextual exact-domain finite numeric equations, condition inversion, opaque
-predicates, dual-rail private branches, and bounded safe data/list decoys.
-Hazardous projects fall back to the common lossless transforms plus inert
-decoys.
+outlining of maximal non-yielding top-level runs, portable exact-domain constant
+folding, interior string splitting, contextual finite numeric equations,
+condition inversion, opaque predicates, dual-rail private branches, bounded
+safe data/list decoys, and scalar packing. Packing uses one backing list for
+eligible Stage globals and one per sprite for eligible locals so clone-local
+state remains local. Cloud, monitored, dynamically addressed, unsupported,
+malformed, and over-budget variables remain native. Hazardous projects fall
+back to the common lossless transforms plus inert decoys.
 
 The live passes add no deliberate yield point and preserve original random and
 input sampling sites. The gate is intentionally conservative; it is not a
@@ -111,14 +124,39 @@ supported core commands and routed through encoded program counters. Native hats
 yield/async anchors, unknown regions, warp/procedure bodies, recursion, and
 uncertain re-entrant ownership remain native. Dispatchers use shuffled handler
 procedures, permuted labels, indirect transition lists with variable-width junk,
-two branch templates, trampolines, and fake states. Additional passes pool
-and split eligible strings, encode exact numeric domains, move eligible private
-sprite variables into shuffled list slots, add opaque branches and fake
-data/procedures, and select decoys from the project's supported data/list opcode
-vocabulary.
+two branch templates, trampolines, and fake states. Additional passes pool and
+split eligible strings, precompute portable static reporter trees, encode exact
+numeric domains, pack eligible Stage and sprite scalars into shuffled per-scope
+list slots, add opaque branches and fake data/procedures, and select decoys from
+the project's supported data/list opcode vocabulary. Generated dispatcher and
+protection state, cloud variables, monitored variables, and conservatively
+excluded original state remain scalar exceptions.
 
 Regions that fail eligibility are left native rather than being speculatively
 rewritten. This selective fallback is part of the contract.
+
+### `-anticheat`
+
+Anti-cheat is an opt-in modifier, not a fourth obfuscation mode. The watermark
+is present even without this flag. The modifier adds exactly six opaque Stage
+sentinels and a private session latch. Changing any sentinel trips the latch at
+the next watchdog check, stops all running scripts, and prevents the project's
+pre-existing green-flag, key, broadcast, click, clone, and supported extension
+hats from continuing during that loaded session. One shared hidden guard
+procedure per affected target keeps the entry checks bounded.
+
+The latch, checks, and decoys add executable blocks, state, archive size, and
+runtime work. Consequently, `-lossless -anticheat` preserves the original
+program through the lossless base passes but does not retain the lossless
+no-overhead graph contract for the added protection layer. Detection occurs at
+scheduler check points; it cannot make arbitrary editor changes literally
+instantaneous.
+
+This is tamper resistance, not cryptographic protection. A determined attacker
+can inspect a self-contained project, remove checks, invoke a stack manually,
+reload the project, or restore a clean copy. The latch is deliberately
+irreversible through normal event entry within the current loaded session, but
+it does not persist across a reload or damage the source archive.
 
 ### Growth bounds
 
@@ -135,9 +173,17 @@ Pass quotas follow the documented control/literal/opaque/decoy allocation and
 unused capacity rolls forward. Each eligible pass is considered once in a
 deterministic hashed order.
 
+The anti-cheat layer is an explicit additive exception applied after the mode
+cap. Let `T` be the number of targets with protected event hats and `H` the
+number of protected hats. Each target guard checks the full protected sentinel
+set before latching and stopping. The layer adds `36 + 36T + H` object blocks
+when it creates the mandatory watermark, or `32 + 32T + H` when reusing one.
+Including inline literal primitives, the corresponding normalized additions
+are `45 + 45T + H` or `40 + 40T + H`.
+
 ## Runtime compatibility
 
-Version 1 accepts projects in the current Scratch VM serializer shape and
+This release accepts projects in the current Scratch VM serializer shape and
 validates them against the bundled `scratch-parser` 6.0.1 schema plus stricter
 graph, ownership, scope, procedure, monitor, extension, and asset invariants.
 The VM-supported name-resolved broadcast tuple is accepted as a deliberate
@@ -162,9 +208,9 @@ boundary.
 The generation stream is derived from domain-separated SHA-256/counter streams
 over the source `project.json` bytes and sorted entry-name/content hashes. It
 never consumes Scratch's runtime random source. For a fixed uncompressed archive
-payload, mode, algorithm version, and package version, output bytes do not
-depend on source ZIP order/metadata, destination path, working directory,
-locale, timezone, or operating system.
+payload, mode, anti-cheat setting, algorithm version, and package version,
+output bytes do not depend on source ZIP order/metadata, destination path,
+working directory, locale, timezone, or operating system.
 
 The writer emits `project.json` first, then other names in UTF-8 byte order,
 using pinned pure-JavaScript DEFLATE settings and fixed timestamps, attributes,

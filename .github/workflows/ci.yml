@@ -39,9 +39,12 @@ jobs:
       - run: node dist/cli.js fixture.sb3 -o lossless.sb3 -lossless
       - run: node dist/cli.js fixture.sb3 -o lossy.sb3 -lossy
       - run: node dist/cli.js fixture.sb3 -o no-preserve.sb3 -no-preserve
-      - run: node scripts/assert-release-outputs.mjs fixture.sb3 lossless.sb3 lossy.sb3 no-preserve.sb3
-      - run: node scripts/hash-outputs.mjs ci-hashes.json lossless.sb3 lossy.sb3 no-preserve.sb3
-      - run: node scripts/check-golden-hashes.mjs ci-hashes.json qa/goldens/ci-fixture-v1.json
+      - run: node dist/cli.js fixture.sb3 -o lossless-anticheat.sb3 -lossless -anticheat
+      - run: node dist/cli.js fixture.sb3 -o lossy-anticheat.sb3 -lossy -anticheat
+      - run: node dist/cli.js fixture.sb3 -o no-preserve-anticheat.sb3 -no-preserve -anticheat
+      - run: node scripts/assert-release-outputs.mjs fixture.sb3 lossless.sb3 lossy.sb3 no-preserve.sb3 lossless-anticheat.sb3 lossy-anticheat.sb3 no-preserve-anticheat.sb3
+      - run: node scripts/hash-outputs.mjs ci-hashes.json lossless.sb3 lossy.sb3 no-preserve.sb3 lossless-anticheat.sb3 lossy-anticheat.sb3 no-preserve-anticheat.sb3
+      - run: node scripts/check-golden-hashes.mjs ci-hashes.json qa/goldens/ci-fixture-v2.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hashes-${{ matrix.os }}-${{ matrix.node }}
@@ -86,9 +89,12 @@ jobs:
       - run: node dist/cli.js fixture.sb3 -o lossless.sb3 -lossless
       - run: node dist/cli.js fixture.sb3 -o lossy.sb3 -lossy
       - run: node dist/cli.js fixture.sb3 -o no-preserve.sb3 -no-preserve
-      - run: node scripts/assert-release-outputs.mjs fixture.sb3 lossless.sb3 lossy.sb3 no-preserve.sb3
+      - run: node dist/cli.js fixture.sb3 -o lossless-anticheat.sb3 -lossless -anticheat
+      - run: node dist/cli.js fixture.sb3 -o lossy-anticheat.sb3 -lossy -anticheat
+      - run: node dist/cli.js fixture.sb3 -o no-preserve-anticheat.sb3 -no-preserve -anticheat
+      - run: node scripts/assert-release-outputs.mjs fixture.sb3 lossless.sb3 lossy.sb3 no-preserve.sb3 lossless-anticheat.sb3 lossy-anticheat.sb3 no-preserve-anticheat.sb3
       - run: npm --prefix qa/gui ci --ignore-scripts
-      - run: node scripts/gui-smoke.mjs lossless.sb3 lossy.sb3 no-preserve.sb3
+      - run: node scripts/gui-smoke.mjs lossless.sb3 lossy.sb3 no-preserve.sb3 lossless-anticheat.sb3 lossy-anticheat.sb3 no-preserve-anticheat.sb3
         env:
           GUI_QA_ROOT: qa/gui
 

@@ -21,74 +21,15 @@ const project = {
     {
       isStage: true,
       name: 'Stage',
-      variables: {global_score: ['Readable score', 0]},
+      variables: {
+        global_score: ['Readable score', 0],
+        stage_alpha: ['Readable stage alpha', 'stage-alpha-initial-v2'],
+        stage_beta: ['Readable stage beta', 'stage-beta-initial-v2']
+      },
       lists: {global_list: ['Readable list', ['alpha', 'beta']]},
-      broadcasts: {broadcast_go: 'go'},
-      blocks: {
-        stage_flag: {
-          opcode: 'event_whenflagclicked', next: 'stage_set_score', parent: null,
-          inputs: {}, fields: {}, shadow: false, topLevel: true, x: 120, y: 80
-        },
-        stage_set_score: {
-          opcode: 'data_setvariableto', next: 'stage_change_score', parent: 'stage_flag',
-          inputs: {VALUE: [1, [4, '40']]}, fields: {VARIABLE: ['Readable score', 'global_score']},
-          shadow: false, topLevel: false, comment: 'stage_note'
-        },
-        stage_change_score: {
-          opcode: 'data_changevariableby', next: 'stage_add_item', parent: 'stage_set_score',
-          inputs: {VALUE: [1, [4, '2']]}, fields: {VARIABLE: ['Readable score', 'global_score']},
-          shadow: false, topLevel: false
-        },
-        stage_add_item: {
-          opcode: 'data_addtolist', next: 'stage_replace_item', parent: 'stage_change_score',
-          inputs: {ITEM: [1, [10, 'gamma']]}, fields: {LIST: ['Readable list', 'global_list']},
-          shadow: false, topLevel: false
-        },
-        stage_replace_item: {
-          opcode: 'data_replaceitemoflist', next: 'stage_custom_call', parent: 'stage_add_item',
-          inputs: {INDEX: [1, [4, '1']], ITEM: [1, [10, 'omega']]}, fields: {LIST: ['Readable list', 'global_list']},
-          shadow: false, topLevel: false
-        },
-        stage_custom_call: {
-          opcode: 'procedures_call', next: 'stage_broadcast', parent: 'stage_replace_item', inputs: {}, fields: {},
-          shadow: false, topLevel: false,
-          mutation: {
-            tagName: 'mutation', children: [], proccode: 'record completion', argumentids: '[]', warp: 'false'
-          }
-        },
-        stage_broadcast: {
-          opcode: 'event_broadcast', next: null, parent: 'stage_custom_call',
-          inputs: {BROADCAST_INPUT: [1, [11, 'go', 'broadcast_go']]}, fields: {}, shadow: false, topLevel: false
-        },
-        stage_custom_definition: {
-          opcode: 'procedures_definition', next: 'stage_custom_body', parent: null,
-          inputs: {custom_block: [1, 'stage_custom_prototype']}, fields: {},
-          shadow: false, topLevel: true, x: 460, y: 80
-        },
-        stage_custom_prototype: {
-          opcode: 'procedures_prototype', next: null, parent: 'stage_custom_definition', inputs: {}, fields: {},
-          shadow: true, topLevel: false,
-          mutation: {
-            tagName: 'mutation', children: [], proccode: 'record completion', argumentids: '[]',
-            argumentnames: '[]', argumentdefaults: '[]', warp: 'false'
-          }
-        },
-        stage_custom_body: {
-          opcode: 'data_addtolist', next: null, parent: 'stage_custom_definition',
-          inputs: {ITEM: [1, [10, 'complete']]}, fields: {LIST: ['Readable list', 'global_list']},
-          shadow: false, topLevel: false
-        },
-        stage_pen_payload: {
-          opcode: 'pen_clear', next: null, parent: null, inputs: {}, fields: {},
-          shadow: false, topLevel: true, x: 680, y: 80
-        }
-      },
-      comments: {
-        stage_note: {
-          blockId: 'stage_set_score', x: 0, y: 0, width: 200, height: 100, minimized: false,
-          text: 'Readable release-fixture comment'
-        }
-      },
+      broadcasts: {},
+      blocks: {},
+      comments: {},
       currentCostume: 0,
       costumes: [costume('backdrop1')],
       sounds: [],
@@ -102,21 +43,53 @@ const project = {
     {
       isStage: false,
       name: 'Visible Sprite',
-      variables: {sprite_value: ['Readable sprite value', 3]},
+      variables: {
+        sprite_alpha: ['Readable sprite alpha', 'sprite-alpha-initial-v2'],
+        sprite_beta: ['Readable sprite beta', 'sprite-beta-initial-v2']
+      },
       lists: {},
       broadcasts: {},
       blocks: {
         sprite_flag: {
-          opcode: 'event_whenflagclicked', next: 'sprite_set_x', parent: null,
+          opcode: 'event_whenflagclicked', next: 'sprite_set_stage', parent: null,
           inputs: {}, fields: {}, shadow: false, topLevel: true, x: 160, y: 240
         },
+        sprite_set_stage: {
+          opcode: 'data_setvariableto', next: 'sprite_set_local', parent: 'sprite_flag',
+          inputs: {VALUE: [1, [10, 'stage-alpha-runtime-v2']]},
+          fields: {VARIABLE: ['Readable stage alpha', 'stage_alpha']},
+          shadow: false, topLevel: false, comment: 'fixture_comment'
+        },
+        sprite_set_local: {
+          opcode: 'data_setvariableto', next: 'sprite_set_x', parent: 'sprite_set_stage',
+          inputs: {VALUE: [1, [10, 'sprite-alpha-runtime-v2']]},
+          fields: {VARIABLE: ['Readable sprite alpha', 'sprite_alpha']},
+          shadow: false, topLevel: false
+        },
         sprite_set_x: {
-          opcode: 'motion_setx', next: 'sprite_set_y', parent: 'sprite_flag',
-          inputs: {X: [1, [4, '11']]}, fields: {}, shadow: false, topLevel: false
+          opcode: 'motion_setx', next: 'sprite_set_y', parent: 'sprite_set_local',
+          inputs: {X: [3, 'static_multiply', [4, '999']]}, fields: {},
+          shadow: false, topLevel: false
+        },
+        static_multiply: {
+          opcode: 'operator_multiply', next: null, parent: 'sprite_set_x',
+          inputs: {NUM1: [2, 'static_add'], NUM2: [1, [4, '8']]}, fields: {},
+          shadow: false, topLevel: false
+        },
+        static_add: {
+          opcode: 'operator_add', next: null, parent: 'static_multiply',
+          inputs: {NUM1: [1, [4, '5']], NUM2: [1, [4, '4']]}, fields: {},
+          shadow: false, topLevel: false
         },
         sprite_set_y: {
           opcode: 'motion_sety', next: 'sprite_set_size', parent: 'sprite_set_x',
-          inputs: {Y: [1, [4, '-7']]}, fields: {}, shadow: false, topLevel: false
+          inputs: {Y: [3, 'stage_reporter', [4, '777']]}, fields: {},
+          shadow: false, topLevel: false
+        },
+        stage_reporter: {
+          opcode: 'data_variable', next: null, parent: 'sprite_set_y', inputs: {},
+          fields: {VARIABLE: ['Readable stage alpha', 'stage_alpha']},
+          shadow: false, topLevel: false
         },
         sprite_set_size: {
           opcode: 'looks_setsizeto', next: 'sprite_set_volume', parent: 'sprite_set_y',
@@ -127,7 +100,12 @@ const project = {
           inputs: {VOLUME: [1, [4, '37']]}, fields: {}, shadow: false, topLevel: false
         }
       },
-      comments: {},
+      comments: {
+        fixture_comment: {
+          blockId: 'sprite_set_stage', x: 0, y: 0, width: 200, height: 100, minimized: false,
+          text: 'Readable release-fixture comment'
+        }
+      },
       currentCostume: 0,
       costumes: [costume('costume1')],
       sounds: [],
@@ -147,8 +125,8 @@ const project = {
     spriteName: null, value: 0, width: 0, height: 0, x: 5, y: 5, visible: true,
     sliderMin: 0, sliderMax: 100, isDiscrete: true
   }],
-  extensions: ['pen'],
-  meta: {semver: '3.0.0', vm: '15.1.0', agent: 'scratch-obfuscator-release-fixture-v1'}
+  extensions: [],
+  meta: {semver: '3.0.0', vm: '15.1.0', agent: 'scratch-obfuscator-release-fixture-v2'}
 };
 
 const archive = zipSync({

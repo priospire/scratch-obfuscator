@@ -1,6 +1,6 @@
 {
   "name": "scratch-obfuscator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Deterministic Scratch 3 project obfuscator",
   "private": true,
   "license": "UNLICENSED",
@@ -19,6 +19,7 @@
   "files": [
     "dist",
     "README.md",
+    "QA_SECURITY.md",
     "THIRD_PARTY_NOTICES.md",
     "LICENSES"
   ],

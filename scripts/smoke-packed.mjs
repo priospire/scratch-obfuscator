@@ -1,3 +1,4 @@
+import {existsSync} from 'node:fs';
 import {mkdtemp, readdir, rm, stat, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {basename, dirname, join, resolve} from 'node:path';
@@ -17,7 +18,10 @@ const run = (command, args) => new Promise((resolvePromise, rejectPromise) => {
 
 try {
   await writeFile(join(temporary, 'package.json'), '{"private":true}', 'utf8');
-  const npmCli = join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  const configuredNpmCli = process.env.npm_execpath;
+  const npmCli = configuredNpmCli && existsSync(configuredNpmCli)
+    ? configuredNpmCli
+    : join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
   const npmCommand = process.platform === 'win32' ? process.execPath : 'npm';
   const npmArguments = process.platform === 'win32' ? [npmCli] : [];
   await run(npmCommand, [...npmArguments, 'install', resolve(tarballs[0]), '--ignore-scripts', '--no-audit', '--no-fund']);

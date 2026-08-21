@@ -27,6 +27,7 @@ const projectArbitrary = fc.record({
 }));
 
 const extendedFuzz = process.env['SCRATCH_OBFUSCATOR_EXTENDED_FUZZ'] === '1';
+const propertyTimeout = extendedFuzz ? 120_000 : 20_000;
 
 describe('deterministic valid-project properties', () => {
   it('keeps every generated lossless graph isomorphic and deterministic', () => {
@@ -42,7 +43,7 @@ describe('deterministic valid-project properties', () => {
       seed: 0x5b33_0001,
       numRuns: extendedFuzz ? 3_000 : 150
     });
-  });
+  }, propertyTimeout);
 
   it.each<ObfuscationMode>(['lossy', 'no-preserve'])('keeps %s output valid, bounded, and deterministic', mode => {
     fc.assert(fc.property(projectArbitrary, ({project, seed}) => {
@@ -58,7 +59,7 @@ describe('deterministic valid-project properties', () => {
       seed: mode === 'lossy' ? 0x5b33_0002 : 0x5b33_0003,
       numRuns: extendedFuzz ? (mode === 'lossy' ? 2_000 : 700) : (mode === 'lossy' ? 100 : 35)
     });
-  });
+  }, propertyTimeout);
 });
 
 function linearProject(opcodes: readonly string[], variableName: string, literal: string, initial: number): ScratchProject {

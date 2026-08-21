@@ -2,6 +2,15 @@ import {Buffer} from 'node:buffer';
 import {readdir, readFile} from 'node:fs/promises';
 import {join} from 'node:path';
 
+const expectedNames = [
+  'lossless.sb3',
+  'lossy.sb3',
+  'no-preserve.sb3',
+  'lossless-anticheat.sb3',
+  'lossy-anticheat.sb3',
+  'no-preserve-anticheat.sb3'
+].sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
+
 const root = process.argv[2];
 if (!root) throw new Error('usage: compare-hashes.mjs <artifact-directory>');
 
@@ -33,7 +42,9 @@ function normalizedManifest(source, file) {
   }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`invalid hash manifest object: ${file}`);
   const entries = Object.entries(value).sort(([left], [right]) => Buffer.from(left).compare(Buffer.from(right)));
-  if (entries.length !== 3) throw new Error(`expected 3 output hashes in ${file}, found ${entries.length}`);
+  if (entries.length !== expectedNames.length || entries.some(([name], index) => name !== expectedNames[index])) {
+    throw new Error(`hash manifest ${file} must contain exactly ${expectedNames.join(', ')}`);
+  }
   for (const [name, hash] of entries) {
     if (typeof hash !== 'string' || !/^[a-f0-9]{64}$/u.test(hash)) {
       throw new Error(`invalid SHA-256 for ${JSON.stringify(name)} in ${file}`);

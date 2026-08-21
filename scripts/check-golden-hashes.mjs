@@ -1,6 +1,15 @@
 import {Buffer} from 'node:buffer';
 import {readFile} from 'node:fs/promises';
 
+const expectedNames = [
+  'lossless.sb3',
+  'lossy.sb3',
+  'no-preserve.sb3',
+  'lossless-anticheat.sb3',
+  'lossy-anticheat.sb3',
+  'no-preserve-anticheat.sb3'
+].sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
+
 const [manifestPath, goldenPath] = process.argv.slice(2);
 if (!manifestPath || !goldenPath) {
   throw new Error('usage: check-golden-hashes.mjs <actual.json> <golden.json>');
@@ -19,7 +28,6 @@ async function loadManifest(path) {
   const parsed = JSON.parse(await readFile(path, 'utf8'));
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(`invalid hash manifest: ${path}`);
   const entries = Object.entries(parsed).sort(([left], [right]) => Buffer.from(left).compare(Buffer.from(right)));
-  const expectedNames = ['lossless.sb3', 'lossy.sb3', 'no-preserve.sb3'];
   if (entries.length !== expectedNames.length || entries.some(([name], index) => name !== expectedNames[index])) {
     throw new Error(`hash manifest ${path} must contain exactly ${expectedNames.join(', ')}`);
   }

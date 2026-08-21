@@ -18,7 +18,7 @@ import {validateProject} from './validation/index.js';
 import {compareUtf8} from './deterministic.js';
 import {DEFAULT_LIMITS, type ArchiveEntry, type ObfuscationMode, type ObfuscationStats} from './types.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 
 const HELP = `Usage: scratch-obfuscator <input.sb3> [options]
 
@@ -30,6 +30,7 @@ Modes (mutually exclusive):
   -no-preserve, --no-preserve Maximum bounded obfuscation; timing may change
 
 Options:
+  -anticheat, --anticheat     Add tamper-response sentinels and event guards
   -o, --output <file.sb3>      Output path (default: <stem>.obfuscated.sb3)
   --force                     Replace an existing output transactionally
   -h, --help                  Show this help
@@ -41,6 +42,7 @@ export interface ParsedCliArguments {
   readonly input: string;
   readonly output?: string;
   readonly mode: ObfuscationMode;
+  readonly antiCheat: boolean;
   readonly force: boolean;
 }
 
@@ -55,7 +57,9 @@ export interface CliIo {
 
 export function parseCliArguments(arguments_: readonly string[]): ParsedCliArguments | InformationalArguments {
   const argumentsNormalized = arguments_.map(argument => {
-    if (argument === '-lossless' || argument === '-lossy' || argument === '-no-preserve') return `-${argument}`;
+    if (argument === '-lossless' || argument === '-lossy' || argument === '-no-preserve' || argument === '-anticheat') {
+      return `-${argument}`;
+    }
     return argument;
   });
   if (argumentsNormalized.includes('--help') || argumentsNormalized.includes('-h')) return {kind: 'help'};
@@ -65,6 +69,7 @@ export function parseCliArguments(arguments_: readonly string[]): ParsedCliArgum
   const modes = new Set<ObfuscationMode>();
   let output: string | undefined;
   let force = false;
+  let antiCheat = false;
   let optionsEnded = false;
 
   for (let index = 0; index < argumentsNormalized.length; index += 1) {
@@ -74,6 +79,8 @@ export function parseCliArguments(arguments_: readonly string[]): ParsedCliArgum
       optionsEnded = true;
     } else if (!optionsEnded && (argument === '--lossless' || argument === '--lossy' || argument === '--no-preserve')) {
       modes.add(argument.slice(2) as ObfuscationMode);
+    } else if (!optionsEnded && argument === '--anticheat') {
+      antiCheat = true;
     } else if (!optionsEnded && argument === '--force') {
       force = true;
     } else if (!optionsEnded && (argument === '-o' || argument === '--output')) {
@@ -99,7 +106,9 @@ export function parseCliArguments(arguments_: readonly string[]): ParsedCliArgum
   const input = positionals[0];
   if (input === undefined) throw new UsageError('exactly one input .sb3 file is required');
   const mode = modes.values().next().value ?? 'lossless';
-  return output === undefined ? {kind: 'run', input, mode, force} : {kind: 'run', input, output, mode, force};
+  return output === undefined
+    ? {kind: 'run', input, mode, antiCheat, force}
+    : {kind: 'run', input, output, mode, antiCheat, force};
 }
 
 export async function runCli(
@@ -120,8 +129,11 @@ export async function runCli(
     const {paths, stats} = await executeObfuscation(parsed, signal);
     io.stdout(
       `Obfuscated ${JSON.stringify(basename(paths.inputPath))} -> ${JSON.stringify(basename(paths.outputPath))}` +
-      ` (mode=${parsed.mode}, blocks=${stats.blocksBefore}->${stats.blocksAfter}, renamed=${stats.identifiersRenamed + stats.symbolsRenamed},` +
-      ` comments=${stats.commentsRemoved}, decoys=${stats.decoysAdded}, virtualized=${stats.virtualizedBlocks}, warnings=${stats.warnings.length})\n`
+      ` (mode=${parsed.mode}, anticheat=${parsed.antiCheat ? 'on' : 'off'},` +
+      ` blocks=${stats.blocksBefore}->${stats.blocksAfter}, renamed=${stats.identifiersRenamed + stats.symbolsRenamed},` +
+      ` packed=${stats.variablesVirtualized ?? 0}, folded=${stats.constantsFolded ?? 0},` +
+      ` fallbacks=${stats.inactiveFallbacksRemoved ?? 0}, comments=${stats.commentsRemoved},` +
+      ` decoys=${stats.decoysAdded}, virtualized=${stats.virtualizedBlocks}, warnings=${stats.warnings.length})\n`
     );
     for (const warning of stats.warnings) {
       io.stderr(`warning: ${warning}\n`);
@@ -151,7 +163,7 @@ async function executeObfuscation(
     validateProject(source.project);
     validateReferencedAssets(source.project, source.entries);
     const modeSeed = deriveModeSeed(source.seed, parsed.mode);
-    const transformed = obfuscateProject(source.project, parsed.mode, modeSeed);
+    const transformed = obfuscateProject(source.project, parsed.mode, modeSeed, {antiCheat: parsed.antiCheat});
     validateProject(transformed.project);
     const projectBytes = serializeProject(transformed.project, parsed.mode);
 

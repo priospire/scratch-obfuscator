@@ -145,6 +145,11 @@ describe('aggressive dispatcher runtime regressions', () => {
         new DeterministicGenerator(new Uint8Array(32).fill(seedByte), 'numeric-runtime'),
         stats(project, 'lossy')
       );
+      const spriteProject = project.targets.find(target => !target.isStage);
+      const rawStore = spriteProject?.blocks['store'];
+      const backingListId = rawStore && isScratchBlock(rawStore) ? rawStore.fields['LIST']?.[1] : undefined;
+      expect(backingListId, `seed ${seedByte} did not pack the scalar`).toBeTypeOf('string');
+      if (typeof backingListId !== 'string') throw new Error(`seed ${seedByte} did not pack the scalar`);
 
       const vm = new ScratchVm();
       vm.attachStorage(new ScratchStorage());
@@ -157,7 +162,8 @@ describe('aggressive dispatcher runtime regressions', () => {
         const sprite = vm.runtime.targets.find(target => !target.isStage);
         expect(Object.is(sprite?.x, -0), `seed ${seedByte} lost negative zero`).toBe(true);
         expect(sprite?.y, `seed ${seedByte} changed the minimum subnormal`).toBe(Number.MIN_VALUE);
-        expect(sprite?.variables['raw-id']?.value, `seed ${seedByte} changed raw shadow storage`).toBe('01');
+        const packedValues = sprite?.variables[backingListId]?.value;
+        expect(Array.isArray(packedValues) && packedValues.includes('01'), `seed ${seedByte} changed raw shadow storage`).toBe(true);
       } finally {
         vm.quit();
       }

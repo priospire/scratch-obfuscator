@@ -1,5 +1,9 @@
 export type ObfuscationMode = 'lossless' | 'lossy' | 'no-preserve';
 
+export interface ObfuscationOptions {
+  readonly antiCheat?: boolean;
+}
+
 export type JsonPrimitive = null | boolean | number | string;
 export type JsonValue = JsonPrimitive | JsonValue[] | {[key: string]: JsonValue};
 
@@ -85,6 +89,10 @@ export interface ObfuscationStats {
   commentsRemoved: number;
   decoysAdded: number;
   virtualizedBlocks: number;
+  variablesVirtualized?: number;
+  constantsFolded?: number;
+  inactiveFallbacksRemoved?: number;
+  antiCheatDecoys?: number;
   warnings: string[];
 }
 

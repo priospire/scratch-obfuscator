@@ -1,4 +1,5 @@
 import {spawn} from 'node:child_process';
+import {existsSync} from 'node:fs';
 import {mkdtemp, mkdir, readFile, readdir, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
@@ -36,7 +37,7 @@ describe('packed CLI subprocess', () => {
     await writeFile(input, validArchive());
     const prefix = ['--prefix', installation, 'exec', '--offline', '--', 'scratch-obfuscator'];
     const version = await runNpm([...prefix, '--version'], alternateCwd, {TZ: 'UTC'});
-    expect(version.stdout).toMatch(/^0\.1\.0\s*$/);
+    expect(version.stdout).toMatch(/^0\.2\.0\s*$/);
     await runNpm([...prefix, input, '-o', first, '-lossless'], installation, {TZ: 'UTC'});
     await runNpm([...prefix, input, '-o', second, '-lossless'], alternateCwd, {TZ: 'Pacific/Auckland'});
     expect(await readFile(second)).toEqual(await readFile(first));
@@ -44,7 +45,10 @@ describe('packed CLI subprocess', () => {
 });
 
 function runNpm(arguments_: string[], cwd: string, environment: Record<string, string> = {}): Promise<{stdout: string; stderr: string}> {
-  const npmCli = join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  const configuredNpmCli = process.env['npm_execpath'];
+  const npmCli = configuredNpmCli !== undefined && existsSync(configuredNpmCli)
+    ? configuredNpmCli
+    : join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
   const command = process.platform === 'win32' ? process.execPath : 'npm';
   const argumentsWithCli = process.platform === 'win32' ? [npmCli, ...arguments_] : arguments_;
   return run(command, argumentsWithCli, cwd, environment);

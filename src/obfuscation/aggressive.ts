@@ -168,7 +168,7 @@ class UniqueFactory {
       this.#nameOrdinal += 1;
       const candidate = mode === 'no-preserve'
         ? makeInvisibleDisplayName(rng, ordinal)
-        : rng.id('n_', 16);
+        : rng.id('x_', 28);
       if (!this.#names.has(candidate)) {
         this.#names.add(candidate);
         return candidate;
@@ -211,14 +211,13 @@ export function applyAggressiveTransforms(
   const conditionSites = allowLiveLossyChanges
     ? rng.fork('condition-order').shuffle(collectConditionSites(project))
     : [];
-  const numericSites = allowLiveLossyChanges
-    ? rng.fork('numeric-order').shuffle(collectNumericLiteralSites(project))
-    : [];
   const dualRailEdges = allowLiveLossyChanges
     ? rng.fork('dual-rail-order').shuffle(collectInsertionEdges(project))
     : [];
 
-  const originalVariableCandidates = mode === 'no-preserve' ? collectVariableCandidates(project) : [];
+  const originalVariableCandidates = mode === 'no-preserve' || allowLiveLossyChanges
+    ? collectVariableCandidates(project)
+    : [];
 
   if (mode === 'lossy' && allowLiveLossyChanges) {
     const runs = rng.fork('outline-order').shuffle(collectLinearRuns(project));
@@ -238,16 +237,11 @@ export function applyAggressiveTransforms(
     }
   }
 
-  for (const [index, site] of numericSites.entries()) {
-    if (!budget.trySpend(site.growth, 1)) continue;
-    encodeNumericLiteral(project, site, factory, rng.fork(`numeric-${index}`), poisonRng);
-  }
-
-  if (mode === 'no-preserve') {
+  if (originalVariableCandidates.length > 0) {
     const variables = rng.fork('variable-order').shuffle(originalVariableCandidates);
     const selected: SelectedVariable[] = [];
     for (const [index, candidate] of variables.entries()) {
-      if (candidate.estimatedGrowth > 256) continue;
+      if (candidate.estimatedGrowth > (mode === 'lossy' ? 64 : 256)) continue;
       if (!budget.trySpend(candidate.estimatedGrowth, 1)) continue;
       const state = getState(candidate.targetIndex);
       selected.push({
@@ -262,7 +256,16 @@ export function applyAggressiveTransforms(
       virtualizeVariableFields(project, selection, factory);
       const target = requireTarget(project, selection.candidate.targetIndex);
       delete target.variables[selection.candidate.id];
+      stats.variablesVirtualized = (stats.variablesVirtualized ?? 0) + 1;
     }
+  }
+
+  const numericSites = allowLiveLossyChanges
+    ? rng.fork('numeric-order').shuffle(collectNumericLiteralSites(project))
+    : [];
+  for (const [index, site] of numericSites.entries()) {
+    if (!budget.trySpend(site.growth, 1)) continue;
+    encodeNumericLiteral(project, site, factory, rng.fork(`numeric-${index}`), poisonRng);
   }
 
   const stringSites = allowLiveLossyChanges ? rng.fork('literal-order').shuffle(collectStringLiteralSites(project)) : [];
@@ -361,7 +364,7 @@ export function safeInvisibleDisplayName(candidate: string, rng: DeterministicGe
     && candidate.normalize('NFC') === candidate
     && Array.from(candidate).every(character => isSafeDisplayNameCodePoint(character.codePointAt(0)))
   ) return candidate;
-  return `\ue000${ordinal.toString(36)}_${rng.id('n_', 10)}`;
+  return `\ue000${ordinal.toString(36)}_${rng.id('x_', 18)}`;
 }
 
 function isSafeDisplayNameCodePoint(codePoint: number | undefined): boolean {
@@ -833,13 +836,13 @@ function virtualizeVariableInputs(
   factory: UniqueFactory
 ): void {
   const {candidate, state, ordinal, slot} = selection;
-  const target = requireTarget(project, candidate.targetIndex);
   for (const [usageIndex, usage] of candidate.usages.entries()) {
     if (usage.kind !== 'inline') continue;
+    const target = requireTarget(project, usage.targetIndex);
     const block = requireBlock(target, usage.blockId);
     const input = block.inputs[usage.inputName] ?? [];
     requireItem(input, 1, 'inline variable input');
-    const reporterId = factory.block(`virtual-inline-${candidate.targetIndex}-${ordinal}-${usageIndex}`);
+    const reporterId = factory.block(`virtual-inline-${candidate.targetIndex}-${usage.targetIndex}-${ordinal}-${usageIndex}`);
     target.blocks[reporterId] = makeListItemReporter(blockIdOrNull(usage.blockId), state, slot);
     block.inputs[usage.inputName] = [3, reporterId, [10, '']];
   }
@@ -851,23 +854,24 @@ function virtualizeVariableFields(
   factory: UniqueFactory
 ): void {
   const {candidate, state, ordinal, slot} = selection;
-  const target = requireTarget(project, candidate.targetIndex);
   for (const [usageIndex, usage] of candidate.usages.entries()) {
     if (usage.kind !== 'field') continue;
+    const target = requireTarget(project, usage.targetIndex);
     const block = requireBlock(target, usage.blockId);
     if (block.opcode === 'data_variable') {
       block.opcode = 'data_itemoflist';
       block.fields = {LIST: [state.listName, state.listId]};
       block.inputs = {INDEX: numericInput(slot)};
     } else if (block.opcode === 'data_setvariableto') {
-      const value = block.inputs['VALUE'] ?? textInput('');
+      const value = block.inputs['VALUE'];
+      if (!value) throw new Error('eligible variable setter is missing its VALUE input');
       block.opcode = 'data_replaceitemoflist';
       block.fields = {LIST: [state.listName, state.listId]};
       block.inputs = {INDEX: numericInput(slot), ITEM: value};
     } else if (block.opcode === 'data_changevariableby') {
       const delta = block.inputs['VALUE'] ?? numericInput(0);
-      const itemId = factory.block(`virtual-current-${candidate.targetIndex}-${ordinal}-${usageIndex}`);
-      const addId = factory.block(`virtual-add-${candidate.targetIndex}-${ordinal}-${usageIndex}`);
+      const itemId = factory.block(`virtual-current-${candidate.targetIndex}-${usage.targetIndex}-${ordinal}-${usageIndex}`);
+      const addId = factory.block(`virtual-add-${candidate.targetIndex}-${usage.targetIndex}-${ordinal}-${usageIndex}`);
       reparentInputReferences(target, delta, addId);
       target.blocks[itemId] = makeListItemReporter(addId, state, slot);
       target.blocks[addId] = {

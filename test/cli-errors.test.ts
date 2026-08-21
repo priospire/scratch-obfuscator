@@ -55,6 +55,7 @@ describe('CLI error mapping and output behavior', () => {
     expect(await runCli([input, '--force'], capture.io)).toBe(0);
     expect(await readFile(output)).toEqual(first);
     expect(capture.stdout.join('')).toContain('mode=lossless');
+    expect(capture.stdout.join('')).toContain('anticheat=off');
   });
 
   it('runs a non-default mode and rejects input/output identity', async () => {
