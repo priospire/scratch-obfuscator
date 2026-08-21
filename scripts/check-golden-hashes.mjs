@@ -1,0 +1,32 @@
+import {Buffer} from 'node:buffer';
+import {readFile} from 'node:fs/promises';
+
+const [manifestPath, goldenPath] = process.argv.slice(2);
+if (!manifestPath || !goldenPath) {
+  throw new Error('usage: check-golden-hashes.mjs <actual.json> <golden.json>');
+}
+
+const [actual, golden] = await Promise.all([
+  loadManifest(manifestPath),
+  loadManifest(goldenPath)
+]);
+if (JSON.stringify(actual) !== JSON.stringify(golden)) {
+  throw new Error(`archive golden hashes differ: ${manifestPath} vs ${goldenPath}`);
+}
+process.stdout.write(`Archive hashes match ${goldenPath}.\n`);
+
+async function loadManifest(path) {
+  const parsed = JSON.parse(await readFile(path, 'utf8'));
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(`invalid hash manifest: ${path}`);
+  const entries = Object.entries(parsed).sort(([left], [right]) => Buffer.from(left).compare(Buffer.from(right)));
+  const expectedNames = ['lossless.sb3', 'lossy.sb3', 'no-preserve.sb3'];
+  if (entries.length !== expectedNames.length || entries.some(([name], index) => name !== expectedNames[index])) {
+    throw new Error(`hash manifest ${path} must contain exactly ${expectedNames.join(', ')}`);
+  }
+  for (const [name, hash] of entries) {
+    if (typeof hash !== 'string' || !/^[a-f0-9]{64}$/u.test(hash)) {
+      throw new Error(`invalid SHA-256 for ${JSON.stringify(name)} in ${path}`);
+    }
+  }
+  return Object.fromEntries(entries);
+}

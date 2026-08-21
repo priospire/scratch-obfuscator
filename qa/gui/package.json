@@ -1,0 +1,11 @@
+{
+  "name": "scratch-obfuscator-gui-qa",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Pinned headless Scratch GUI smoke-test dependencies",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@scratch/scratch-gui": "15.1.0",
+    "puppeteer-core": "25.8.0"
+  }
+}
