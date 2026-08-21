@@ -1,11 +1,9 @@
 # Scratch Obfuscator
 
-`scratch-obfuscator` is a deterministic command-line transformer for official
-Scratch 3 `.sb3` projects. It renames identifiers, obscures editor metadata and,
+`scratch-obfuscator` is a CLI transformer for `.sb3` projects. It renames identifiers, obscures editor metadata and,
 in the stronger modes, adds bounded data/control-flow indirection. Every output
 is graph-validated before publication and every non-`project.json` archive
-member is preserved byte-for-byte. Scratch Obfuscator retains its own product
-name and command-line interface, and is part of PrioSDK Gen 4.
+member is preserved (BFB Byte For Byte). Scratch Obfuscator is part of PrioSDK Gen 4.
 
 The package is private and is not published to the public npm registry. It
 requires Node.js 22 or newer and supports Windows, macOS, and Linux.
@@ -20,7 +18,7 @@ npm run build
 node dist/cli.js --help
 ```
 
-Authenticated users can install the private Git repository directly; the
+Authenticated users can install the private Git repository directly, the
 package's prepare hook builds the executable during installation:
 
 ```sh
@@ -72,10 +70,10 @@ stderr; the identifier mapping is never printed.
 
 ## Obfuscation modes
 
-All modes remap block, variable, list, broadcast, and procedure-argument IDs;
-rename eligible non-cloud variables, lists, procedure labels, and arguments;
-strip comments; overlap top-level stacks; remove inactive saved defaults hidden
-under active reporters; and minify `project.json`. Every output also contains
+All modes remap block, variable, list, broadcast, and procedure-argument IDs.
+rename eligible non-cloud variables, lists, procedure labels, and arguments.
+strip comments, overlap top-level stacks, remove inactive saved defaults hidden
+under active reporters, and minify `project.json`. Every output also contains
 an intentionally readable Stage watermark variable. If that exact Stage
 watermark already exists, its value is retained. Target order, block-map order,
 input/field order, declaration order, and hat order remain stable. Every other
