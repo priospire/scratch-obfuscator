@@ -94,6 +94,30 @@ interface StringPoolPlan {
   readonly growth: 1 | 2 | 6 | 7;
 }
 
+interface FakeBroadcast {
+  readonly id: string;
+  readonly name: string;
+}
+
+type LiveReporterOpcode = 'sensing_answer' | 'sensing_mousex' | 'sensing_mousey' | 'sensing_timer';
+type LiveExpressionTemplate = 'direct' | 'length' | 'letter' | 'mod';
+type LiveConditionOpcode = 'operator_contains' | 'operator_equals' | 'operator_gt' | 'operator_lt';
+
+interface LiveGuardPlan {
+  readonly reporterOpcode: LiveReporterOpcode;
+  readonly expression: LiveExpressionTemplate;
+  readonly conditionOpcode: LiveConditionOpcode;
+  readonly growth: 8 | 10 | 11;
+}
+
+interface LocalGrowth {
+  readonly equivalents: number;
+  readonly objects: number;
+}
+
+const COHERENT_DECOY_GROWTH = 38;
+const MAX_COHERENT_EXTRA_GROWTH = 18;
+
 class GrowthBudget {
   readonly #growth: number;
   readonly #boundaries: readonly [number, number, number, number];
@@ -135,7 +159,8 @@ class UniqueFactory {
     ]));
     this.#names = new Set(project.targets.flatMap(target => [
       ...Object.values(target.variables).map(tuple => tuple[0]).filter((value): value is string => typeof value === 'string'),
-      ...Object.values(target.lists).map(tuple => tuple[0]).filter((value): value is string => typeof value === 'string')
+      ...Object.values(target.lists).map(tuple => tuple[0]).filter((value): value is string => typeof value === 'string'),
+      ...Object.values(target.broadcasts)
     ]));
   }
 
@@ -150,7 +175,7 @@ class UniqueFactory {
     }
   }
 
-  symbol(prefix: 'v_' | 'l_', domain: string): string {
+  symbol(prefix: 'v_' | 'l_' | 'c_', domain: string): string {
     const rng = this.#rng.fork(`symbol\u0000${domain}`);
     for (;;) {
       const id = rng.id(prefix, 20);
@@ -196,12 +221,31 @@ export function applyAggressiveTransforms(
   const decoyVocabulary = collectDecoyVocabulary(project);
   const stringPools = new Map<number, StringPoolState>();
   const privateStates = new Map<number, PrivateState>();
+  const decoyStates = new Map<number, PrivateState>();
   const getState = (targetIndex: number): PrivateState => {
     const present = privateStates.get(targetIndex);
     if (present) return present;
     const target = requireTarget(project, targetIndex);
-    const state = createPrivateState(target, targetIndex, mode, factory, rng.fork(`state-${targetIndex}`));
+    const state = createPrivateState(target, targetIndex, mode, factory, rng.fork(`state-${targetIndex}`), 'live');
     privateStates.set(targetIndex, state);
+    return state;
+  };
+  const getDecoyState = (targetIndex: number): PrivateState => {
+    const present = decoyStates.get(targetIndex);
+    if (present) return present;
+    const target = requireTarget(project, targetIndex);
+    const state = mode === 'no-preserve'
+      ? createPrivateState(target, targetIndex, mode, factory, rng.fork(`decoy-state-${targetIndex}`), 'decoy')
+      : createPrivateVariableState(
+          target,
+          targetIndex,
+          mode,
+          factory,
+          rng.fork(`decoy-state-${targetIndex}`),
+          'decoy',
+          getState(targetIndex)
+        );
+    decoyStates.set(targetIndex, state);
     return state;
   };
 
@@ -312,21 +356,50 @@ export function applyAggressiveTransforms(
   }
 
   const guards: GuardSite[] = [];
-  const edges = allowLiveLossyChanges ? rng.fork('guard-order').shuffle(collectInsertionEdges(project)) : [];
+  const edges = allowLiveLossyChanges
+    ? rng.fork('guard-order').shuffle(
+        mode === 'no-preserve' ? collectTopLevelSequentialEdges(project) : collectInsertionEdges(project)
+      )
+    : [];
   for (const [index, edge] of edges.entries()) {
-    if (!budget.trySpend(5, 2)) continue;
+    const livePlan = mode === 'no-preserve'
+      ? makeLiveGuardPlan(rng.fork(`guard-live-plan-${index}`))
+      : undefined;
+    const growth = livePlan?.growth ?? 5;
+    if (!budget.trySpend(growth, 2)) continue;
     const target = requireTarget(project, edge.targetIndex);
-    const state = getState(edge.targetIndex);
-    const guard = insertOpaqueGuard(target, edge, state, factory, `edge-${index}`);
+    const state = getDecoyState(edge.targetIndex);
+    const guard = livePlan
+      ? insertLiveRailGuard(target, edge, state, factory, `edge-${index}`, livePlan)
+      : insertOpaqueGuard(target, edge, state, factory, `edge-${index}`);
     guards.push(guard);
   }
 
-  if (guards.length === 0 && budget.trySpend(5, 2)) {
+  const fallbackLivePlan = mode === 'no-preserve'
+    ? makeLiveGuardPlan(rng.fork('fallback-live-plan'))
+    : undefined;
+  const fallbackGuardGrowth = fallbackLivePlan ? fallbackLivePlan.growth + 1 : 5;
+  if (guards.length === 0 && budget.trySpend(fallbackGuardGrowth, 2)) {
     const targetIndex = rng.fork('guard-target').integer(project.targets.length);
     const target = requireTarget(project, targetIndex);
-    const state = getState(targetIndex);
-    guards.push(createTopLevelGuard(target, targetIndex, state, factory, 'top-level'));
+    const state = getDecoyState(targetIndex);
+    guards.push(fallbackLivePlan
+      ? createLiveRailDriver(target, targetIndex, state, factory, 'top-level', fallbackLivePlan)
+      : createTopLevelGuard(target, targetIndex, state, factory, 'top-level'));
   }
+
+  addCoherentDecoySubsystems(
+    project,
+    mode,
+    budget,
+    Math.max(0, cap - countBlockEquivalents(project)),
+    guards,
+    getDecoyState,
+    factory,
+    rng.fork('coherent-decoys'),
+    decoyVocabulary,
+    stats
+  );
 
   fillDecoyBudget(
     project,
@@ -334,7 +407,7 @@ export function applyAggressiveTransforms(
     budget,
     Math.max(0, cap - countBlockEquivalents(project)),
     guards,
-    getState,
+    getDecoyState,
     factory,
     rng.fork('decoys'),
     decoyVocabulary,
@@ -381,17 +454,35 @@ function createPrivateState(
   targetIndex: number,
   mode: AggressiveMode,
   factory: UniqueFactory,
-  rng: DeterministicGenerator
+  rng: DeterministicGenerator,
+  domain: string
 ): PrivateState {
-  const variableId = factory.symbol('v_', `state-${targetIndex}`);
-  const listId = factory.symbol('l_', `store-${targetIndex}`);
-  const variableName = factory.name(mode, `state-${targetIndex}`);
-  const listName = factory.name(mode, `store-${targetIndex}`);
+  const variableId = factory.symbol('v_', `${domain}-state-${targetIndex}`);
+  const listId = factory.symbol('l_', `${domain}-store-${targetIndex}`);
+  const variableName = factory.name(mode, `${domain}-state-${targetIndex}`);
+  const listName = factory.name(mode, `${domain}-store-${targetIndex}`);
   const token = `q_${rng.id('t_', 18)}`;
   const mismatch = `z_${rng.id('u_', 18)}`;
   target.variables[variableId] = [variableName, token];
   target.lists[listId] = [listName, [`j_${rng.id('d_', 12)}`, rng.integer(1_000_000)]];
   return {variableId, variableName, listId, listName, token, mismatch};
+}
+
+function createPrivateVariableState(
+  target: ScratchTarget,
+  targetIndex: number,
+  mode: AggressiveMode,
+  factory: UniqueFactory,
+  rng: DeterministicGenerator,
+  domain: string,
+  store: Pick<PrivateState, 'listId' | 'listName'>
+): PrivateState {
+  const variableId = factory.symbol('v_', `${domain}-state-${targetIndex}`);
+  const variableName = factory.name(mode, `${domain}-state-${targetIndex}`);
+  const token = `q_${rng.id('t_', 18)}`;
+  const mismatch = `z_${rng.id('u_', 18)}`;
+  target.variables[variableId] = [variableName, token];
+  return {...store, variableId, variableName, token, mismatch};
 }
 
 function fragmentRun(
@@ -1172,6 +1263,30 @@ function collectInsertionEdges(project: ScratchProject): InsertionEdge[] {
   return edges;
 }
 
+function collectTopLevelSequentialEdges(project: ScratchProject): InsertionEdge[] {
+  const edges: InsertionEdge[] = [];
+  for (let targetIndex = 0; targetIndex < project.targets.length; targetIndex += 1) {
+    const target = project.targets[targetIndex];
+    if (!target) continue;
+    for (const [topId, topValue] of Object.entries(target.blocks)) {
+      if (!isScratchBlock(topValue) || !topValue.topLevel || topValue.opcode === 'procedures_definition') continue;
+      const visited = new Set<string>();
+      let currentId: string | null = topId;
+      while (currentId !== null && !visited.has(currentId)) {
+        visited.add(currentId);
+        const block = blockAt(target, currentId);
+        if (!block) break;
+        const successorId = block.next;
+        if (successorId && blockAt(target, successorId)) {
+          edges.push({targetIndex, predecessorId: currentId, successorId});
+        }
+        currentId = successorId;
+      }
+    }
+  }
+  return edges;
+}
+
 function isHatOpcode(opcode: string): boolean {
   return opcode.startsWith('event_when') || opcode === 'control_start_as_clone';
 }
@@ -1254,6 +1369,34 @@ function insertOpaqueGuard(
   return {targetIndex: edge.targetIndex, guardId, tailId: null, chainDepth: 1, growth: 5};
 }
 
+function insertLiveRailGuard(
+  target: ScratchTarget,
+  edge: InsertionEdge,
+  state: PrivateState,
+  factory: UniqueFactory,
+  domain: string,
+  plan: LiveGuardPlan
+): GuardSite {
+  const predecessor = requireBlock(target, edge.predecessorId);
+  const successor = requireBlock(target, edge.successorId);
+  const updateId = factory.block(`guard-update-${domain}`);
+  const guardId = factory.block(`guard-${domain}`);
+  const equalsId = makeLiveOpaqueCondition(target, guardId, state, factory, domain, plan);
+  target.blocks[updateId] = {
+    opcode: 'data_changevariableby',
+    next: guardId,
+    parent: edge.predecessorId,
+    inputs: {VALUE: numericInput(1)},
+    fields: {VARIABLE: [state.variableName, state.variableId]},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[guardId] = makeGuard(updateId, edge.successorId, equalsId);
+  predecessor.next = updateId;
+  successor.parent = guardId;
+  return {targetIndex: edge.targetIndex, guardId, tailId: null, chainDepth: 2, growth: plan.growth};
+}
+
 function createTopLevelGuard(
   target: ScratchTarget,
   targetIndex: number,
@@ -1268,6 +1411,150 @@ function createTopLevelGuard(
   target.blocks[equalsId] = makeFalseEquality(guardId, reporterId, state);
   target.blocks[reporterId] = makeVariableReporter(equalsId, state);
   return {targetIndex, guardId, tailId: null, chainDepth: 1, growth: 5};
+}
+
+function createLiveRailDriver(
+  target: ScratchTarget,
+  targetIndex: number,
+  state: PrivateState,
+  factory: UniqueFactory,
+  domain: string,
+  plan: LiveGuardPlan
+): GuardSite {
+  const hatId = factory.block(`guard-driver-hat-${domain}`);
+  const updateId = factory.block(`guard-driver-update-${domain}`);
+  const guardId = factory.block(`guard-${domain}`);
+  const equalsId = makeLiveOpaqueCondition(target, guardId, state, factory, domain, plan);
+  target.blocks[hatId] = {
+    opcode: 'event_whenflagclicked',
+    next: updateId,
+    parent: null,
+    inputs: {},
+    fields: {},
+    shadow: false,
+    topLevel: true,
+    x: 0,
+    y: 0
+  };
+  target.blocks[updateId] = {
+    opcode: 'data_changevariableby',
+    next: guardId,
+    parent: hatId,
+    inputs: {VALUE: numericInput(1)},
+    fields: {VARIABLE: [state.variableName, state.variableId]},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[guardId] = makeGuard(updateId, null, equalsId);
+  return {targetIndex, guardId, tailId: null, chainDepth: 3, growth: plan.growth + 1};
+}
+
+function makeLiveGuardPlan(rng: DeterministicGenerator): LiveGuardPlan {
+  const reporterOpcodes: readonly LiveReporterOpcode[] = [
+    'sensing_answer',
+    'sensing_mousex',
+    'sensing_mousey',
+    'sensing_timer'
+  ];
+  const expressions: readonly LiveExpressionTemplate[] = ['direct', 'length', 'letter', 'mod'];
+  const conditionOpcodes: readonly LiveConditionOpcode[] = [
+    'operator_contains',
+    'operator_equals',
+    'operator_gt',
+    'operator_lt'
+  ];
+  const reporterOpcode = requireItem(reporterOpcodes, rng.integer(reporterOpcodes.length), 'live reporter template');
+  const expression = requireItem(expressions, rng.integer(expressions.length), 'live expression template');
+  const conditionOpcode = requireItem(
+    conditionOpcodes,
+    rng.integer(conditionOpcodes.length),
+    'live condition template'
+  );
+  return {
+    reporterOpcode,
+    expression,
+    conditionOpcode,
+    growth: expression === 'direct' ? 8 : expression === 'length' ? 10 : 11
+  };
+}
+
+function liveGuardObjectGrowth(plan: LiveGuardPlan, includesHat: boolean): number {
+  return 5 + (plan.expression === 'direct' ? 0 : 1) + (includesHat ? 1 : 0);
+}
+
+function makeLiveOpaqueCondition(
+  target: ScratchTarget,
+  guardId: string,
+  state: PrivateState,
+  factory: UniqueFactory,
+  domain: string,
+  plan: LiveGuardPlan
+): string {
+  const conditionId = factory.block(`guard-condition-${domain}`);
+  const liveReporterId = factory.block(`guard-live-reporter-${domain}`);
+  const stateReporterId = factory.block(`guard-variable-${domain}`);
+  const expressionId = plan.expression === 'direct'
+    ? liveReporterId
+    : factory.block(`guard-live-expression-${domain}`);
+
+  const firstInputName = plan.conditionOpcode === 'operator_contains' ? 'STRING1' : 'OPERAND1';
+  const secondInputName = plan.conditionOpcode === 'operator_contains' ? 'STRING2' : 'OPERAND2';
+  const fallbackCode = plan.conditionOpcode === 'operator_contains' ? 10 : 4;
+  target.blocks[conditionId] = {
+    opcode: plan.conditionOpcode,
+    next: null,
+    parent: guardId,
+    inputs: {
+      [firstInputName]: [3, expressionId, [fallbackCode, '']],
+      [secondInputName]: [3, stateReporterId, [fallbackCode, '']]
+    },
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[liveReporterId] = {
+    opcode: plan.reporterOpcode,
+    next: null,
+    parent: plan.expression === 'direct' ? conditionId : expressionId,
+    inputs: {},
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[stateReporterId] = makeVariableReporter(conditionId, state);
+
+  if (plan.expression === 'length') {
+    target.blocks[expressionId] = {
+      opcode: 'operator_length',
+      next: null,
+      parent: conditionId,
+      inputs: {STRING: [3, liveReporterId, [10, '']]},
+      fields: {},
+      shadow: false,
+      topLevel: false
+    };
+  } else if (plan.expression === 'letter') {
+    target.blocks[expressionId] = {
+      opcode: 'operator_letter_of',
+      next: null,
+      parent: conditionId,
+      inputs: {LETTER: numericInput(1), STRING: [3, liveReporterId, [10, '']]},
+      fields: {},
+      shadow: false,
+      topLevel: false
+    };
+  } else if (plan.expression === 'mod') {
+    target.blocks[expressionId] = {
+      opcode: 'operator_mod',
+      next: null,
+      parent: conditionId,
+      inputs: {NUM1: [3, liveReporterId, [4, '0']], NUM2: numericInput(997)},
+      fields: {},
+      shadow: false,
+      topLevel: false
+    };
+  }
+  return conditionId;
 }
 
 function makeGuard(parent: string | null, next: string | null, equalsId: string, topLevel = false): ScratchBlock {
@@ -1317,6 +1604,385 @@ function makeVariableReporter(
     parent: parentId,
     inputs: {},
     fields: {VARIABLE: [state.variableName, state.variableId]},
+    shadow: false,
+    topLevel: false
+  };
+}
+
+function addCoherentDecoySubsystems(
+  project: ScratchProject,
+  mode: AggressiveMode,
+  budget: GrowthBudget,
+  maximumAdditionalGrowth: number,
+  guards: GuardSite[],
+  getDecoyState: (targetIndex: number) => PrivateState,
+  factory: UniqueFactory,
+  rng: DeterministicGenerator,
+  vocabulary: DecoyVocabulary,
+  stats: ObfuscationStats
+): void {
+  if (mode !== 'no-preserve') return;
+  const maximumDepth = 128;
+  const maximumSiteGrowth = 256;
+  let remainingGrowth = maximumAdditionalGrowth;
+  let ordinal = 0;
+  const entryBroadcasts: FakeBroadcast[] = [];
+
+  while (project.targets.length > 0) {
+    if (budget.remaining < COHERENT_DECOY_GROWTH || remainingGrowth < COHERENT_DECOY_GROWTH) break;
+    const eligibleAnchors = guards.filter(site => (
+      site.chainDepth < maximumDepth
+      && site.growth + COHERENT_DECOY_GROWTH <= maximumSiteGrowth
+    ));
+    if (eligibleAnchors.length === 0) {
+      const driverPlan = makeLiveGuardPlan(rng.fork(`driver-plan-${guards.length}`));
+      const driverGrowth = driverPlan.growth + 1;
+      if (
+        budget.remaining < COHERENT_DECOY_GROWTH + driverGrowth
+        || remainingGrowth < COHERENT_DECOY_GROWTH + driverGrowth
+        || !budget.trySpend(driverGrowth, 3)
+      ) break;
+      const targetIndex = rng.fork(`driver-target-${guards.length}`).integer(project.targets.length);
+      const target = requireTarget(project, targetIndex);
+      guards.push(createLiveRailDriver(
+        target,
+        targetIndex,
+        getDecoyState(targetIndex),
+        factory,
+        `coherent-${guards.length}`,
+        driverPlan
+      ));
+      remainingGrowth -= driverGrowth;
+      stats.decoysAdded += liveGuardObjectGrowth(driverPlan, true);
+      continue;
+    }
+    const anchor = requireItem(
+      eligibleAnchors,
+      rng.fork(`anchor-${ordinal}`).integer(eligibleAnchors.length),
+      'coherent decoy anchor'
+    );
+    const available = Math.min(
+      budget.remaining,
+      remainingGrowth,
+      maximumSiteGrowth - anchor.growth
+    );
+    const reservedForAnother = available >= COHERENT_DECOY_GROWTH * 2 ? COHERENT_DECOY_GROWTH : 0;
+    const maximumExtra = Math.min(
+      MAX_COHERENT_EXTRA_GROWTH,
+      available - COHERENT_DECOY_GROWTH - reservedForAnother
+    );
+    const extraGrowth = maximumExtra > 0
+      ? rng.fork(`extra-growth-${ordinal}`).integer(maximumExtra + 1)
+      : 0;
+    const plannedGrowth = COHERENT_DECOY_GROWTH + extraGrowth;
+    if (!budget.trySpend(plannedGrowth, 3)) break;
+    const growth = addCoherentDecoySubsystem(
+      project,
+      mode,
+      anchor,
+      ordinal,
+      getDecoyState(anchor.targetIndex),
+      factory,
+      rng.fork(`subsystem-${ordinal}`),
+      vocabulary,
+      extraGrowth,
+      entryBroadcasts
+    );
+    if (growth.equivalents !== plannedGrowth) {
+      throw new Error(`coherent decoy growth accounting failed (${growth.equivalents} !== ${plannedGrowth})`);
+    }
+    anchor.growth += growth.equivalents;
+    remainingGrowth -= growth.equivalents;
+    stats.decoysAdded += growth.objects;
+    ordinal += 1;
+  }
+}
+
+function addCoherentDecoySubsystem(
+  project: ScratchProject,
+  mode: AggressiveMode,
+  anchor: GuardSite,
+  ordinal: number,
+  railState: PrivateState,
+  factory: UniqueFactory,
+  rng: DeterministicGenerator,
+  vocabulary: DecoyVocabulary,
+  extraGrowth: number,
+  entryBroadcasts: FakeBroadcast[]
+): LocalGrowth {
+  const target = requireTarget(project, anchor.targetIndex);
+  const stage = project.targets.find(candidate => candidate.isStage);
+  if (!stage) throw new Error('validated project has no Stage for fake broadcasts');
+  const state = createPrivateVariableState(
+    target,
+    anchor.targetIndex,
+    mode,
+    factory,
+    rng.fork('state'),
+    `coherent-${ordinal}`,
+    railState
+  );
+  const firstBroadcast = createFakeBroadcast(stage, mode, ordinal, 'entry', factory);
+  const secondBroadcast = entryBroadcasts.length === 0
+    ? firstBroadcast
+    : requireItem(
+        entryBroadcasts,
+        rng.fork('continuation-link').integer(entryBroadcasts.length),
+        'coherent continuation broadcast'
+      );
+  entryBroadcasts.push(firstBroadcast);
+  const template = ordinal % 3;
+  const warp = template !== 2;
+  const existingCodes = collectProcedureCodes(target);
+  let proccode = factory.name(mode, `coherent-procedure-${anchor.targetIndex}-${ordinal}`);
+  for (let collision = 0; existingCodes.has(proccode); collision += 1) {
+    proccode = factory.name(mode, `coherent-procedure-${anchor.targetIndex}-${ordinal}-${collision}`);
+  }
+
+  const firstSenderId = factory.block(`coherent-sender-entry-${anchor.targetIndex}-${ordinal}`);
+  const firstHatId = factory.block(`coherent-hat-entry-${anchor.targetIndex}-${ordinal}`);
+  const firstCallId = factory.block(`coherent-call-entry-${anchor.targetIndex}-${ordinal}`);
+  const definitionId = factory.block(`coherent-definition-${anchor.targetIndex}-${ordinal}`);
+  const prototypeId = factory.block(`coherent-prototype-${anchor.targetIndex}-${ordinal}`);
+  const appendId = factory.block(`coherent-append-${anchor.targetIndex}-${ordinal}`);
+  const joinId = factory.block(`coherent-join-${anchor.targetIndex}-${ordinal}`);
+  const joinVariableId = factory.block(`coherent-join-variable-${anchor.targetIndex}-${ordinal}`);
+  const joinListItemId = factory.block(`coherent-join-item-${anchor.targetIndex}-${ordinal}`);
+  const branchId = factory.block(`coherent-branch-${anchor.targetIndex}-${ordinal}`);
+  const andId = factory.block(`coherent-and-${anchor.targetIndex}-${ordinal}`);
+  const variableEqualsId = factory.block(`coherent-variable-equals-${anchor.targetIndex}-${ordinal}`);
+  const conditionVariableId = factory.block(`coherent-condition-variable-${anchor.targetIndex}-${ordinal}`);
+  const listEqualsId = factory.block(`coherent-list-equals-${anchor.targetIndex}-${ordinal}`);
+  const conditionListItemId = factory.block(`coherent-condition-item-${anchor.targetIndex}-${ordinal}`);
+  const secondSenderId = factory.block(`coherent-sender-continuation-${anchor.targetIndex}-${ordinal}`);
+  const secondHatId = factory.block(`coherent-hat-continuation-${anchor.targetIndex}-${ordinal}`);
+  const waitId = factory.block(`coherent-wait-${anchor.targetIndex}-${ordinal}`);
+  const divideId = factory.block(`coherent-wait-divide-${anchor.targetIndex}-${ordinal}`);
+  const modId = factory.block(`coherent-wait-mod-${anchor.targetIndex}-${ordinal}`);
+  const lengthId = factory.block(`coherent-wait-length-${anchor.targetIndex}-${ordinal}`);
+  const secondCallId = factory.block(`coherent-call-continuation-${anchor.targetIndex}-${ordinal}`);
+  const createdIds = [
+    firstSenderId,
+    firstHatId,
+    firstCallId,
+    definitionId,
+    prototypeId,
+    appendId,
+    joinId,
+    joinVariableId,
+    joinListItemId,
+    branchId,
+    andId,
+    variableEqualsId,
+    conditionVariableId,
+    listEqualsId,
+    conditionListItemId,
+    secondSenderId,
+    secondHatId,
+    waitId,
+    divideId,
+    modId,
+    lengthId,
+    secondCallId
+  ];
+
+  const firstSenderParent = anchor.tailId ?? anchor.guardId;
+  target.blocks[firstSenderId] = makeBroadcastCommand(firstSenderParent, null, firstBroadcast);
+  if (anchor.tailId) {
+    requireBlock(target, anchor.tailId).next = firstSenderId;
+  } else {
+    requireBlock(target, anchor.guardId).inputs['SUBSTACK'] = [2, firstSenderId];
+  }
+  anchor.tailId = firstSenderId;
+  anchor.chainDepth += 1;
+
+  target.blocks[firstHatId] = makeBroadcastHat(firstCallId, firstBroadcast);
+  target.blocks[firstCallId] = makeProcedureCall(proccode, firstHatId, null, false, warp);
+  target.blocks[definitionId] = makeProcedureDefinition(prototypeId, template === 1 ? branchId : appendId);
+  target.blocks[prototypeId] = makeProcedurePrototype(definitionId, proccode, warp);
+  target.blocks[appendId] = {
+    opcode: 'data_addtolist',
+    next: template === 1 ? null : branchId,
+    parent: template === 1 ? branchId : definitionId,
+    inputs: {ITEM: [3, joinId, [10, '']]},
+    fields: {LIST: [state.listName, state.listId]},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[joinId] = {
+    opcode: 'operator_join',
+    next: null,
+    parent: appendId,
+    inputs: {
+      STRING1: [3, template === 2 ? joinListItemId : joinVariableId, [10, '']],
+      STRING2: [3, template === 2 ? joinVariableId : joinListItemId, [10, '']]
+    },
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[joinVariableId] = makeVariableReporter(joinId, state);
+  target.blocks[joinListItemId] = makeListItemReporter(joinId, state, 1);
+  target.blocks[branchId] = {
+    opcode: 'control_if',
+    next: template === 1 ? appendId : null,
+    parent: template === 1 ? definitionId : appendId,
+    inputs: {CONDITION: [2, andId], SUBSTACK: [2, secondSenderId]},
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[andId] = {
+    opcode: 'operator_or',
+    next: null,
+    parent: branchId,
+    inputs: {
+      OPERAND1: [2, template === 2 ? listEqualsId : variableEqualsId],
+      OPERAND2: [2, template === 2 ? variableEqualsId : listEqualsId]
+    },
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[variableEqualsId] = makeOpaqueEquality(
+    andId,
+    conditionVariableId,
+    railState,
+    railState.mismatch
+  );
+  target.blocks[conditionVariableId] = makeVariableReporter(variableEqualsId, railState);
+  target.blocks[listEqualsId] = {
+    opcode: 'operator_equals',
+    next: null,
+    parent: andId,
+    inputs: {
+      OPERAND1: [3, conditionListItemId, [10, '']],
+      OPERAND2: textInput(state.mismatch)
+    },
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[conditionListItemId] = makeListItemReporter(listEqualsId, state, 1);
+  target.blocks[secondSenderId] = makeBroadcastCommand(branchId, null, secondBroadcast);
+  let decoyTailId = secondSenderId;
+  let remainingExtraGrowth = extraGrowth;
+  for (let extraOrdinal = 0; remainingExtraGrowth > 0; extraOrdinal += 1) {
+    const predecessor = requireBlock(target, decoyTailId);
+    const useSeparator = isDecoyMutationOpcode(predecessor.opcode);
+    const cost = useSeparator
+      ? 1
+      : chooseDecoyCost(
+          rng.fork(`coherent-extra-cost-${extraOrdinal}`),
+          Math.min(3, remainingExtraGrowth)
+        );
+    const decoyId = factory.block(`coherent-extra-${anchor.targetIndex}-${ordinal}-${extraOrdinal}`);
+    createdIds.push(decoyId);
+    target.blocks[decoyId] = useSeparator
+      ? makePrivateSeparatorBlock(
+          state,
+          decoyTailId,
+          rng.fork(`coherent-extra-separator-${extraOrdinal}`)
+        )
+      : makeDecoyBlock(
+          state,
+          cost,
+          decoyTailId,
+          null,
+          false,
+          (ordinal * (MAX_COHERENT_EXTRA_GROWTH + 1)) + extraOrdinal,
+          vocabulary,
+          rng.fork(`coherent-extra-opcode-${extraOrdinal}`)
+        );
+    requireBlock(target, decoyTailId).next = decoyId;
+    decoyTailId = decoyId;
+    remainingExtraGrowth -= cost;
+  }
+
+  target.blocks[secondHatId] = makeBroadcastHat(waitId, secondBroadcast);
+  target.blocks[waitId] = {
+    opcode: 'control_wait',
+    next: secondCallId,
+    parent: secondHatId,
+    inputs: {DURATION: [3, divideId, [4, '0']]},
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[divideId] = {
+    opcode: template === 0 ? 'operator_divide' : template === 1 ? 'operator_multiply' : 'operator_subtract',
+    next: null,
+    parent: waitId,
+    inputs: {
+      NUM1: [3, modId, [4, '0']],
+      NUM2: numericInput(template === 0 ? 1000 : template === 1 ? 0.001 : -7)
+    },
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[modId] = {
+    opcode: template === 0 ? 'operator_mod' : template === 1 ? 'operator_add' : 'operator_multiply',
+    next: null,
+    parent: divideId,
+    inputs: {
+      NUM1: [3, lengthId, [4, '0']],
+      NUM2: numericInput(template === 0 ? 3 : template === 1 ? 2 : -7)
+    },
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[lengthId] = {
+    opcode: 'data_lengthoflist',
+    next: null,
+    parent: modId,
+    inputs: {},
+    fields: {LIST: [state.listName, state.listId]},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[secondCallId] = makeProcedureCall(proccode, waitId, null, false, warp);
+  return {
+    equivalents: createdIds.reduce((growth, id) => growth + blockEquivalentGrowth(requireBlock(target, id)), 0),
+    objects: createdIds.length
+  };
+}
+
+function createFakeBroadcast(
+  stage: ScratchTarget,
+  mode: AggressiveMode,
+  ordinal: number,
+  role: string,
+  factory: UniqueFactory
+): FakeBroadcast {
+  const id = factory.symbol('c_', `coherent-broadcast-${role}-${ordinal}`);
+  const name = factory.name(mode, `coherent-broadcast-${role}-${ordinal}`);
+  stage.broadcasts[id] = name;
+  return {id, name};
+}
+
+function makeBroadcastHat(next: string | null, broadcast: FakeBroadcast): ScratchBlock {
+  return {
+    opcode: 'event_whenbroadcastreceived',
+    next,
+    parent: null,
+    inputs: {},
+    fields: {BROADCAST_OPTION: [broadcast.name, broadcast.id]},
+    shadow: false,
+    topLevel: true,
+    x: 0,
+    y: 0
+  };
+}
+
+function makeBroadcastCommand(parent: string, next: string | null, broadcast: FakeBroadcast): ScratchBlock {
+  return {
+    opcode: 'event_broadcast',
+    next,
+    parent,
+    inputs: {BROADCAST_INPUT: [1, [11, broadcast.name, broadcast.id]]},
+    fields: {},
     shadow: false,
     topLevel: false
   };
@@ -1373,15 +2039,45 @@ function fillDecoyBudget(
   let remainingGrowth = maximumAdditionalGrowth;
 
   while (budget.remaining > 0 && remainingGrowth > 0 && project.targets.length > 0) {
-    let site = sites.length === 0 ? undefined : sites[siteCursor % sites.length];
-    if (!site || site.chainDepth >= maximumDepth || site.growth >= maximumSiteGrowth) {
+    let site: GuardSite | undefined;
+    for (let attempts = 0; attempts < sites.length; attempts += 1) {
+      const candidate = sites[siteCursor % sites.length];
+      siteCursor += 1;
+      if (
+        candidate
+        && candidate.chainDepth < maximumDepth
+        && candidate.growth < maximumSiteGrowth
+      ) {
+        site = candidate;
+        break;
+      }
+    }
+    if (!site) {
       const targetIndex = rng.fork(`decoy-target-${sites.length}`).integer(project.targets.length);
       const target = requireTarget(project, targetIndex);
-      const rootId = factory.block(`decoy-root-${sites.length}`);
       const state = getState(targetIndex);
+      const driverPlan = mode === 'no-preserve'
+        ? makeLiveGuardPlan(rng.fork(`decoy-driver-plan-${sites.length}`))
+        : undefined;
+      const guardGrowth = driverPlan ? driverPlan.growth + 1 : 5;
+      if (budget.remaining >= guardGrowth && remainingGrowth >= guardGrowth) {
+        site = driverPlan
+          ? createLiveRailDriver(target, targetIndex, state, factory, `decoy-${sites.length}`, driverPlan)
+          : createTopLevelGuard(target, targetIndex, state, factory, `decoy-${sites.length}`);
+        if (!budget.trySpend(guardGrowth, 3)) throw new Error('decoy guard budget changed during allocation');
+        remainingGrowth -= guardGrowth;
+        stats.decoysAdded += driverPlan ? liveGuardObjectGrowth(driverPlan, true) : 3;
+        sites.push(site);
+        continue;
+      }
+      const rootCost = chooseDecoyCost(
+        rng.fork(`decoy-root-cost-${decoyOrdinal}`),
+        Math.min(3, budget.remaining, remainingGrowth)
+      );
+      const rootId = factory.block(`decoy-root-${sites.length}`);
       target.blocks[rootId] = makeDecoyBlock(
         state,
-        1,
+        rootCost,
         null,
         null,
         true,
@@ -1389,34 +2085,37 @@ function fillDecoyBudget(
         vocabulary,
         rng.fork(`decoy-opcode-${decoyOrdinal}`)
       );
-      budget.trySpend(1, 3);
-      remainingGrowth -= 1;
+      if (!budget.trySpend(rootCost, 3)) throw new Error('decoy root budget changed during allocation');
+      remainingGrowth -= rootCost;
       stats.decoysAdded += 1;
       decoyOrdinal += 1;
-      site = {targetIndex, guardId: rootId, tailId: rootId, chainDepth: 1, growth: 1};
+      site = {targetIndex, guardId: rootId, tailId: rootId, chainDepth: 1, growth: rootCost};
       sites.push(site);
-      siteCursor += 1;
       continue;
     }
 
     const target = requireTarget(project, site.targetIndex);
     const state = getState(site.targetIndex);
     const maxCost = Math.min(3, budget.remaining, remainingGrowth, maximumSiteGrowth - site.growth);
-    const cost = chooseDecoyCost(rng.fork(`decoy-cost-${decoyOrdinal}`), maxCost);
+    const parentId = site.tailId ?? site.guardId;
+    const predecessor = requireBlock(target, parentId);
+    const useSeparator = mode === 'no-preserve' && isDecoyMutationOpcode(predecessor.opcode);
+    const cost = useSeparator ? 1 : chooseDecoyCost(rng.fork(`decoy-cost-${decoyOrdinal}`), maxCost);
     budget.trySpend(cost, 3);
     remainingGrowth -= cost;
     const id = factory.block(`decoy-${site.targetIndex}-${decoyOrdinal}`);
-    const parentId = site.tailId ?? site.guardId;
-    target.blocks[id] = makeDecoyBlock(
-      state,
-      cost,
-      parentId,
-      null,
-      false,
-      decoyOrdinal,
-      vocabulary,
-      rng.fork(`decoy-opcode-${decoyOrdinal}`)
-    );
+    target.blocks[id] = useSeparator
+      ? makePrivateSeparatorBlock(state, parentId, rng.fork(`decoy-separator-${decoyOrdinal}`))
+      : makeDecoyBlock(
+          state,
+          cost,
+          parentId,
+          null,
+          false,
+          decoyOrdinal,
+          vocabulary,
+          rng.fork(`decoy-opcode-${decoyOrdinal}`)
+        );
     if (site.tailId) {
       requireBlock(target, site.tailId).next = id;
     } else {
@@ -1427,13 +2126,41 @@ function fillDecoyBudget(
     site.growth += cost;
     stats.decoysAdded += 1;
     decoyOrdinal += 1;
-    siteCursor += 1;
   }
 }
 
 function chooseDecoyCost(rng: DeterministicGenerator, maximum: number): 1 | 2 | 3 {
   if (maximum <= 1) return 1;
   return (1 + rng.integer(maximum)) as 1 | 2 | 3;
+}
+
+function isDecoyMutationOpcode(opcode: string): opcode is DecoyOpcode {
+  return opcode === 'data_addtolist'
+    || opcode === 'data_changevariableby'
+    || opcode === 'data_deletealloflist'
+    || opcode === 'data_deleteoflist'
+    || opcode === 'data_insertatlist'
+    || opcode === 'data_replaceitemoflist'
+    || opcode === 'data_setvariableto';
+}
+
+function makePrivateSeparatorBlock(
+  state: PrivateState,
+  parent: string,
+  rng: DeterministicGenerator
+): ScratchBlock {
+  const hideVariable = rng.integer(2) === 0;
+  return {
+    opcode: hideVariable ? 'data_hidevariable' : 'data_hidelist',
+    next: null,
+    parent,
+    inputs: {},
+    fields: hideVariable
+      ? {VARIABLE: [state.variableName, state.variableId]}
+      : {LIST: [state.listName, state.listId]},
+    shadow: false,
+    topLevel: false
+  };
 }
 
 function makeDecoyBlock(
@@ -1509,6 +2236,15 @@ function makeDecoyBlock(
 
 function numericInput(value: number): ScratchInput {
   return numericInputString(String(value));
+}
+
+function blockEquivalentGrowth(block: ScratchBlock): number {
+  let growth = 1;
+  for (const input of Object.values(block.inputs)) {
+    if (Array.isArray(input[1])) growth += 1;
+    if (Array.isArray(input[2])) growth += 1;
+  }
+  return growth;
 }
 
 function numericInputString(value: string): ScratchInput {

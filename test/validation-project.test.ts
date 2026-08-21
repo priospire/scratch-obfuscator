@@ -265,6 +265,84 @@ describe('project validation', () => {
     expect(() => validateProject(valid)).not.toThrow();
   });
 
+  it('permits only recoverable inactive shadow ownership artifacts when requested', () => {
+    const project = minimalProject();
+    const target = fixtureTarget(project);
+    target.blocks = {
+      parent: {
+        opcode: 'looks_say', next: null, parent: null,
+        inputs: {MESSAGE: [3, 'active', 'fallback']}, fields: {},
+        shadow: false, topLevel: true, x: 0, y: 0
+      },
+      active: {
+        opcode: 'operator_join', next: null, parent: 'parent',
+        inputs: {STRING1: [1, [10, 'a']], STRING2: [1, [10, 'b']]}, fields: {},
+        shadow: false, topLevel: false
+      },
+      fallback: {
+        opcode: 'text', next: null, parent: null, inputs: {}, fields: {TEXT: ['hidden']},
+        shadow: true, topLevel: false
+      }
+    };
+
+    expect(() => validateProject(project)).toThrow(/non-top-level block must have an owning parent/);
+    expect(() => validateProject(project, {allowRecoverableInactiveShadowOwnership: true})).not.toThrow();
+
+    const topLevelShadow = structuredClone(project);
+    const repairedByLoader = fixtureTarget(topLevelShadow).blocks['fallback'];
+    if (!isScratchBlock(repairedByLoader)) throw new Error('fixture fallback missing');
+    repairedByLoader.topLevel = true;
+    repairedByLoader.x = 0;
+    repairedByLoader.y = 0;
+    expect(() => validateProject(topLevelShadow)).toThrow(/top-level block must not have an incoming block edge/);
+    expect(() => validateProject(topLevelShadow, {allowRecoverableInactiveShadowOwnership: true})).not.toThrow();
+
+    const executableShadow = structuredClone(project);
+    const executableHat = fixtureTarget(executableShadow).blocks['fallback'];
+    if (!isScratchBlock(executableHat)) throw new Error('fixture fallback missing');
+    executableHat.opcode = 'event_whenflagclicked';
+    executableHat.next = 'hatBody';
+    executableHat.inputs = {};
+    executableHat.fields = {};
+    executableHat.topLevel = true;
+    executableHat.x = 0;
+    executableHat.y = 0;
+    fixtureTarget(executableShadow).blocks['hatBody'] = {
+      opcode: 'looks_say', next: null, parent: 'fallback',
+      inputs: {MESSAGE: [1, [10, 'live']]}, fields: {},
+      shadow: false, topLevel: false
+    };
+    expect(() => validateProject(executableShadow, {allowRecoverableInactiveShadowOwnership: true}))
+      .toThrow(/top-level block must not have an incoming block edge/);
+
+    const activeFallback = structuredClone(project);
+    const activeParent = fixtureTarget(activeFallback).blocks['parent'];
+    if (!isScratchBlock(activeParent)) throw new Error('fixture parent missing');
+    activeParent.inputs['MESSAGE'] = [3, null, 'fallback'];
+    delete fixtureTarget(activeFallback).blocks['active'];
+    expect(() => validateProject(activeFallback, {allowRecoverableInactiveShadowOwnership: true}))
+      .toThrow(/non-top-level block must have an owning parent/);
+
+    const nonShadow = structuredClone(project);
+    const nonShadowBlock = fixtureTarget(nonShadow).blocks['fallback'];
+    if (!isScratchBlock(nonShadowBlock)) throw new Error('fixture fallback missing');
+    nonShadowBlock.shadow = false;
+    expect(() => validateProject(nonShadow, {allowRecoverableInactiveShadowOwnership: true}))
+      .toThrow(/non-top-level block must have an owning parent/);
+
+    const multiplyOwned = structuredClone(project);
+    const sharedFallback = fixtureTarget(multiplyOwned).blocks['fallback'];
+    if (!isScratchBlock(sharedFallback)) throw new Error('fixture fallback missing');
+    sharedFallback.parent = 'parent';
+    fixtureTarget(multiplyOwned).blocks['secondParent'] = {
+      opcode: 'looks_say', next: null, parent: null,
+      inputs: {MESSAGE: [3, [10, 'active'], 'fallback']}, fields: {},
+      shadow: false, topLevel: true, x: 10, y: 10
+    };
+    expect(() => validateProject(multiplyOwned, {allowRecoverableInactiveShadowOwnership: true}))
+      .toThrow(/multiple owners/);
+  });
+
   it('validates block fields and all typed symbol scopes', () => {
     const invalidFields: unknown[] = [null, [], ['a', null, 'extra'], [null], ['a', 4]];
     for (const field of invalidFields) {
@@ -364,10 +442,12 @@ describe('project validation', () => {
     expect(() => validateProject(broadcasts)).toThrow(/ambiguous name-only broadcast/);
   });
 
-  it('rejects duplicate symbol IDs across kinds and targets before VM loading can rebind them', () => {
+  it('rejects duplicate symbol IDs within runtime-visible scopes before VM loading can rebind them', () => {
     const sameTarget = minimalProject();
     fixtureTarget(sameTarget).lists['variable'] = ['colliding list', []];
     expect(() => validateProject(sameTarget)).toThrow(/duplicate project-wide symbol ID "variable"/);
+    expect(() => validateProject(sameTarget, {allowRecoverableLocalSymbolIdCollisions: true}))
+      .toThrow(/duplicate project-wide symbol ID "variable"/);
 
     for (const declaration of ['variable', 'list', 'broadcast'] as const) {
       const project = minimalProject();
@@ -381,7 +461,90 @@ describe('project validation', () => {
       sprite.blocks = {};
       project.targets.push(sprite);
       expect(() => validateProject(project)).toThrow(/duplicate project-wide symbol ID "variable"/);
+      expect(() => validateProject(project, {allowRecoverableLocalSymbolIdCollisions: true}))
+        .toThrow(/duplicate project-wide symbol ID "variable"/);
     }
+  });
+
+  it('accepts recoverable duplicate symbol IDs in separate sprite-local scopes only when requested', () => {
+    const project = minimalProject();
+    const makeSprite = (name: string, value: number): ScratchProject['targets'][number] => ({
+      ...structuredClone(fixtureTarget(project)),
+      isStage: false,
+      name,
+      variables: {shared_local_id: [`${name} value`, value]},
+      lists: {},
+      broadcasts: {},
+      blocks: {
+        reporter: {
+          ...plainBlock('data_variable'),
+          fields: {VARIABLE: [`${name} value`, 'shared_local_id']}
+        } as unknown as ScratchProject['targets'][number]['blocks'][string]
+      },
+      comments: {}
+    });
+    project.targets.push(makeSprite('First sprite', 1), makeSprite('Second sprite', 2));
+
+    expect(() => validateProject(project)).toThrow(/duplicate project-wide symbol ID "shared_local_id"/);
+    expect(() => validateProject(project, {allowRecoverableLocalSymbolIdCollisions: true})).not.toThrow();
+
+    const monitored = structuredClone(project);
+    monitored.monitors = [
+      {
+        opcode: 'data_variable', id: 'shared_local_id', params: {VARIABLE: 'First sprite value'},
+        spriteName: 'First sprite', value: 1, visible: true
+      },
+      {
+        opcode: 'data_variable', id: 'shared_local_id', params: {VARIABLE: 'Second sprite value'},
+        spriteName: 'Second sprite', value: 2, visible: true
+      }
+    ];
+    expect(() => validateProject(monitored, {allowRecoverableLocalSymbolIdCollisions: true}))
+      .toThrow(/data monitors for multiple owners and cannot be safely disambiguated/);
+
+    const sameOwner = structuredClone(project);
+    sameOwner.monitors = [
+      {
+        opcode: 'data_variable', id: 'shared_local_id', params: {VARIABLE: 'First sprite value'},
+        spriteName: 'First sprite', value: 1, visible: true
+      },
+      {
+        opcode: 'data_variable', id: 'shared_local_id', params: {VARIABLE: 'First sprite value'},
+        spriteName: 'First sprite', value: 1, visible: false
+      }
+    ];
+    const firstOwner = sameOwner.targets[1];
+    if (!firstOwner) throw new Error('fixture sprite missing');
+    firstOwner.blocks['show'] = {
+      ...plainBlock('data_showvariable'),
+      fields: {VARIABLE: ['First sprite value', 'shared_local_id']}
+    } as unknown as ScratchProject['targets'][number]['blocks'][string];
+    expect(() => validateProject(sameOwner, {allowRecoverableLocalSymbolIdCollisions: true})).not.toThrow();
+
+    const crossOwner = structuredClone(sameOwner);
+    const secondOwner = crossOwner.targets[2];
+    if (!secondOwner) throw new Error('fixture sprite missing');
+    secondOwner.blocks['show'] = {
+      ...plainBlock('data_showvariable'),
+      fields: {VARIABLE: ['Second sprite value', 'shared_local_id']}
+    } as unknown as ScratchProject['targets'][number]['blocks'][string];
+    expect(() => validateProject(crossOwner, {allowRecoverableLocalSymbolIdCollisions: true}))
+      .toThrow(/monitor visibility references for multiple owners and cannot be safely disambiguated/);
+
+    const crossOwnerMutators = structuredClone(project);
+    const firstMutatorOwner = crossOwnerMutators.targets[1];
+    const secondMutatorOwner = crossOwnerMutators.targets[2];
+    if (!firstMutatorOwner || !secondMutatorOwner) throw new Error('fixture sprites missing');
+    firstMutatorOwner.blocks['show'] = {
+      ...plainBlock('data_showvariable'),
+      fields: {VARIABLE: ['First sprite value', 'shared_local_id']}
+    } as unknown as ScratchProject['targets'][number]['blocks'][string];
+    secondMutatorOwner.blocks['hide'] = {
+      ...plainBlock('data_hidevariable'),
+      fields: {VARIABLE: ['Second sprite value', 'shared_local_id']}
+    } as unknown as ScratchProject['targets'][number]['blocks'][string];
+    expect(() => validateProject(crossOwnerMutators, {allowRecoverableLocalSymbolIdCollisions: true}))
+      .toThrow(/monitor visibility references for multiple owners and cannot be safely disambiguated/);
   });
 
   it('rejects implicit-ID collisions and field coalescing performed by the Scratch loader', () => {
@@ -457,6 +620,31 @@ describe('project validation', () => {
       {opcode: 'motion_xposition', id: 'x', params: {}}
     ];
     expect(() => validateProject(project)).not.toThrow();
+  });
+
+  it('permits only stale invisible data monitors for missing sprites when requested', () => {
+    const project = minimalProject();
+    project.monitors = [{
+      opcode: 'data_variable', id: 'old-local-id', params: {VARIABLE: 'i'},
+      spriteName: 'Deleted Sprite', value: 0, visible: false
+    }];
+
+    expect(() => validateProject(project)).toThrow(/dangling monitored variable/);
+    expect(() => validateProject(project, {allowRecoverableStaleInvisibleMonitors: true})).not.toThrow();
+
+    const malformed = structuredClone(project);
+    const malformedMonitor = malformed.monitors[0];
+    if (!malformedMonitor) throw new Error('fixture monitor missing');
+    malformedMonitor['params'] = {VARIABLE: 3};
+    expect(() => validateProject(malformed, {allowRecoverableStaleInvisibleMonitors: true}))
+      .toThrow(/expected a string/);
+
+    const visible = structuredClone(project);
+    const monitor = visible.monitors[0];
+    if (!monitor) throw new Error('fixture monitor missing');
+    monitor['visible'] = true;
+    expect(() => validateProject(visible, {allowRecoverableStaleInvisibleMonitors: true}))
+      .toThrow(/dangling monitored variable/);
   });
 
   it('rejects duplicate declarations and unknown opcode prefixes', () => {

@@ -5,6 +5,9 @@ import {unzipSync, zipSync} from 'fflate';
 import {afterEach, describe, expect, it} from 'vitest';
 import {parseCliArguments, runCli} from '../src/cli.js';
 import {UsageError} from '../src/errors.js';
+import {isScratchBlock} from '../src/model/blocks.js';
+import {validateProject} from '../src/validation/index.js';
+import {createFixtureArchive, createFixtureProject, readProjectFromArchive} from './support.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -119,5 +122,51 @@ describe('CLI archive integration', () => {
     expect(output.join('')).toMatch(/packed=\d+, folded=\d+, fallbacks=\d+/u);
     expect(await runCli([input, '-o', first], io)).toBe(2);
     expect(errors.join('')).toContain('output already exists');
+  });
+
+  it('normalizes recoverable editor artifacts before strict no-preserve output validation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'scratch-obfuscator-cli-compat-'));
+    temporaryDirectories.push(directory);
+    const input = join(directory, 'editor-artifacts.sb3');
+    const output = join(directory, 'output.sb3');
+    const project = createFixtureProject();
+    const stage = project.targets[0];
+    const firstSprite = project.targets[1];
+    const setter = stage?.blocks['set_score'];
+    if (!stage || !firstSprite || !isScratchBlock(setter)) throw new Error('fixture blocks missing');
+
+    setter.inputs['VALUE'] = [3, 'activeValue', 'inactiveShadow'];
+    stage.blocks['activeValue'] = {
+      opcode: 'operator_add', next: null, parent: 'set_score',
+      inputs: {NUM1: [1, [4, 40]], NUM2: [1, [4, 2]]}, fields: {},
+      shadow: false, topLevel: false
+    };
+    stage.blocks['inactiveShadow'] = {
+      opcode: 'math_number', next: null, parent: null,
+      inputs: {}, fields: {NUM: ['hidden']}, shadow: true, topLevel: false
+    };
+    const secondSprite = structuredClone(firstSprite);
+    secondSprite.name = 'Second Sprite';
+    secondSprite.variables = {local_score: ['Second local', 30]};
+    project.targets.push(secondSprite);
+    project.monitors.push({
+      opcode: 'data_variable', id: 'old-local-id', params: {VARIABLE: 'i'},
+      spriteName: 'Deleted Sprite', value: 0, visible: false,
+      mode: 'default', width: 0, height: 0, x: 0, y: 0,
+      sliderMin: 0, sliderMax: 100, isDiscrete: true
+    });
+    await writeFile(input, createFixtureArchive(project));
+
+    const diagnostics: string[] = [];
+    const code = await runCli([input, '-no-preserve', '-o', output], {
+      stdout: () => undefined,
+      stderr: text => diagnostics.push(text)
+    });
+
+    expect(code, diagnostics.join('')).toBe(0);
+    expect(diagnostics.join('')).toContain('Removed 1 stale invisible data monitor for a missing sprite.');
+    const transformed = readProjectFromArchive(await readFile(output));
+    expect(transformed.monitors.some(monitor => monitor['spriteName'] === 'Deleted Sprite')).toBe(false);
+    validateProject(transformed);
   });
 });

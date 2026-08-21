@@ -10,6 +10,8 @@ const ASCII_OPAQUE = new RegExp(`^x_[${OPAQUE_ALPHABET}](?:[${OPAQUE_ALPHABET}]{
 const INVISIBLE_OPAQUE = /^\u2063[\u200b\u2060]{32,}$/u;
 const PRIVATE_USE_OPAQUE = new RegExp(`^\\ue000[0-9a-z]+_x_[${OPAQUE_ALPHABET}]{18}$`, 'u');
 const SENTINEL_TOKEN = /^[!#$%*+\-./:;=?@^_~]{32}$/u;
+const LIVE_SENSING_OPCODES = new Set(['sensing_answer', 'sensing_mousex', 'sensing_mousey', 'sensing_timer']);
+const LIVE_CONDITION_OPCODES = new Set(['operator_contains', 'operator_equals', 'operator_gt', 'operator_lt']);
 
 const [
   fixturePath,
@@ -68,12 +70,19 @@ for (const output of outputs) {
   assertOpaqueSymbolNames(archive.project, label);
   assertStaticOptimization(archive.project, mode, label);
   assertVariablePacking(archive.project, mode, label);
-  if (mode === 'no-preserve') assertNoPreserveVirtualization(archive.project, label);
+  if (mode === 'lossy') assertLossyEventSurface(fixture.project, archive.project, antiCheat, label);
+  if (mode === 'no-preserve') {
+    assertNoPreserveVirtualization(archive.project, label);
+    assertNoPreserveCoherentSystems(archive.project, label);
+    if (!antiCheat) assertNoPreserveSiteCaps(archive.project, label);
+  }
+  let antiCheatGrowth = 0;
   if (antiCheat) {
-    assertAntiCheat(archive.project, label);
+    antiCheatGrowth = assertAntiCheat(archive.project, label);
   } else {
     assertNoAntiCheat(archive.project, label);
   }
+  assertGrowthCap(fixture.project, archive.project, mode, antiCheatGrowth, label);
 }
 
 process.stdout.write('Release fixture assertions passed for all six mode and anti-cheat combinations.\n');
@@ -219,6 +228,7 @@ function assertOpaqueSymbolNames(project, label) {
     for (const declaration of [...Object.values(target.variables), ...Object.values(target.lists)]) {
       if (typeof declaration?.[0] === 'string') symbolNames.push(declaration[0]);
     }
+    symbolNames.push(...Object.values(target.broadcasts).filter(name => typeof name === 'string'));
     for (const block of Object.values(target.blocks)) {
       const code = isObjectBlock(block) ? block.mutation?.proccode : undefined;
       if (typeof code === 'string') procedureCodes.push(code);
@@ -233,6 +243,35 @@ function assertOpaqueSymbolNames(project, label) {
     assert(name.normalize('NFC') === name, `${label} has a non-NFC symbol name`);
   }
   assert(new Set(symbolNames).size === symbolNames.length, `${label} has duplicate generated symbol names`);
+}
+
+function assertLossyEventSurface(original, transformed, antiCheat, label) {
+  const originalHats = objectBlocks(original).filter(entry => entry.block.topLevel && isExecutableHat(entry.block.opcode));
+  const transformedHats = objectBlocks(transformed).filter(entry => entry.block.topLevel && isExecutableHat(entry.block.opcode));
+  assert(originalHats.length === 1 && originalHats[0]?.block.opcode === 'event_whenflagclicked',
+    `${label} fixture event surface is not the expected single green-flag hat`);
+  assert(transformedHats.length === originalHats.length + (antiCheat ? 1 : 0),
+    `${label} added a lossy event hat`);
+  assert(transformedHats.every(entry => entry.block.opcode === 'event_whenflagclicked'),
+    `${label} added a lossy event receiver`);
+  assert(transformed.targets.every(target => Object.keys(target.broadcasts).length === 0),
+    `${label} added a lossy broadcast declaration`);
+  assert(!objectBlocks(transformed).some(entry =>
+    entry.block.opcode === 'event_broadcast' || entry.block.opcode === 'event_broadcastandwait'),
+  `${label} added a lossy broadcast command`);
+}
+
+function assertGrowthCap(original, transformed, mode, antiCheatGrowth, label) {
+  const initial = countBlockEquivalents(original);
+  const transformedCount = countBlockEquivalents(transformed);
+  const aggressiveCount = transformedCount - antiCheatGrowth;
+  assert(Number.isInteger(aggressiveCount) && aggressiveCount >= 0, `${label} has invalid anti-cheat cap accounting`);
+  const cap = mode === 'lossless'
+    ? initial
+    : mode === 'lossy'
+      ? Math.max(initial, Math.min(initial * 4, 50_000))
+      : Math.max(initial, Math.min((initial * 25) + 512, 100_000));
+  assert(aggressiveCount <= cap, `${label} exceeded its block-equivalent cap (${aggressiveCount} > ${cap})`);
 }
 
 function isOpaqueName(name) {
@@ -270,6 +309,220 @@ function assertNoPreserveVirtualization(project, label) {
   }), `${label} dispatcher is not keyed by an encoded program-counter variable`);
 }
 
+function assertNoPreserveCoherentSystems(project, label) {
+  const stage = project.targets.find(target => target.isStage);
+  assert(stage, `${label} has no Stage`);
+  const channelIds = new Set(Object.keys(stage.broadcasts));
+  assert(channelIds.size > 0, `${label} has no coherent broadcast channels`);
+
+  const references = broadcastReferenceCounts(project);
+  for (const id of channelIds) {
+    assert((references.sent.get(id) ?? 0) > 0, `${label} generated broadcast ${id} has no sender`);
+    assert((references.received.get(id) ?? 0) > 0, `${label} generated broadcast ${id} has no receiver`);
+  }
+  assert([...references.received.keys()].every(id => (references.sent.get(id) ?? 0) > 0),
+    `${label} has an unpaired receiver hat`);
+
+  const sponsorAudit = auditLiveSponsorGuards(project, label);
+  assert(sponsorAudit.guards > 0, `${label} has no runtime-dependent sponsor guard`);
+  assert(sponsorAudit.strongGuards === sponsorAudit.guards, `${label} has a statically decidable sponsor guard`);
+  assert([...channelIds].every(id => sponsorAudit.sponsoredChannels.has(id)),
+    `${label} has a broadcast channel without a runtime-dependent entry sender`);
+
+  const coherentCodesByTarget = project.targets.map(target => coherentProcedureDefinitions(target));
+  const receiverEntries = objectBlocks(project).filter(entry => entry.block.opcode === 'event_whenbroadcastreceived');
+  assert(receiverEntries.length >= channelIds.size, `${label} has too few coherent receiver hats`);
+  for (const receiver of receiverEntries) {
+    const target = project.targets[receiver.targetIndex];
+    const codes = linearProcedureCodes(target, receiver.id);
+    assert(codes.some(code => coherentCodesByTarget[receiver.targetIndex].has(code)),
+      `${label} receiver ${receiver.id} does not reach a coherent custom procedure`);
+  }
+  const coherentCodeCount = coherentCodesByTarget.reduce((count, codes) => count + codes.size, 0);
+  assert(coherentCodeCount >= channelIds.size, `${label} has too few coherent custom procedures`);
+
+  const opcodes = new Set(objectBlocks(project).map(entry => entry.block.opcode));
+  for (const opcode of [
+    'control_wait',
+    'data_addtolist',
+    'data_itemoflist',
+    'data_lengthoflist',
+    'data_variable',
+    'event_broadcast',
+    'event_whenbroadcastreceived',
+    'operator_join',
+    'operator_or',
+    'procedures_call',
+    'procedures_definition'
+  ]) {
+    assert(opcodes.has(opcode), `${label} coherent graph is missing ${opcode}`);
+  }
+}
+
+function auditLiveSponsorGuards(project, label) {
+  let guards = 0;
+  let strongGuards = 0;
+  const sponsoredChannels = new Set();
+  for (const target of project.targets) {
+    for (const [guardId, guard] of Object.entries(target.blocks)) {
+      if (!isObjectBlock(guard) || guard.opcode !== 'control_if' || typeof guard.parent !== 'string') continue;
+      const update = target.blocks[guard.parent];
+      if (!isObjectBlock(update) || update.opcode !== 'data_changevariableby') continue;
+      guards += 1;
+      const conditionId = activeReference(guard.inputs?.CONDITION);
+      const condition = conditionId ? target.blocks[conditionId] : undefined;
+      const conditionIds = new Set();
+      if (conditionId) collectReferencedBlockIds(target, conditionId, conditionIds);
+      const sensing = [...conditionIds].filter(id => LIVE_SENSING_OPCODES.has(target.blocks[id]?.opcode));
+      const stateId = update.fields?.VARIABLE?.[1];
+      const readsUpdatedState = [...conditionIds].some(id => {
+        const block = target.blocks[id];
+        return isObjectBlock(block) && block.opcode === 'data_variable' && block.fields?.VARIABLE?.[1] === stateId;
+      });
+      if (isObjectBlock(condition) && LIVE_CONDITION_OPCODES.has(condition.opcode) && sensing.length === 1 && readsUpdatedState) {
+        strongGuards += 1;
+      }
+
+      const visited = new Set();
+      let chainId = activeReference(guard.inputs?.SUBSTACK);
+      while (typeof chainId === 'string' && !visited.has(chainId)) {
+        visited.add(chainId);
+        const block = target.blocks[chainId];
+        if (!isObjectBlock(block)) break;
+        const broadcastId = broadcastCommandId(block);
+        if (broadcastId) sponsoredChannels.add(broadcastId);
+        chainId = block.next;
+      }
+      assert(guardId !== update.parent, `${label} has a cyclic sponsor guard`);
+    }
+  }
+  return {guards, strongGuards, sponsoredChannels};
+}
+
+function coherentProcedureDefinitions(target) {
+  const result = new Map();
+  for (const [id, block] of Object.entries(target.blocks)) {
+    if (!isObjectBlock(block) || block.opcode !== 'procedures_definition') continue;
+    const prototypeId = activeReference(block.inputs?.custom_block);
+    const prototype = prototypeId ? target.blocks[prototypeId] : undefined;
+    const code = isObjectBlock(prototype) ? prototype.mutation?.proccode : undefined;
+    if (typeof code !== 'string') continue;
+    const ids = new Set();
+    collectReferencedBlockIds(target, id, ids);
+    const opcodes = new Set([...ids].map(blockId => target.blocks[blockId]?.opcode));
+    if (['data_addtolist', 'data_itemoflist', 'operator_join', 'operator_or'].every(opcode => opcodes.has(opcode))) {
+      result.set(code, id);
+    }
+  }
+  return result;
+}
+
+function linearProcedureCodes(target, rootId) {
+  const codes = [];
+  const visited = new Set();
+  let id = rootId;
+  while (typeof id === 'string' && !visited.has(id)) {
+    visited.add(id);
+    const block = target.blocks[id];
+    if (!isObjectBlock(block)) break;
+    const code = block.opcode === 'procedures_call' ? block.mutation?.proccode : undefined;
+    if (typeof code === 'string') codes.push(code);
+    id = block.next;
+  }
+  return codes;
+}
+
+function assertNoPreserveSiteCaps(project, label) {
+  const definitions = project.targets.map(target => coherentProcedureDefinitions(target));
+  const receivers = project.targets.map(target => Object.entries(target.blocks)
+    .filter(([, block]) => isObjectBlock(block) && block.opcode === 'event_whenbroadcastreceived')
+    .map(([id, block]) => ({id, block})));
+  const componentGrowths = [];
+  const siteGrowths = [];
+
+  for (const [targetIndex, target] of project.targets.entries()) {
+    for (const [guardId, guard] of Object.entries(target.blocks)) {
+      if (!isObjectBlock(guard) || guard.opcode !== 'control_if' || typeof guard.parent !== 'string') continue;
+      const update = target.blocks[guard.parent];
+      if (!isObjectBlock(update) || update.opcode !== 'data_changevariableby') continue;
+      const conditionId = activeReference(guard.inputs?.CONDITION);
+      if (!conditionId) continue;
+      const conditionIds = new Set();
+      collectReferencedBlockIds(target, conditionId, conditionIds);
+      if (![...conditionIds].some(id => LIVE_SENSING_OPCODES.has(target.blocks[id]?.opcode))) continue;
+
+      const siteIds = new Set([guardId, guard.parent, ...conditionIds]);
+      const parent = update.parent;
+      const parentBlock = typeof parent === 'string' ? target.blocks[parent] : undefined;
+      if (isObjectBlock(parentBlock) && parentBlock.topLevel && parentBlock.opcode === 'event_whenflagclicked') {
+        siteIds.add(parent);
+      }
+      const visited = new Set();
+      let chainId = activeReference(guard.inputs?.SUBSTACK);
+      while (typeof chainId === 'string' && !visited.has(chainId)) {
+        visited.add(chainId);
+        const block = target.blocks[chainId];
+        if (!isObjectBlock(block)) break;
+        const broadcastId = broadcastCommandId(block);
+        const component = broadcastId
+          ? coherentComponentIds(target, chainId, broadcastId, receivers[targetIndex], definitions[targetIndex])
+          : undefined;
+        if (component) {
+          for (const id of component) siteIds.add(id);
+          componentGrowths.push(equivalentGrowth(target, component));
+        } else {
+          siteIds.add(chainId);
+          collectInputReferencedBlockIds(target, block, siteIds);
+        }
+        chainId = block.next;
+      }
+      siteGrowths.push(equivalentGrowth(target, siteIds));
+    }
+  }
+  assert(componentGrowths.length > 0, `${label} has no attributable coherent components`);
+  assert(componentGrowths.every(growth => growth <= 56), `${label} has an oversized coherent component`);
+  assert(siteGrowths.every(growth => growth <= 256), `${label} exceeded a 256-equivalent no-preserve site cap`);
+}
+
+function coherentComponentIds(target, senderId, broadcastId, receivers, definitions) {
+  const receiverCandidates = receivers.filter(entry => entry.block.fields?.BROADCAST_OPTION?.[1] === broadcastId);
+  const entry = receiverCandidates.find(candidate => {
+    const path = linearBlocks(target, candidate.id);
+    return !path.some(({block}) => block.opcode === 'control_wait') &&
+      path.some(({block}) => block.opcode === 'procedures_call' && definitions.has(block.mutation?.proccode));
+  });
+  if (!entry) return undefined;
+  const entryPath = linearBlocks(target, entry.id);
+  const code = entryPath.find(({block}) =>
+    block.opcode === 'procedures_call' && definitions.has(block.mutation?.proccode))?.block.mutation?.proccode;
+  const definitionId = typeof code === 'string' ? definitions.get(code) : undefined;
+  const continuation = receivers.find(candidate => {
+    const path = linearBlocks(target, candidate.id);
+    return path.some(({block}) => block.opcode === 'control_wait') &&
+      path.some(({block}) => block.opcode === 'procedures_call' && block.mutation?.proccode === code);
+  });
+  if (!definitionId || !continuation) return undefined;
+  const ids = new Set([senderId]);
+  collectReferencedBlockIds(target, entry.id, ids);
+  collectReferencedBlockIds(target, definitionId, ids);
+  collectReferencedBlockIds(target, continuation.id, ids);
+  return ids;
+}
+
+function linearBlocks(target, rootId) {
+  const result = [];
+  const visited = new Set();
+  let id = rootId;
+  while (typeof id === 'string' && !visited.has(id)) {
+    visited.add(id);
+    const block = target.blocks[id];
+    if (!isObjectBlock(block)) break;
+    result.push({id, block});
+    id = block.next;
+  }
+  return result;
+}
+
 function assertAntiCheat(project, label) {
   const stage = project.targets.find(target => target.isStage);
   assert(stage, `${label} has no Stage`);
@@ -280,7 +533,7 @@ function assertAntiCheat(project, label) {
   const stageBlocks = Object.entries(stage.blocks)
     .filter(([, block]) => isObjectBlock(block))
     .map(([id, block]) => ({id, block}));
-  const hats = stageBlocks.filter(({block}) => block.topLevel && block.opcode === 'event_whenflagclicked');
+  const hats = stageBlocks.filter(entry => isWatchdogHat(stage, entry));
   assert(hats.length === 1, `${label} must contain exactly one Stage watchdog hat`);
   const hat = hats[0];
   const forever = requireNextBlock(stage, hat, 'control_forever', label);
@@ -318,7 +571,7 @@ function assertAntiCheat(project, label) {
   }
   assert(SENTINEL_TOKEN.test(String(latchDeclaration[1])) && SENTINEL_TOKEN.test(trippedValue), `${label} latch tokens are invalid`);
 
-  const eventGuardSetters = assertEveryOriginalHatIsGuarded(
+  const eventGuards = assertEveryOriginalHatIsGuarded(
     project,
     hat,
     protectedSentinels,
@@ -327,13 +580,14 @@ function assertAntiCheat(project, label) {
     trippedValue,
     label
   );
-  const allowedLatchSetters = new Set([setter.id, ...eventGuardSetters]);
+  const allowedLatchSetters = new Set([setter.id, ...eventGuards.setterIds]);
   const latchMutators = objectBlocks(project).filter(({block}) => {
     const variableId = block.fields?.VARIABLE?.[1];
     return variableId === latchId && (block.opcode === 'data_setvariableto' || block.opcode === 'data_changevariableby');
   });
   assert(latchMutators.length === allowedLatchSetters.size &&
     latchMutators.every(mutator => allowedLatchSetters.has(mutator.id)), `${label} resets or otherwise mutates its latch`);
+  return 45 + (45 * eventGuards.guardedTargetCount) + eventGuards.guardedHatCount;
 }
 
 function assertEveryOriginalHatIsGuarded(
@@ -347,7 +601,7 @@ function assertEveryOriginalHatIsGuarded(
 ) {
   const guardedHats = objectBlocks(project).filter(entry =>
     entry.id !== watchdogHat.id && entry.block.topLevel && isExecutableHat(entry.block.opcode));
-  assert(guardedHats.length === 1, `${label} release fixture has an unexpected guarded-hat count`);
+  assert(guardedHats.length > 0, `${label} release fixture has no guarded executable hats`);
   const setterIds = [];
 
   for (const hat of guardedHats) {
@@ -385,7 +639,11 @@ function assertEveryOriginalHatIsGuarded(
     const continuation = target.blocks[call.next];
     assert(isObjectBlock(continuation) && continuation.parent === callId, `${label} session-lock continuation is disconnected`);
   }
-  return setterIds;
+  return {
+    setterIds,
+    guardedHatCount: guardedHats.length,
+    guardedTargetCount: new Set(guardedHats.map(hat => hat.targetIndex)).size
+  };
 }
 
 function inspectMismatchCondition(target, rootId, label) {
@@ -448,9 +706,26 @@ function assertWatermark(project, label) {
 function assertNoAntiCheat(project, label) {
   const stage = project.targets.find(target => target.isStage);
   assert(stage, `${label} has no Stage`);
-  const watchdogHats = Object.values(stage.blocks).filter(block =>
-    isObjectBlock(block) && block.topLevel && block.opcode === 'event_whenflagclicked');
+  const watchdogHats = Object.entries(stage.blocks)
+    .filter(([, block]) => isObjectBlock(block))
+    .map(([id, block]) => ({id, block}))
+    .filter(entry => isWatchdogHat(stage, entry));
   assert(watchdogHats.length === 0, `${label} enabled the anti-cheat watchdog without the flag`);
+}
+
+function isWatchdogHat(target, entry) {
+  const hat = entry.block;
+  if (!hat.topLevel || hat.opcode !== 'event_whenflagclicked' || typeof hat.next !== 'string') return false;
+  const forever = target.blocks[hat.next];
+  if (!isObjectBlock(forever) || forever.opcode !== 'control_forever') return false;
+  const guardId = activeReference(forever.inputs?.SUBSTACK);
+  const guard = guardId ? target.blocks[guardId] : undefined;
+  if (!isObjectBlock(guard) || guard.opcode !== 'control_if') return false;
+  const setterId = activeReference(guard.inputs?.SUBSTACK);
+  const setter = setterId ? target.blocks[setterId] : undefined;
+  const stop = isObjectBlock(setter) && typeof setter.next === 'string' ? target.blocks[setter.next] : undefined;
+  return isObjectBlock(setter) && setter.opcode === 'data_setvariableto' &&
+    isObjectBlock(stop) && stop.opcode === 'control_stop' && stop.fields?.STOP_OPTION?.[0] === 'all';
 }
 
 function requireNextBlock(target, entry, opcode, label) {
@@ -570,6 +845,95 @@ function collectStrings(value, found = new Set()) {
     collectStrings(item, found);
   }
   return found;
+}
+
+function broadcastReferenceCounts(project) {
+  const sent = new Map();
+  const received = new Map();
+  for (const {block} of objectBlocks(project)) {
+    const sentId = broadcastCommandId(block);
+    if (sentId) sent.set(sentId, (sent.get(sentId) ?? 0) + 1);
+    if (block.opcode === 'event_whenbroadcastreceived') {
+      const receivedId = block.fields?.BROADCAST_OPTION?.[1];
+      if (typeof receivedId === 'string') received.set(receivedId, (received.get(receivedId) ?? 0) + 1);
+    }
+  }
+  return {sent, received};
+}
+
+function broadcastCommandId(block) {
+  if (block.opcode !== 'event_broadcast' && block.opcode !== 'event_broadcastandwait') return undefined;
+  const primitive = block.inputs?.BROADCAST_INPUT?.[1];
+  return Array.isArray(primitive) && typeof primitive[2] === 'string' ? primitive[2] : undefined;
+}
+
+function collectReferencedBlockIds(target, rootId, found) {
+  const queue = [rootId];
+  while (queue.length > 0) {
+    const id = queue.pop();
+    if (typeof id !== 'string' || found.has(id)) continue;
+    const block = target.blocks[id];
+    if (!isObjectBlock(block)) continue;
+    found.add(id);
+    if (typeof block.next === 'string') queue.push(block.next);
+    for (const input of Object.values(block.inputs ?? {})) {
+      if (!Array.isArray(input)) continue;
+      for (let index = 1; index < input.length; index += 1) {
+        if (typeof input[index] === 'string') queue.push(input[index]);
+      }
+    }
+  }
+}
+
+function collectInputReferencedBlockIds(target, root, found) {
+  const queue = [root];
+  const visited = new Set();
+  while (queue.length > 0) {
+    const block = queue.pop();
+    if (!isObjectBlock(block) || visited.has(block)) continue;
+    visited.add(block);
+    for (const input of Object.values(block.inputs ?? {})) {
+      if (!Array.isArray(input)) continue;
+      for (let index = 1; index < input.length; index += 1) {
+        const id = input[index];
+        const child = typeof id === 'string' ? target.blocks[id] : undefined;
+        if (typeof id === 'string' && isObjectBlock(child)) {
+          found.add(id);
+          queue.push(child);
+        }
+      }
+    }
+  }
+}
+
+function equivalentGrowth(target, ids) {
+  let growth = 0;
+  for (const id of ids) {
+    const block = target.blocks[id];
+    if (!isObjectBlock(block)) continue;
+    growth += blockEquivalentContribution(block);
+  }
+  return growth;
+}
+
+function blockEquivalentContribution(block) {
+  let growth = 1;
+  for (const input of Object.values(block.inputs ?? {})) {
+    if (Array.isArray(input?.[1])) growth += 1;
+    if (Array.isArray(input?.[2])) growth += 1;
+  }
+  return growth;
+}
+
+function countBlockEquivalents(project) {
+  let count = 0;
+  for (const target of project.targets) {
+    for (const block of Object.values(target.blocks)) {
+      count += 1;
+      if (isObjectBlock(block)) count += blockEquivalentContribution(block) - 1;
+    }
+  }
+  return count;
 }
 
 function assertAssetsEqual(original, transformed, label) {

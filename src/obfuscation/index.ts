@@ -31,7 +31,11 @@ export function obfuscateProject(
   if (options.antiCheat !== undefined && typeof options.antiCheat !== 'boolean') {
     throw new InputError('antiCheat must be a boolean');
   }
-  validateProject(project);
+  validateProject(project, {
+    allowRecoverableLocalSymbolIdCollisions: true,
+    allowRecoverableInactiveShadowOwnership: true,
+    allowRecoverableStaleInvisibleMonitors: true
+  });
   const output = cloneProject(project);
   const blocksBefore = countBlockEquivalents(output);
   const stats: ObfuscationStats = {
@@ -57,6 +61,12 @@ export function obfuscateProject(
   stats.constantsFolded = optimized.reporterTreesFolded;
   stats.inactiveFallbacksRemoved = optimized.inactiveFallbacksRemoved;
   stats.commentsRemoved += optimized.commentsRemoved;
+  if (optimized.staleInvisibleMonitorsRemoved > 0) {
+    const suffix = optimized.staleInvisibleMonitorsRemoved === 1 ? '' : 's';
+    stats.warnings.push(
+      `Removed ${optimized.staleInvisibleMonitorsRemoved} stale invisible data monitor${suffix} for a missing sprite.`
+    );
+  }
   applyCommonTransforms(output, generator.fork('common'), stats);
   if (mode !== 'lossless') applyAggressiveTransforms(output, mode, generator.fork('aggressive'), stats);
   const cleaned = applySafeOptimizations(output, {foldConstants: false});

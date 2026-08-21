@@ -79,6 +79,63 @@ describe('common lossless transforms', () => {
     validateProject(result.project);
   });
 
+  it('normalizes an inactive object-shadow with serializer-style null ownership', () => {
+    const source = projectFixture();
+    const stage = source.targets[0];
+    const say = stage?.blocks['say'];
+    if (!stage || !isScratchBlock(say)) throw new Error('fixture blocks missing');
+    say.inputs['MESSAGE'] = [3, 'variable', 'orphanShadow'];
+    stage.blocks['orphanShadow'] = {
+      opcode: 'text', next: null, parent: null, inputs: {}, fields: {TEXT: ['hidden fallback']},
+      shadow: true, topLevel: true, x: 0, y: 0
+    };
+
+    expect(() => validateProject(source)).toThrow(/top-level block must not have an incoming block edge/);
+    const result = obfuscateProject(source, 'lossless', new Uint8Array(32).fill(12));
+
+    expect(result.project.targets[0]?.blocks['orphanShadow']).toBeUndefined();
+    expect(result.stats.inactiveFallbacksRemoved).toBe(1);
+    validateProject(result.project);
+  });
+
+  it('disambiguates duplicate local symbol IDs from separate sprites before strict output validation', () => {
+    const source = projectFixture();
+    const first = source.targets[1];
+    if (!first) throw new Error('fixture sprite missing');
+    first.variables = {shared_local_id: ['First local', 1]};
+    first.blocks = {
+      firstReporter: {
+        opcode: 'data_variable', next: null, parent: null, inputs: {},
+        fields: {VARIABLE: ['First local', 'shared_local_id']},
+        shadow: false, topLevel: true, x: 1, y: 1
+      }
+    };
+    const second = structuredClone(first);
+    second.name = 'Sprite2';
+    second.variables = {shared_local_id: ['Second local', 2]};
+    const secondReporter = second.blocks['firstReporter'];
+    if (!secondReporter || !isScratchBlock(secondReporter)) throw new Error('fixture reporter missing');
+    secondReporter.fields['VARIABLE'] = ['Second local', 'shared_local_id'];
+    source.targets.push(second);
+    const before = JSON.stringify(source);
+
+    const result = obfuscateProject(source, 'lossless', new Uint8Array(32).fill(0x4d));
+
+    expect(JSON.stringify(source)).toBe(before);
+    validateProject(result.project);
+    const transformedSprites = result.project.targets.filter(target => !target.isStage);
+    const localIds = transformedSprites.map(target => Object.keys(target.variables)[0]);
+    expect(new Set(localIds).size).toBe(2);
+    expect(localIds.every(id => typeof id === 'string' && id.startsWith('v_'))).toBe(true);
+    for (let index = 0; index < transformedSprites.length; index += 1) {
+      const target = transformedSprites[index];
+      const localId = localIds[index];
+      if (!target || !localId) throw new Error('transformed local symbol missing');
+      const reporter = Object.values(target.blocks).find(value => isScratchBlock(value) && value.opcode === 'data_variable');
+      expect(reporter && isScratchBlock(reporter) ? reporter.fields['VARIABLE']?.[1] : undefined).toBe(localId);
+    }
+  });
+
   it.each<ObfuscationMode>(['lossy', 'no-preserve'])('returns a valid bounded project in %s mode', mode => {
     const source = projectFixture();
     const result = obfuscateProject(source, mode, new Uint8Array(32).fill(29));

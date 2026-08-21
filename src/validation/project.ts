@@ -9,6 +9,50 @@ type SymbolKind = 'variable' | 'list' | 'broadcast';
 type NameResolution = 'unique' | 'missing' | 'ambiguous';
 type RegisterImplicitReference = (kind: SymbolKind, name: string, effectiveId: string, path: string, isDynamicPrimitive: boolean) => void;
 
+export interface ProjectValidationOptions {
+  readonly allowRecoverableLocalSymbolIdCollisions?: boolean;
+  readonly allowRecoverableInactiveShadowOwnership?: boolean;
+  readonly allowRecoverableStaleInvisibleMonitors?: boolean;
+}
+
+interface SymbolLocation {
+  readonly kind: SymbolKind;
+  readonly path: string;
+  readonly targetIndex: number;
+  readonly isStage: boolean;
+}
+
+const RECOVERABLE_TOP_LEVEL_SHADOW_OPCODES = new Set([
+  'argument_editor_boolean',
+  'argument_editor_string_number',
+  'colour_picker',
+  'control_create_clone_of_menu',
+  'data_listindexall',
+  'data_listindexrandom',
+  'event_broadcast_menu',
+  'event_touchingobjectmenu',
+  'looks_backdrops',
+  'looks_costume',
+  'math_angle',
+  'math_integer',
+  'math_number',
+  'math_positive_number',
+  'math_whole_number',
+  'matrix',
+  'motion_glideto_menu',
+  'motion_goto_menu',
+  'motion_pointtowards_menu',
+  'note',
+  'sensing_distancetomenu',
+  'sensing_keyoptions',
+  'sensing_of_object_menu',
+  'sensing_touchingobjectmenu',
+  'sound_beats_menu',
+  'sound_effects_menu',
+  'sound_sounds_menu',
+  'text'
+]);
+
 function fail(path: string, message: string): never {
   throw new InputError(`${path}: ${message}`);
 }
@@ -189,10 +233,14 @@ function validateNoExecutableCycles(target: ScratchTarget, targetIndex: number):
   for (const id of Object.keys(target.blocks)) visit(id);
 }
 
-function validateGraphOwnership(target: ScratchTarget, targetIndex: number): void {
+function validateGraphOwnership(
+  target: ScratchTarget,
+  targetIndex: number,
+  options: Readonly<ProjectValidationOptions>
+): void {
   const path = `$.targets[${targetIndex}].blocks`;
-  const owners = new Map<string, Array<{id: string; edge: string}>>();
-  const registerOwner = (childId: string, ownerId: string, edge: string): void => {
+  const owners = new Map<string, Array<{id: string; edge: string; inactiveShadow: boolean}>>();
+  const registerOwner = (childId: string, ownerId: string, edge: string, inactiveShadow = false): void => {
     const child = target.blocks[childId];
     if (!child) fail(`${path}.${ownerId}.${edge}`, `dangling block reference ${JSON.stringify(childId)}`);
     if (!isScratchBlock(child)) {
@@ -200,7 +248,7 @@ function validateGraphOwnership(target: ScratchTarget, targetIndex: number): voi
       return;
     }
     const present = owners.get(childId) ?? [];
-    present.push({id: ownerId, edge});
+    present.push({id: ownerId, edge, inactiveShadow});
     owners.set(childId, present);
   };
 
@@ -210,7 +258,13 @@ function validateGraphOwnership(target: ScratchTarget, targetIndex: number): voi
     for (const [inputName, input] of Object.entries(value.inputs)) {
       for (let slot = 1; slot < input.length; slot += 1) {
         const childId = input[slot];
-        if (typeof childId === 'string') registerOwner(childId, ownerId, `inputs.${inputName}[${slot}]`);
+        if (typeof childId === 'string') {
+          const inactiveShadow = input[0] === 3
+            && slot === 2
+            && input[1] !== null
+            && input[1] !== undefined;
+          registerOwner(childId, ownerId, `inputs.${inputName}[${slot}]`, inactiveShadow);
+        }
       }
     }
   }
@@ -218,6 +272,13 @@ function validateGraphOwnership(target: ScratchTarget, targetIndex: number): voi
   for (const [blockId, value] of Object.entries(target.blocks)) {
     if (!isScratchBlock(value)) continue;
     const incoming = owners.get(blockId) ?? [];
+    const recoverableInactiveShadow = options.allowRecoverableInactiveShadowOwnership === true
+      && value.shadow
+      && value.next === null
+      && incoming.length === 1
+      && incoming[0]?.inactiveShadow === true
+      && (!value.topLevel || RECOVERABLE_TOP_LEVEL_SHADOW_OPCODES.has(value.opcode));
+    if (recoverableInactiveShadow) continue;
     if (value.topLevel) {
       if (value.parent !== null) fail(`${path}.${blockId}.parent`, 'top-level block must have a null parent');
       if (incoming.length > 0) fail(`${path}.${blockId}`, 'top-level block must not have an incoming block edge');
@@ -301,27 +362,46 @@ function validateTargetShape(targetValue: unknown, index: number): ScratchTarget
   return target as unknown as ScratchTarget;
 }
 
-function validateMonitor(monitorValue: unknown, index: number, project: ScratchProject): void {
+function validateMonitor(
+  monitorValue: unknown,
+  index: number,
+  project: ScratchProject,
+  options: Readonly<ProjectValidationOptions>
+): void {
   const path = `$.monitors[${index}]`;
   const monitor = requireRecord(monitorValue, path);
   const opcode = requireString(monitor['opcode'], `${path}.opcode`);
   const id = requireString(monitor['id'], `${path}.id`);
   const params = requireRecord(monitor['params'], `${path}.params`);
-  let target = project.targets.find(item => item.name === monitor['spriteName']);
+  const hasNamedTarget = typeof monitor['spriteName'] === 'string' && monitor['spriteName'].length > 0;
+  const namedTarget = hasNamedTarget
+    ? project.targets.find(item => item.name === monitor['spriteName'])
+    : undefined;
+  let target = namedTarget;
   target ??= project.targets.find(item => item.isStage);
   if (!target) fail(path, 'cannot resolve monitor target');
   if (opcode === 'data_variable' || opcode === 'data_listcontents') {
     const declarations = opcode === 'data_variable' ? target.variables : target.lists;
     const stage = project.targets.find(item => item.isStage);
+    const parameter = opcode === 'data_variable' ? 'VARIABLE' : 'LIST';
+    if (hasOwn(params, parameter) && typeof params[parameter] !== 'string') {
+      fail(`${path}.params.${parameter}`, 'expected a string');
+    }
     if (!hasOwn(declarations, id) && (!stage || !hasOwn(opcode === 'data_variable' ? stage.variables : stage.lists, id))) {
+      const recoverableStaleMonitor = options.allowRecoverableStaleInvisibleMonitors === true
+        && hasNamedTarget
+        && namedTarget === undefined
+        && monitor['visible'] === false;
+      if (recoverableStaleMonitor) return;
       fail(`${path}.id`, `dangling monitored ${opcode === 'data_variable' ? 'variable' : 'list'} ${JSON.stringify(id)}`);
     }
-    const parameter = opcode === 'data_variable' ? 'VARIABLE' : 'LIST';
-    if (hasOwn(params, parameter) && typeof params[parameter] !== 'string') fail(`${path}.params.${parameter}`, 'expected a string');
   }
 }
 
-export function validateProject(value: unknown): asserts value is ScratchProject {
+export function validateProject(
+  value: unknown,
+  options: Readonly<ProjectValidationOptions> = {}
+): asserts value is ScratchProject {
   try {
     assertJsonTree(value);
   } catch (error) {
@@ -351,7 +431,64 @@ export function validateProject(value: unknown): asserts value is ScratchProject
     targetNames.add(target.name);
   }
 
-  const symbolIds = new Map<string, string>();
+  const stage = targets[0];
+  if (!stage) fail('$.targets[0]', 'missing Stage');
+  const targetIndices = new Map(targets.map((target, index) => [target.name, index]));
+  const dataMonitorOwners = new Map<string, Set<string>>();
+  for (const monitorValue of root['monitors']) {
+    if (!isRecord(monitorValue)) continue;
+    const opcode = monitorValue['opcode'];
+    const id = monitorValue['id'];
+    if ((opcode !== 'data_variable' && opcode !== 'data_listcontents') || typeof id !== 'string') continue;
+    const spriteName = monitorValue['spriteName'];
+    const removedBeforeRemapping = options.allowRecoverableStaleInvisibleMonitors === true
+      && typeof spriteName === 'string'
+      && spriteName.length > 0
+      && !targetNames.has(spriteName)
+      && monitorValue['visible'] === false;
+    if (removedBeforeRemapping) continue;
+    const hasNamedTarget = typeof spriteName === 'string' && spriteName.length > 0;
+    const targetIndex = hasNamedTarget ? targetIndices.get(spriteName) : 0;
+    const target = targetIndex === undefined ? stage : targets[targetIndex];
+    if (!target) continue;
+    const kind: Exclude<SymbolKind, 'broadcast'> = opcode === 'data_variable' ? 'variable' : 'list';
+    const localDeclarations = kind === 'variable' ? target.variables : target.lists;
+    const stageDeclarations = kind === 'variable' ? stage.variables : stage.lists;
+    const ownerIndex = hasOwn(localDeclarations, id)
+      ? targetIndex ?? 0
+      : hasOwn(stageDeclarations, id) ? 0 : undefined;
+    if (ownerIndex === undefined) continue;
+    const owners = dataMonitorOwners.get(id) ?? new Set<string>();
+    owners.add(`${ownerIndex}:${kind}`);
+    dataMonitorOwners.set(id, owners);
+  }
+
+  const visibilityMutatorOwners = new Map<string, Set<string>>();
+  for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
+    const target = targets[targetIndex];
+    if (!target) continue;
+    for (const blockValue of Object.values(target.blocks)) {
+      if (!isScratchBlock(blockValue) || !isRecord(blockValue.fields)) continue;
+      const variableMutator = blockValue.opcode === 'data_showvariable' || blockValue.opcode === 'data_hidevariable';
+      const listMutator = blockValue.opcode === 'data_showlist' || blockValue.opcode === 'data_hidelist';
+      if (!variableMutator && !listMutator) continue;
+      const kind: Exclude<SymbolKind, 'broadcast'> = variableMutator ? 'variable' : 'list';
+      const field = blockValue.fields[kind === 'variable' ? 'VARIABLE' : 'LIST'];
+      const id = Array.isArray(field) ? field[1] : undefined;
+      if (typeof id !== 'string' || id.length === 0) continue;
+      const localDeclarations = kind === 'variable' ? target.variables : target.lists;
+      const stageDeclarations = kind === 'variable' ? stage.variables : stage.lists;
+      const ownerIndex = hasOwn(localDeclarations, id)
+        ? targetIndex
+        : hasOwn(stageDeclarations, id) ? 0 : undefined;
+      if (ownerIndex === undefined) continue;
+      const owners = visibilityMutatorOwners.get(id) ?? new Set<string>();
+      owners.add(`${ownerIndex}:${kind}`);
+      visibilityMutatorOwners.set(id, owners);
+    }
+  }
+
+  const symbolIds = new Map<string, SymbolLocation>();
   for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
     const target = targets[targetIndex];
     if (!target) continue;
@@ -359,15 +496,39 @@ export function validateProject(value: unknown): asserts value is ScratchProject
       for (const [id] of symbolEntries(target, kind)) {
         const path = `$.targets[${targetIndex}].${kind === 'variable' ? 'variables' : `${kind}s`}.${id}`;
         const previous = symbolIds.get(id);
-        if (previous) fail(path, `duplicate project-wide symbol ID ${JSON.stringify(id)}; first declared at ${previous}`);
-        symbolIds.set(id, path);
+        if (previous) {
+          const recoverableLocalCollision = options.allowRecoverableLocalSymbolIdCollisions === true
+            && !previous.isStage
+            && !target.isStage
+            && previous.targetIndex !== targetIndex;
+          if (recoverableLocalCollision && (dataMonitorOwners.get(id)?.size ?? 0) > 1) {
+            fail(
+              path,
+              `duplicate local symbol ID ${JSON.stringify(id)} is referenced by data monitors for multiple owners and cannot be safely disambiguated`
+            );
+          }
+          if (recoverableLocalCollision) {
+            const monitorOwners = dataMonitorOwners.get(id) ?? new Set<string>();
+            const mutatorOwners = visibilityMutatorOwners.get(id) ?? new Set<string>();
+            const visibilityOwners = new Set([...monitorOwners, ...mutatorOwners]);
+            if ((monitorOwners.size > 0 && visibilityOwners.size > 1) || mutatorOwners.size > 1) {
+              fail(
+                path,
+                `duplicate local symbol ID ${JSON.stringify(id)} has monitor visibility references for multiple owners and cannot be safely disambiguated`
+              );
+            }
+          }
+          if (!recoverableLocalCollision) {
+            fail(path, `duplicate project-wide symbol ID ${JSON.stringify(id)}; first declared at ${previous.path}`);
+          }
+        } else {
+          symbolIds.set(id, {kind, path, targetIndex, isStage: target.isStage});
+        }
       }
     }
   }
 
   const project = value as ScratchProject;
-  const stage = targets[0];
-  if (!stage) fail('$.targets[0]', 'missing Stage');
   for (let index = 0; index < targets.length; index += 1) {
     const target = targets[index];
     if (!target) continue;
@@ -426,10 +587,12 @@ export function validateProject(value: unknown): asserts value is ScratchProject
       else validatePrimitive(block, `${path}.blocks.${blockId}`, resolve, registerImplicitReference);
     }
     validateNoExecutableCycles(target, index);
-    validateGraphOwnership(target, index);
+    validateGraphOwnership(target, index, options);
     validateCommentLinks(target, index);
   }
-  for (let index = 0; index < project.monitors.length; index += 1) validateMonitor(project.monitors[index], index, project);
+  for (let index = 0; index < project.monitors.length; index += 1) {
+    validateMonitor(project.monitors[index], index, project, options);
+  }
   validateOfficialExtensions(project);
   if (officialSchemaError) throw officialSchemaError;
 }

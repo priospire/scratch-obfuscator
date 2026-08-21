@@ -37,7 +37,8 @@ describe('packed CLI subprocess', () => {
     await writeFile(input, validArchive());
     const prefix = ['--prefix', installation, 'exec', '--offline', '--', 'scratch-obfuscator'];
     const version = await runNpm([...prefix, '--version'], alternateCwd, {TZ: 'UTC'});
-    expect(version.stdout).toMatch(/^0\.2\.0\s*$/);
+    const packageMetadata = JSON.parse(await readFile(join(repositoryRoot, 'package.json'), 'utf8')) as {version: string};
+    expect(version.stdout.trim()).toBe(packageMetadata.version);
     await runNpm([...prefix, input, '-o', first, '-lossless'], installation, {TZ: 'UTC'});
     await runNpm([...prefix, input, '-o', second, '-lossless'], alternateCwd, {TZ: 'Pacific/Auckland'});
     expect(await readFile(second)).toEqual(await readFile(first));

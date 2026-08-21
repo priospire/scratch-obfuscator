@@ -372,6 +372,37 @@ describe('safe deterministic optimizer', () => {
     expect(() => applySafeOptimizations(invalid)).toThrow(/dangling block reference/);
     expect(JSON.stringify(invalid)).toBe(snapshot);
   });
+
+  it('removes stale invisible data monitors for sprites that no longer exist', () => {
+    const project = expressionProject({}, 'unused');
+    const set = requireBlock(project, 'set');
+    set.inputs['VALUE'] = [1, [4, 0]];
+    project.monitors = [
+      {
+        opcode: 'data_variable', id: 'deleted-local-id', params: {VARIABLE: 'i'},
+        spriteName: 'Deleted Sprite', value: 0, visible: false
+      },
+      {
+        opcode: 'data_variable', id: 'result', params: {VARIABLE: 'result'},
+        spriteName: '', value: 0, visible: false
+      },
+      {
+        opcode: 'data_variable', id: 'result', params: {VARIABLE: 'result'},
+        spriteName: 'Deleted Sprite', value: 0, visible: false
+      }
+    ];
+
+    const result = optimizeProject(project, {foldConstants: false});
+
+    expect(result.project.monitors).toEqual([project.monitors[1], project.monitors[2]]);
+    expect(result.stats.staleInvisibleMonitorsRemoved).toBe(1);
+    validateProject(result.project);
+
+    const mutable = structuredClone(project);
+    applySafeOptimizations(mutable, {foldConstants: false});
+    expect(mutable.monitors).toEqual([project.monitors[1], project.monitors[2]]);
+    validateProject(mutable);
+  });
 });
 
 function operatorCaseProject(testCase: OperatorCase): ScratchProject {

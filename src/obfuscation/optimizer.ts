@@ -1,5 +1,5 @@
 import {isPrimitive, isScratchBlock} from '../model/blocks.js';
-import {cloneProject} from '../model/json.js';
+import {cloneProject, hasOwn} from '../model/json.js';
 import type {ScratchBlock, ScratchInput, ScratchProject, ScratchTarget} from '../types.js';
 import {validateProject} from '../validation/index.js';
 
@@ -19,6 +19,7 @@ export interface OptimizationStats {
   reporterBlocksRemoved: number;
   inactiveFallbacksRemoved: number;
   inactiveFallbackBlocksRemoved: number;
+  staleInvisibleMonitorsRemoved: number;
   commentsRemoved: number;
 }
 
@@ -140,7 +141,11 @@ const OPERATOR_SPECS: Readonly<Record<string, OperatorSpec>> = Object.freeze({
  * Optimize a validated project without mutating the caller's value.
  */
 export function optimizeProject(project: ScratchProject, options: OptimizationOptions = {}): OptimizationResult {
-  validateProject(project);
+  validateProject(project, {
+    allowRecoverableLocalSymbolIdCollisions: true,
+    allowRecoverableInactiveShadowOwnership: true,
+    allowRecoverableStaleInvisibleMonitors: true
+  });
   const output = cloneProject(project);
   const stats = createStats();
   optimizeValidatedProject(output, options, stats);
@@ -158,6 +163,7 @@ export function applySafeOptimizations(
 ): OptimizationStats {
   const result = optimizeProject(project, options);
   project.targets = result.project.targets;
+  project.monitors = result.project.monitors;
   return result.stats;
 }
 
@@ -167,6 +173,7 @@ function createStats(): OptimizationStats {
     reporterBlocksRemoved: 0,
     inactiveFallbacksRemoved: 0,
     inactiveFallbackBlocksRemoved: 0,
+    staleInvisibleMonitorsRemoved: 0,
     commentsRemoved: 0
   };
 }
@@ -176,11 +183,30 @@ function optimizeValidatedProject(
   options: OptimizationOptions,
   stats: OptimizationStats
 ): void {
+  removeStaleInvisibleMonitors(project, stats);
   for (const target of project.targets) {
     const incoming = collectIncomingReferences(target);
     removeInactiveFallbacks(target, incoming, stats);
     if (options.foldConstants !== false) foldStaticReporterInputs(target, incoming, stats);
   }
+}
+
+function removeStaleInvisibleMonitors(project: ScratchProject, stats: OptimizationStats): void {
+  const targetNames = new Set(project.targets.map(target => target.name));
+  const stage = project.targets.find(target => target.isStage);
+  const before = project.monitors.length;
+  project.monitors = project.monitors.filter(monitor => {
+    if (monitor['opcode'] !== 'data_variable' && monitor['opcode'] !== 'data_listcontents') return true;
+    const spriteName = monitor['spriteName'];
+    if (typeof spriteName !== 'string' || spriteName.length === 0 || targetNames.has(spriteName) || monitor['visible'] !== false) {
+      return true;
+    }
+    const id = monitor['id'];
+    if (typeof id !== 'string' || !stage) return false;
+    const declarations = monitor['opcode'] === 'data_variable' ? stage.variables : stage.lists;
+    return hasOwn(declarations, id);
+  });
+  stats.staleInvisibleMonitorsRemoved += before - project.monitors.length;
 }
 
 function collectIncomingReferences(target: ScratchTarget): Map<string, number> {
@@ -434,7 +460,7 @@ function asciiLowerCase(value: string): string {
 
 function validateOptimizedProject(project: ScratchProject): void {
   try {
-    validateProject(project);
+    validateProject(project, {allowRecoverableLocalSymbolIdCollisions: true});
   } catch (error) {
     throw new Error('internal validation rejected the optimized project', {cause: error});
   }

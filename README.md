@@ -29,7 +29,7 @@ An internal tarball is also installable through npm:
 
 ```sh
 npm pack
-npm install --global ./scratch-obfuscator-0.2.0.tgz
+npm install --global ./scratch-obfuscator-0.3.0.tgz
 ```
 
 Both installed forms expose the `scratch-obfuscator` executable. This release has
@@ -84,10 +84,13 @@ behavior.
 ### `-lossless`
 
 Lossless mode changes no original executable operation graph, stack frame,
-list/monitor count, hat, or procedure count. It does not fold or insert an
+live list/monitor count, hat, or procedure count. It does not fold or insert an
 executed reporter or command. The mandatory watermark is the one deliberate
 added Stage variable, and inactive saved fallback primitives may be removed
-because Scratch never executes them. "No overhead" means the same executable
+because Scratch never executes them. An invisible data monitor naming a missing
+sprite may also be removed with a warning only when its typed ID resolves to no
+live Stage declaration.
+"No overhead" means the same executable
 opcode graph and VM step topology; exact wall-clock equality across machines is
 not a meaningful guarantee.
 
@@ -100,9 +103,11 @@ extension, procedure, or yield hazard. Eligible regions receive custom-block
 outlining of maximal non-yielding top-level runs, portable exact-domain constant
 folding, interior string splitting, contextual finite numeric equations,
 condition inversion, opaque predicates, dual-rail private branches, bounded
-safe data/list decoys, and scalar packing. Packing uses one backing list for
-eligible Stage globals and one per sprite for eligible locals so clone-local
-state remains local. Cloud, monitored, dynamically addressed, unsupported,
+guarded data/list decoys, and scalar packing. Lossy mode adds no event hats;
+its generated data paths remain behind statically false private guards. Packing
+uses one backing list for eligible Stage globals and one per sprite for
+eligible locals so clone-local state remains local. Cloud, monitored,
+dynamically addressed, unsupported,
 malformed, and over-budget variables remain native. Hazardous projects fall
 back to the common lossless transforms plus inert decoys.
 
@@ -126,9 +131,17 @@ two branch templates, trampolines, and fake states. Additional passes pool and
 split eligible strings, precompute portable static reporter trees, encode exact
 numeric domains, pack eligible Stage and sprite scalars into shuffled per-scope
 list slots, add opaque branches and fake data/procedures, and select decoys from
-the project's supported data/list opcode vocabulary. Generated dispatcher and
-protection state, cloud variables, monitored variables, and conservatively
-excluded original state remain scalar exceptions.
+the project's supported data/list opcode vocabulary. Bounded coherent fake
+subsystems connect paired opaque broadcasts, multiple receiver hats, shared
+custom procedures, private state/list predicates, nested reporters, and finite
+wait arithmetic. Read-only answer, mouse-position, and timer reporters feed
+runtime-dependent sponsor guards. If one opens, its bounded path mutates only a
+dedicated decoy variable/list store and terminates; it cannot touch packed or
+dispatcher state. Separate impossible private state/list predicates retain the
+requested never-true motifs, while the mixed dependency graph survives
+constant propagation and dead-root pruning. Generated dispatcher and protection
+state, cloud variables, monitored variables, and conservatively excluded
+original state remain scalar exceptions.
 
 Regions that fail eligibility are left native rather than being speculatively
 rewritten. This selective fallback is part of the contract.
@@ -187,6 +200,21 @@ graph, ownership, scope, procedure, monitor, extension, and asset invariants.
 The VM-supported name-resolved broadcast tuple is accepted as a deliberate
 schema overlay. Legacy archives that omit current serializer collections are
 rejected rather than silently normalized.
+
+Some official editors and project generators save runtime-recoverable metadata
+that is stricter than the canonical graph shape. The input compatibility layer
+disambiguates repeated IDs only when they belong to different sprite-local
+scopes, removes inactive mode-3 shadow fallbacks whose serialized parent is
+missing or whose fallback root was incorrectly marked top-level, and discards
+invisible data monitors that still name a deleted sprite only when their typed
+ID resolves to no live Stage declaration.
+The transformed archive must then pass the normal strict validator. Same-target
+collisions, Stage/local collisions, live or multiply-owned orphan blocks, and
+visible dangling monitors remain errors because resolving them would require a
+behavior-changing guess. Repeated data-monitor records on a reused local ID are
+accepted only when every record resolves to the same declaration owner;
+ambiguous multi-owner records and cross-owner show/hide coupling remain
+rejected to preserve Scratch's monitor coalescing behavior.
 
 Supported code is official Scratch 3 core code plus the bundled extension IDs
 registered by Scratch VM 15.1.0: Boost, EV3, Face Sensing, Go Direct Force &
@@ -257,6 +285,40 @@ golden hashes. The hosted workflow runs Node 22 and 24 on Windows, Ubuntu, and
 macOS, compares all six SHA-256 manifests, and runs a headless Scratch GUI
 load/save/reload smoke test. Extended malformed/property fuzzing is available
 through the manual workflow input.
+
+The checkout also includes a deterministic structural-recovery evaluator:
+
+```sh
+node scripts/readability-metrics.mjs \
+  --baseline original.sb3 \
+  --candidate lossless=lossless.sb3 \
+  --candidate lossy=lossy.sb3 \
+  --candidate no-preserve=no-preserve.sb3 \
+  --summary
+```
+
+It reports identifier exposure, direct-chain and normalized-chain recovery,
+normalization-resistant component quality, indirection, dependency kinds,
+paired event surfaces, repeated local signatures, and depth-2 topology
+diversity. Its state-aware normalizer follows event/procedure reachability,
+propagates finite declaration domains, mirrors Scratch numeric/string
+comparison coercion, and prunes provably false graphs. The gates prove that
+adding 2,000 repeated unreachable blocks cannot improve the score and that a
+10,444-block stress output retains at least 8,000 blocks with bounded repeated
+signatures and more than 1,800 normalized topology kinds.
+
+This evaluator is an offline checkout QA utility for trusted local fixtures;
+untrusted archives must go through the resource-limited production CLI.
+
+On the fixed fallback-sensitive fixture the current resistance scores are
+26.323 (original), 44.138 (lossless), 44.138 (lossy, conservatively fallen
+back), and 94.243 (no-preserve); no-preserve direct and normalized chain
+recovery are both 0.070. On the fully eligible comparison, no-preserve scores
+95.477 versus lossy's 89.805 and recovers no original 3- or 4-block chain. The
+previous no-preserve iteration scored 82.578 and trailed lossy by 1.668 on that
+same class of fixture, so the regression measures a real structural
+improvement rather than raw output growth. These are same-fixture structural
+heuristics, not absolute security or subjective-readability guarantees.
 
 Pinned compatibility tools have a separate security boundary; see
 [`QA_SECURITY.md`](QA_SECURITY.md). Third-party schema licensing and trademark
