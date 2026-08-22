@@ -3,7 +3,7 @@ import {compareUtf8} from '../deterministic.js';
 import type {ArchiveEntry, ObfuscationMode} from '../types.js';
 
 const ARCHIVE_DOMAIN = Buffer.from('scratch-obfuscator\u0000logical-archive\u0000v1\u0000', 'utf8');
-const MODE_DOMAIN = Buffer.from('scratch-obfuscator\u0000mode-seed\u0000v1\u0000', 'utf8');
+const MODE_DOMAIN = Buffer.from('scratch-obfuscator\u0000mode-seed\u0000v2\u0000', 'utf8');
 
 export function deriveArchiveSeed(projectBytes: Uint8Array, entries: readonly ArchiveEntry[]): Uint8Array {
   const hash = createHash('sha256');

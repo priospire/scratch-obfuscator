@@ -151,10 +151,7 @@ async function readZipFile(
     if (projects.length !== 1) {
       throw new InputError(`archive must contain exactly one root ${PROJECT_NAME}`);
     }
-    const projectEntry = projects[0];
-    if (projectEntry === undefined || projectEntry.content.kind !== 'memory') {
-      throw new InputError(`archive is missing root ${PROJECT_NAME}`);
-    }
+    const projectEntry = projects[0] as ArchiveEntry & {content: {kind: 'memory'; data: Uint8Array}};
     const parsed = parseUniqueJson(projectEntry.content.data, PROJECT_NAME);
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new InputError(`${PROJECT_NAME} root must be an object`);
@@ -366,7 +363,7 @@ async function readEntryData(
       crc = updateCrc32(crc, chunk);
       hash.update(chunk);
       if (data !== undefined) chunk.copy(data, actualSize - chunk.length);
-      else if (file !== undefined) await writeAll(file, chunk);
+      else await writeAll(file as Awaited<ReturnType<typeof openFile>>, chunk);
     }
   } catch (error) {
     await cleanupPartialSpool(file, spoolPath, error);
@@ -397,7 +394,9 @@ async function readEntryData(
     throw error;
   }
   return {
-    content: spoolPath === undefined ? {kind: 'memory', data: data ?? new Uint8Array(0)} : {kind: 'file', path: spoolPath},
+    content: spoolPath === undefined
+      ? {kind: 'memory', data: data as Uint8Array}
+      : {kind: 'file', path: spoolPath},
     contentHash: hash.digest()
   };
 }
@@ -447,7 +446,7 @@ async function cleanupPartialSpool(
 function updateCrc32(initial: number, bytes: Uint8Array): number {
   let crc = initial;
   for (const byte of bytes) {
-    crc = (CRC32_TABLE[(crc ^ byte) & 0xff] ?? 0) ^ (crc >>> 8);
+    crc = (CRC32_TABLE[(crc ^ byte) & 0xff] as number) ^ (crc >>> 8);
   }
   return crc;
 }

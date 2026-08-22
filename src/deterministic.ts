@@ -38,7 +38,7 @@ export class DeterministicGenerator {
     let value: number;
     do {
       const data = this.bytes(4);
-      value = (((data[0] ?? 0) * 0x1_0000_00) + ((data[1] ?? 0) << 16) + ((data[2] ?? 0) << 8) + (data[3] ?? 0)) >>> 0;
+      value = new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(0);
     } while (value >= limit);
     return value % maxExclusive;
   }
@@ -79,9 +79,9 @@ export class DeterministicGenerator {
         .digest();
       this.#offset = 0;
     }
-    const value = this.#pool[this.#offset];
+    const value = new DataView(this.#pool.buffer, this.#pool.byteOffset + this.#offset, 1).getUint8(0);
     this.#offset += 1;
-    return value ?? 0;
+    return value;
   }
 }
 

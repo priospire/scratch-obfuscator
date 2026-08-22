@@ -10,7 +10,10 @@ import type {
   ScratchProject,
   ScratchTarget
 } from '../types.js';
-import {OFFICIAL_CORE_OPCODES, OFFICIAL_LITERAL_SHADOW_OPCODES} from '../validation/extensions.js';
+import {
+  OFFICIAL_CORE_OPCODES,
+  OFFICIAL_LITERAL_SHADOW_OPCODES
+} from '../validation/extensions.js';
 import {ANTI_CHEAT_WATERMARK_NAME} from './anticheat.js';
 import {createStaticInputEvaluator} from './optimizer.js';
 
@@ -71,7 +74,8 @@ interface VariableReference {
 interface ProcedurePlan {
   readonly code: Map<string, string>;
   readonly argumentsByCode: Map<string, Map<string, string>>;
-  readonly argumentNames: Map<string, string>;
+  readonly argumentNamesByCode: Map<string, Map<string, string>>;
+  readonly reporterNames: Map<string, string>;
 }
 
 const PROCEDURE_PLACEHOLDER = /%[sbn]/g;
@@ -176,11 +180,146 @@ const CORE_RUNTIME_VALUE_INPUTS: Readonly<Record<string, readonly string[]>> = O
   sound_setvolumeto: ['VOLUME']
 });
 
-function inputMayExposeRuntimeValue(opcode: string, inputName: string): boolean {
-  if (opcode === 'procedures_call') return true;
-  if (OFFICIAL_CORE_OPCODES.has(opcode)) return CORE_RUNTIME_VALUE_INPUTS[opcode]?.includes(inputName) === true;
-  if (OFFICIAL_LITERAL_SHADOW_OPCODES.has(opcode)) return false;
-  return true;
+/** Argument names declared by the bundled Scratch VM 15.1.0 extension metadata. */
+const EXTENSION_RUNTIME_VALUE_INPUTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  boost_getMotorPosition: ['MOTOR_REPORTER_ID'],
+  boost_getTiltAngle: ['TILT_DIRECTION'],
+  boost_motorOff: ['MOTOR_ID'],
+  boost_motorOn: ['MOTOR_ID'],
+  boost_motorOnFor: ['MOTOR_ID', 'DURATION'],
+  boost_motorOnForRotation: ['MOTOR_ID', 'ROTATION'],
+  boost_seeingColor: ['COLOR'],
+  boost_setLightHue: ['HUE'],
+  boost_setMotorDirection: ['MOTOR_ID', 'MOTOR_DIRECTION'],
+  boost_setMotorPower: ['MOTOR_ID', 'POWER'],
+  boost_whenColor: ['COLOR'],
+  boost_whenTilted: ['TILT_DIRECTION_ANY'],
+  ev3_beep: ['NOTE', 'TIME'],
+  ev3_buttonPressed: ['PORT'],
+  ev3_getBrightness: [],
+  ev3_getDistance: [],
+  ev3_getMotorPosition: ['PORT'],
+  ev3_motorSetPower: ['PORT', 'POWER'],
+  ev3_motorTurnClockwise: ['PORT', 'TIME'],
+  ev3_motorTurnCounterClockwise: ['PORT', 'TIME'],
+  ev3_whenBrightnessLessThan: ['DISTANCE'],
+  ev3_whenButtonPressed: ['PORT'],
+  ev3_whenDistanceLessThan: ['DISTANCE'],
+  faceSensing_faceIsDetected: [],
+  faceSensing_faceSize: [],
+  faceSensing_faceTilt: [],
+  faceSensing_goToPart: ['PART'],
+  faceSensing_pointInFaceTiltDirection: [],
+  faceSensing_setSizeToFaceSize: [],
+  faceSensing_whenFaceDetected: [],
+  faceSensing_whenSpriteTouchesPart: ['PART'],
+  faceSensing_whenTilted: ['DIRECTION'],
+  gdxfor_getAcceleration: ['DIRECTION'],
+  gdxfor_getForce: [],
+  gdxfor_getSpinSpeed: ['DIRECTION'],
+  gdxfor_getTilt: ['TILT'],
+  gdxfor_isFreeFalling: [],
+  gdxfor_isTilted: ['TILT'],
+  gdxfor_whenForcePushedOrPulled: ['PUSH_PULL'],
+  gdxfor_whenGesture: ['GESTURE'],
+  gdxfor_whenTilted: ['TILT'],
+  makeymakey_whenCodePressed: ['SEQUENCE'],
+  makeymakey_whenMakeyKeyPressed: ['KEY'],
+  microbit_displayClear: [],
+  microbit_displaySymbol: ['MATRIX'],
+  microbit_displayText: ['TEXT'],
+  microbit_getTiltAngle: ['DIRECTION'],
+  microbit_isButtonPressed: ['BTN'],
+  microbit_isTilted: ['DIRECTION'],
+  microbit_whenButtonPressed: ['BTN'],
+  microbit_whenGesture: ['GESTURE'],
+  microbit_whenPinConnected: ['PIN'],
+  microbit_whenTilted: ['DIRECTION'],
+  music_changeTempo: ['TEMPO'],
+  music_getTempo: [],
+  music_midiPlayDrumForBeats: ['DRUM', 'BEATS'],
+  music_midiSetInstrument: ['INSTRUMENT'],
+  music_playDrumForBeats: ['DRUM', 'BEATS'],
+  music_playNoteForBeats: ['NOTE', 'BEATS'],
+  music_restForBeats: ['BEATS'],
+  music_setInstrument: ['INSTRUMENT'],
+  music_setTempo: ['TEMPO'],
+  pen_changePenColorParamBy: ['COLOR_PARAM', 'VALUE'],
+  pen_changePenHueBy: ['HUE'],
+  pen_changePenShadeBy: ['SHADE'],
+  pen_changePenSizeBy: ['SIZE'],
+  pen_clear: [],
+  pen_penDown: [],
+  pen_penUp: [],
+  pen_setPenColorParamTo: ['COLOR_PARAM', 'VALUE'],
+  pen_setPenColorToColor: ['COLOR'],
+  pen_setPenHueToNumber: ['HUE'],
+  pen_setPenShadeToNumber: ['SHADE'],
+  pen_setPenSizeTo: ['SIZE'],
+  pen_stamp: [],
+  text2speech_setLanguage: ['LANGUAGE'],
+  text2speech_setVoice: ['VOICE'],
+  text2speech_speakAndWait: ['WORDS'],
+  translate_getTranslate: ['WORDS', 'LANGUAGE'],
+  translate_getViewerLanguage: [],
+  videoSensing_setVideoTransparency: ['TRANSPARENCY'],
+  videoSensing_videoOn: ['ATTRIBUTE', 'SUBJECT'],
+  videoSensing_videoToggle: ['VIDEO_STATE'],
+  videoSensing_whenMotionGreaterThan: ['REFERENCE'],
+  wedo2_getDistance: [],
+  wedo2_getTiltAngle: ['TILT_DIRECTION'],
+  wedo2_isTilted: ['TILT_DIRECTION_ANY'],
+  wedo2_motorOff: ['MOTOR_ID'],
+  wedo2_motorOn: ['MOTOR_ID'],
+  wedo2_motorOnFor: ['MOTOR_ID', 'DURATION'],
+  wedo2_playNoteFor: ['NOTE', 'DURATION'],
+  wedo2_setLightHue: ['HUE'],
+  wedo2_setMotorDirection: ['MOTOR_ID', 'MOTOR_DIRECTION'],
+  wedo2_startMotorPower: ['MOTOR_ID', 'POWER'],
+  wedo2_whenDistance: ['OP', 'REFERENCE'],
+  wedo2_whenTilted: ['TILT_DIRECTION_ANY']
+});
+
+function procedureRuntimeInputs(target: ScratchTarget, owner: ScratchBlock): readonly string[] | undefined {
+  const code = owner.mutation?.['proccode'];
+  if (typeof code !== 'string') return undefined;
+  const matches: string[][] = [];
+  for (const value of Object.values(target.blocks)) {
+    if (!isScratchBlock(value) || value.opcode !== 'procedures_prototype' || value.mutation?.['proccode'] !== code) {
+      continue;
+    }
+    const ids = parsedStringArray(value.mutation['argumentids']);
+    const names = parsedStringArray(value.mutation['argumentnames']);
+    const defaults = parsedScalarArray(value.mutation['argumentdefaults']);
+    const placeholders = code.match(PROCEDURE_PLACEHOLDER) ?? [];
+    if (
+      !ids
+      || !names
+      || !defaults
+      || new Set(ids).size !== ids.length
+      || ids.length !== names.length
+      || ids.length !== defaults.length
+      || ids.length !== placeholders.length
+    ) {
+      return undefined;
+    }
+    matches.push(ids);
+    if (matches.length > 1) return undefined;
+  }
+  return matches[0];
+}
+
+function inputMayExposeRuntimeValue(target: ScratchTarget, owner: ScratchBlock, inputName: string): boolean {
+  if (owner.opcode === 'procedures_call') {
+    const runtimeInputs = procedureRuntimeInputs(target, owner);
+    return runtimeInputs?.includes(inputName) ?? true;
+  }
+  if (OFFICIAL_CORE_OPCODES.has(owner.opcode)) {
+    return CORE_RUNTIME_VALUE_INPUTS[owner.opcode]?.includes(inputName) === true;
+  }
+  const extensionInputs = EXTENSION_RUNTIME_VALUE_INPUTS[owner.opcode];
+  if (extensionInputs !== undefined) return extensionInputs.includes(inputName);
+  return !OFFICIAL_LITERAL_SHADOW_OPCODES.has(owner.opcode);
 }
 function uniqueId(generator: DeterministicGenerator, prefix: string, occupied: Set<string>): string {
   for (;;) {
@@ -200,6 +339,12 @@ function uniqueName(generator: DeterministicGenerator, occupied: Set<string>): s
       return candidate;
     }
   }
+}
+
+function requiredMapValue<Key, Value>(map: ReadonlyMap<Key, Value>, key: Key): Value {
+  const value = map.get(key);
+  if (value === undefined) throw new Error('incomplete deterministic transform plan');
+  return value;
 }
 
 function uniqueBroadcastName(
@@ -259,7 +404,7 @@ function literalReporterField(reporter: ScratchBlock): readonly [string, JsonVal
     return undefined;
   }
   const entry = Object.entries(reporter.fields)[0];
-  if (!entry) return undefined;
+  if (entry === undefined) return undefined;
   const implementedField = IMPLEMENTED_LITERAL_MENU_FIELDS.get(reporter.opcode);
   return implementedField === undefined || entry[0] === implementedField ? entry : undefined;
 }
@@ -378,7 +523,7 @@ function buildObservableTypedNamePlan(project: ScratchProject): ObservableTypedN
     for (const value of Object.values(target.blocks)) {
       if (!isScratchBlock(value)) continue;
       for (const [inputName, input] of Object.entries(value.inputs)) {
-        if (!inputMayExposeRuntimeValue(value.opcode, inputName)) continue;
+        if (!inputMayExposeRuntimeValue(target, value, inputName)) continue;
         const active = input[1];
         const typedBroadcastMenu = inputName === 'BROADCAST_INPUT'
           && (value.opcode === 'event_broadcast' || value.opcode === 'event_broadcastandwait');
@@ -404,11 +549,37 @@ function buildObservableTypedNamePlan(project: ScratchProject): ObservableTypedN
   return {variables, lists, broadcastGroups, hasReferences};
 }
 
-function primitiveBroadcastClassification(primitive: ScratchInput): BroadcastInputClassification {
-  if (primitive[0] === 11) return {kind: 'typed'};
+function primitiveBroadcastClassification(
+  project: ScratchProject,
+  target: ScratchTarget,
+  primitive: ScratchInput
+): BroadcastInputClassification {
+  if (
+    primitive[0] === 11
+    && originalTypedReference(project, target, 'broadcast', primitive[1], primitive[2]) !== undefined
+  ) {
+    return {kind: 'typed'};
+  }
   const literal = literalPrimitiveValue(primitive);
   if (literal === undefined) return {kind: 'unknown'};
   return {kind: 'fixed', name: literal};
+}
+
+function reporterBroadcastClassification(
+  project: ScratchProject,
+  target: ScratchTarget,
+  reporter: ScratchBlock
+): BroadcastInputClassification | undefined {
+  if (reporter.opcode !== 'event_broadcast_menu') return undefined;
+  const field = reporter.fields['BROADCAST_OPTION'];
+  if (!field) return {kind: 'unknown'};
+  if (originalTypedReference(project, target, 'broadcast', field[0], field[1]) !== undefined) {
+    return {kind: 'typed'};
+  }
+  const literal = field[0];
+  return typeof literal === 'string' || typeof literal === 'number' || typeof literal === 'boolean'
+    ? {kind: 'fixed', name: String(literal)}
+    : {kind: 'unknown'};
 }
 
 function classifyBroadcastInput(
@@ -420,12 +591,13 @@ function classifyBroadcastInput(
 ): BroadcastInputClassification {
   if (!input) return {kind: 'unknown'};
   const active = input[1];
-  if (isPrimitive(active)) return primitiveBroadcastClassification(active);
+  if (isPrimitive(active)) return primitiveBroadcastClassification(project, target, active);
   if (typeof active !== 'string') return {kind: 'unknown'};
   const reporter = target.blocks[active];
-  if (isPrimitive(reporter)) return primitiveBroadcastClassification(reporter);
+  if (isPrimitive(reporter)) return primitiveBroadcastClassification(project, target, reporter);
   if (isScratchBlock(reporter)) {
-    if (reporter.opcode === 'event_broadcast_menu') return {kind: 'typed'};
+    const broadcast = reporterBroadcastClassification(project, target, reporter);
+    if (broadcast) return broadcast;
     const literal = literalReporterValue(project, target, active);
     if (literal !== undefined) return {kind: 'fixed', name: literal};
   }
@@ -488,7 +660,8 @@ function sensingObjectSelection(
   input: ScratchInput | undefined,
   evaluateStaticInput: (ownerId: string, input: ScratchInput) => boolean | number | string | undefined
 ): SensingObjectSelection {
-  const active = input?.[1];
+  if (input === undefined) return selectionForLiteral(project, 'undefined');
+  const active = input[1];
   if (active === null || active === undefined) return selectionForLiteral(project, 'undefined');
   if (isPrimitive(active)) {
     const literal = runtimePrimitiveLiteral(project, owner, active);
@@ -497,7 +670,6 @@ function sensingObjectSelection(
   if (typeof active !== 'string') return {kind: 'dynamic'};
   const literal = literalReporterValue(project, owner, active);
   if (literal !== undefined) return selectionForLiteral(project, literal);
-  if (!input) return {kind: 'dynamic'};
   const fixed = evaluateStaticInput(ownerId, input);
   return fixed === undefined ? {kind: 'dynamic'} : selectionForLiteral(project, String(fixed));
 }
@@ -524,7 +696,7 @@ function firstVariableReference(
   target: ScratchTarget,
   name: string
 ): VariableReference | undefined {
-  for (const reference of references.get(target)?.values() ?? []) {
+  for (const reference of requiredMapValue(references, target).values()) {
     if (reference.name === name) return reference;
   }
   return undefined;
@@ -547,9 +719,7 @@ function buildSymbolNamePlan(
   let cloudVariables = 0;
   let watermarkFound = false;
 
-  for (let targetIndex = 0; targetIndex < project.targets.length; targetIndex += 1) {
-    const target = project.targets[targetIndex];
-    if (!target) continue;
+  for (const [targetIndex, target] of project.targets.entries()) {
     const local = new Map<string, VariableReference>();
     references.set(target, local);
     for (const [id, declaration] of Object.entries(target.variables)) {
@@ -593,7 +763,8 @@ function buildSymbolNamePlan(
       const reference = firstVariableReference(references, target, property);
       return reference ? [reference] : [];
     });
-    if (selected.length === 0) return;
+    const [first, ...remaining] = selected;
+    if (first === undefined) return;
     if (project.targets.some(target => isNativeSensingAttribute(target, property))) {
       for (const reference of selected) {
         targetSet(preservedVariables, reference.target).add(reference.id);
@@ -602,12 +773,7 @@ function buildSymbolNamePlan(
       return;
     }
     for (const reference of selected) parents.set(reference.key, find(reference.key));
-    const first = selected[0];
-    if (!first) return;
-    for (let index = 1; index < selected.length; index += 1) {
-      const reference = selected[index];
-      if (reference) union(first.key, reference.key);
-    }
+    for (const reference of remaining) union(first.key, reference.key);
   };
 
   for (const target of project.targets) {
@@ -631,8 +797,7 @@ function buildSymbolNamePlan(
   }
   const membersByRoot = new Map<string, VariableReference[]>();
   for (const key of parents.keys()) {
-    const reference = byKey.get(key);
-    if (!reference) continue;
+    const reference = requiredMapValue(byKey, key);
     const root = find(key);
     const members = membersByRoot.get(root) ?? [];
     members.push(reference);
@@ -690,9 +855,7 @@ function targetSymbolMaps(
     }
   }
   const variableGroupNames = new Map<string, string>();
-  for (let index = 0; index < namePlan.variableGroupOrder.length; index += 1) {
-    const group = namePlan.variableGroupOrder[index];
-    if (!group) continue;
+  for (const [index, group] of namePlan.variableGroupOrder.entries()) {
     variableGroupNames.set(group, uniqueName(generator.fork(`sensing-group:${index}`), occupiedNames));
   }
   const broadcastGroupNames = new Map<string, string>();
@@ -715,9 +878,7 @@ function targetSymbolMaps(
   }
 
   const maps = new Map<ScratchTarget, TargetSymbols>();
-  for (let targetIndex = 0; targetIndex < project.targets.length; targetIndex += 1) {
-    const target = project.targets[targetIndex];
-    if (!target) continue;
+  for (const [targetIndex, target] of project.targets.entries()) {
     const local = generator.fork(`target:${targetIndex}:symbols`);
     const variables = new Map<string, Replacement>();
     const lists = new Map<string, Replacement>();
@@ -726,11 +887,9 @@ function targetSymbolMaps(
       const oldName = typeof tuple[0] === 'string' ? tuple[0] : '';
       const preserveName = namePlan.preservedVariables.get(target)?.has(id) === true;
       const group = namePlan.variableGroups.get(target)?.get(id);
-      const groupedName = group === undefined ? undefined : variableGroupNames.get(group);
-      if (group !== undefined && groupedName === undefined) throw new Error('missing planned sensing name group');
       const replacementName = preserveName
         ? oldName
-        : groupedName ?? uniqueName(local, occupiedNames);
+        : group === undefined ? uniqueName(local, occupiedNames) : requiredMapValue(variableGroupNames, group);
       variables.set(id, {
         id: uniqueId(local, 'v_', occupiedIds),
         name: replacementName,
@@ -757,14 +916,13 @@ function targetSymbolMaps(
       const replacementName = target.isStage
         ? broadcastPlan.preserveAllStageNames || broadcastPlan.preservedStageGroups.has(group)
           ? name
-          : broadcastGroupNames.get(group)
+          : requiredMapValue(broadcastGroupNames, group)
         : uniqueBroadcastName(
             local,
             occupiedNames,
             occupiedBroadcastLowerNames,
             occupiedBroadcastUpperNames
           );
-      if (replacementName === undefined) throw new Error('missing planned Stage broadcast name group');
       broadcasts.set(id, {id: uniqueId(local, 'c_', occupiedIds), name: replacementName, originalName: name});
       stats.identifiersRenamed += 1;
       if (replacementName !== name) stats.symbolsRenamed += 1;
@@ -788,10 +946,9 @@ function resolveSymbol(
 }
 
 function matchingName(
-  symbols: ReadonlyMap<string, Replacement> | undefined,
+  symbols: ReadonlyMap<string, Replacement>,
   name: string
 ): Replacement[] {
-  if (!symbols) return [];
   const matches: Replacement[] = [];
   for (const replacement of symbols.values()) {
     if (replacement.originalName !== name) continue;
@@ -808,15 +965,15 @@ function resolveSymbolByName(
   name: string
 ): Replacement | undefined {
   const stage = stageOf(project);
-  if (kind === 'broadcast') return matchingName(maps.get(stage)?.broadcast, name)[0];
-  return matchingName(maps.get(stage)?.[kind], name)[0];
+  const symbols = requiredMapValue(maps, stage);
+  if (kind === 'broadcast') return matchingName(symbols.broadcast, name)[0];
+  return matchingName(symbols[kind], name)[0];
 }
 
 function rebuildDeclarations(target: ScratchTarget, symbols: TargetSymbols): void {
   const variables = orderedDictionary<JsonValue[]>();
   for (const [oldId, tuple] of Object.entries(target.variables)) {
-    const replacement = symbols.variable.get(oldId);
-    if (!replacement) continue;
+    const replacement = requiredMapValue(symbols.variable, oldId);
     tuple[0] = replacement.name;
     variables[replacement.id] = tuple;
   }
@@ -824,8 +981,7 @@ function rebuildDeclarations(target: ScratchTarget, symbols: TargetSymbols): voi
 
   const lists = orderedDictionary<JsonValue[]>();
   for (const [oldId, tuple] of Object.entries(target.lists)) {
-    const replacement = symbols.list.get(oldId);
-    if (!replacement) continue;
+    const replacement = requiredMapValue(symbols.list, oldId);
     tuple[0] = replacement.name;
     lists[replacement.id] = tuple;
   }
@@ -833,8 +989,7 @@ function rebuildDeclarations(target: ScratchTarget, symbols: TargetSymbols): voi
 
   const broadcasts = orderedDictionary<string>();
   for (const [oldId] of Object.entries(target.broadcasts)) {
-    const replacement = symbols.broadcast.get(oldId);
-    if (!replacement) continue;
+    const replacement = requiredMapValue(symbols.broadcast, oldId);
     broadcasts[replacement.id] = replacement.name;
   }
   target.broadcasts = broadcasts;
@@ -862,6 +1017,40 @@ function parsedScalarArray(value: JsonValue | undefined): Array<string | number 
   }
 }
 
+interface ProcedurePrototypeMetadata {
+  readonly blockId: string;
+  readonly code: string;
+  readonly ids: string[];
+  readonly names: string[];
+}
+
+function procedureCodeForDefinition(target: ScratchTarget, definition: ScratchBlock): string | undefined {
+  const prototypeId = definition.inputs['custom_block']?.[1];
+  if (typeof prototypeId !== 'string') return undefined;
+  const prototype = target.blocks[prototypeId];
+  return isScratchBlock(prototype) && prototype.opcode === 'procedures_prototype'
+    && typeof prototype.mutation?.['proccode'] === 'string'
+    ? prototype.mutation['proccode']
+    : undefined;
+}
+
+function owningProcedureCode(target: ScratchTarget, blockId: string): string | undefined {
+  const visited = new Set<string>();
+  let currentId: string | null = blockId;
+  while (currentId !== null && !visited.has(currentId)) {
+    visited.add(currentId);
+    const current: ScratchBlockValue | undefined = target.blocks[currentId];
+    if (!isScratchBlock(current)) return undefined;
+    if (current.opcode === 'procedures_prototype') {
+      const code = current.mutation?.['proccode'];
+      return typeof code === 'string' ? code : undefined;
+    }
+    if (current.opcode === 'procedures_definition') return procedureCodeForDefinition(target, current);
+    currentId = current.parent;
+  }
+  return undefined;
+}
+
 function procedurePlan(
   target: ScratchTarget,
   generator: DeterministicGenerator,
@@ -869,48 +1058,65 @@ function procedurePlan(
   occupiedNames: Set<string>,
   stats: ObfuscationStats,
   warnings: string[]
-): ProcedurePlan | undefined {
-  const prototypes: Array<{code: string; ids: string[]; names: string[]}> = [];
-  const prototypeIds = new Map<string, readonly string[]>();
+): ProcedurePlan {
+  const prototypes: ProcedurePrototypeMetadata[] = [];
+  const firstPrototypeByCode = new Map<string, ProcedurePrototypeMetadata>();
+  const blockedCodes = new Set<string>();
   const seenCodes = new Set<string>();
-  let hasProcedureBlock = false;
-  for (const value of Object.values(target.blocks)) {
+  let hasAmbiguousPrototype = false;
+  let hasUnresolvedCall = false;
+  for (const [blockId, value] of Object.entries(target.blocks)) {
     if (!isScratchBlock(value)) continue;
     if (value.opcode === 'procedures_prototype') {
-      hasProcedureBlock = true;
       const mutation = value.mutation;
       const code = mutation?.['proccode'];
       const ids = parsedStringArray(mutation?.['argumentids']);
       const names = parsedStringArray(mutation?.['argumentnames']);
       const defaults = parsedScalarArray(mutation?.['argumentdefaults']);
       const placeholders = typeof code === 'string' ? code.match(PROCEDURE_PLACEHOLDER) ?? [] : [];
-      if (typeof code !== 'string' || seenCodes.has(code) || !ids || !names || !defaults || new Set(ids).size !== ids.length || ids.length !== names.length || ids.length !== defaults.length || ids.length !== placeholders.length) {
-        warnings.push(`Skipped procedure renaming in ${JSON.stringify(target.name)} because its prototype metadata is ambiguous.`);
-        return undefined;
+      const valid = typeof code === 'string'
+        && ids !== undefined
+        && names !== undefined
+        && defaults !== undefined
+        && new Set(ids).size === ids.length
+        && ids.length === names.length
+        && ids.length === defaults.length
+        && ids.length === placeholders.length;
+      if (!valid || seenCodes.has(code)) {
+        hasAmbiguousPrototype = true;
+        if (typeof code === 'string') blockedCodes.add(code);
+        continue;
       }
       seenCodes.add(code);
-      prototypes.push({code, ids, names});
-      prototypeIds.set(code, ids);
-    } else if (value.opcode === 'procedures_call') {
-      hasProcedureBlock = true;
+      const prototype = {blockId, code, ids, names};
+      prototypes.push(prototype);
+      firstPrototypeByCode.set(code, prototype);
     }
   }
-  if (!hasProcedureBlock) return {code: new Map(), argumentsByCode: new Map(), argumentNames: new Map()};
+
   for (const value of Object.values(target.blocks)) {
     if (!isScratchBlock(value) || value.opcode !== 'procedures_call') continue;
     const code = value.mutation?.['proccode'];
     const ids = parsedStringArray(value.mutation?.['argumentids']);
-    const expectedIds = typeof code === 'string' ? prototypeIds.get(code) : undefined;
+    const expectedIds = typeof code === 'string' ? firstPrototypeByCode.get(code)?.ids : undefined;
     if (typeof code !== 'string' || !expectedIds || !ids || ids.length !== expectedIds.length || ids.some((id, index) => id !== expectedIds[index])) {
-      warnings.push(`Skipped procedure renaming in ${JSON.stringify(target.name)} because it contains an unresolved call.`);
-      return undefined;
+      hasUnresolvedCall = true;
+      if (typeof code === 'string' && expectedIds) blockedCodes.add(code);
     }
+  }
+
+  if (hasAmbiguousPrototype) {
+    warnings.push(`Skipped procedure renaming in ${JSON.stringify(target.name)} because its prototype metadata is ambiguous.`);
+  }
+  if (hasUnresolvedCall) {
+    warnings.push(`Skipped procedure renaming in ${JSON.stringify(target.name)} because it contains an unresolved call.`);
   }
 
   const codeMap = new Map<string, string>();
   const argumentsByCode = new Map<string, Map<string, string>>();
-  const argumentNames = new Map<string, string>();
+  const argumentNamesByCode = new Map<string, Map<string, string>>();
   for (const prototype of prototypes) {
+    if (blockedCodes.has(prototype.code)) continue;
     const placeholders = prototype.code.match(PROCEDURE_PLACEHOLDER) ?? [];
     let code: string;
     do {
@@ -929,14 +1135,31 @@ function procedurePlan(
       }
     }
     argumentsByCode.set(prototype.code, ids);
+    const argumentNames = new Map<string, string>();
     for (const oldName of prototype.names) {
       if (!argumentNames.has(oldName)) {
         argumentNames.set(oldName, uniqueName(generator, occupiedNames));
         stats.symbolsRenamed += 1;
       }
     }
+    argumentNamesByCode.set(prototype.code, argumentNames);
   }
-  return {code: codeMap, argumentsByCode, argumentNames};
+
+  const reporterNames = new Map<string, string>();
+  for (const [blockId, value] of Object.entries(target.blocks)) {
+    if (
+      !isScratchBlock(value)
+      || (value.opcode !== 'argument_reporter_string_number' && value.opcode !== 'argument_reporter_boolean')
+    ) {
+      continue;
+    }
+    const oldName = value.fields['VALUE']?.[0];
+    if (typeof oldName !== 'string') continue;
+    const ownerCode = owningProcedureCode(target, blockId);
+    const replacement = ownerCode === undefined ? undefined : argumentNamesByCode.get(ownerCode)?.get(oldName);
+    if (replacement !== undefined) reporterNames.set(blockId, replacement);
+  }
+  return {code: codeMap, argumentsByCode, argumentNamesByCode, reporterNames};
 }
 
 function rewriteMutation(block: ScratchBlock, plan: ProcedurePlan | undefined): Map<string, string> | undefined {
@@ -948,10 +1171,13 @@ function rewriteMutation(block: ScratchBlock, plan: ProcedurePlan | undefined): 
   if (!nextCode || !idMap) return undefined;
   block.mutation['proccode'] = nextCode;
   const ids = parsedStringArray(block.mutation['argumentids']);
-  if (ids) block.mutation['argumentids'] = JSON.stringify(ids.map(id => idMap.get(id) ?? id));
+  if (ids) block.mutation['argumentids'] = JSON.stringify(ids.map(id => requiredMapValue(idMap, id)));
   if (block.opcode === 'procedures_prototype') {
     const names = parsedStringArray(block.mutation['argumentnames']);
-    if (names) block.mutation['argumentnames'] = JSON.stringify(names.map(name => plan.argumentNames.get(name) ?? name));
+    const argumentNames = plan.argumentNamesByCode.get(oldCode);
+    if (names && argumentNames) {
+      block.mutation['argumentnames'] = JSON.stringify(names.map(name => requiredMapValue(argumentNames, name)));
+    }
   }
   return idMap;
 }
@@ -994,6 +1220,7 @@ function poisonShadow(primitive: unknown, generator: DeterministicGenerator): vo
 }
 
 function rewriteField(
+  blockId: string,
   opcode: string,
   key: string,
   field: JsonValue[],
@@ -1002,13 +1229,13 @@ function rewriteField(
   target: ScratchTarget,
   procedures: ProcedurePlan | undefined
 ): void {
+  const reporterName = procedures?.reporterNames.get(blockId);
   if (
     key === 'VALUE'
     && (opcode === 'argument_reporter_string_number' || opcode === 'argument_reporter_boolean')
-    && typeof field[0] === 'string'
-    && procedures?.argumentNames.has(field[0])
+    && reporterName !== undefined
   ) {
-    field[0] = procedures.argumentNames.get(field[0]) ?? field[0];
+    field[0] = reporterName;
   }
   const kind: SymbolKind | undefined = key === 'VARIABLE' ? 'variable' : key === 'LIST' ? 'list' : key === 'BROADCAST_OPTION' ? 'broadcast' : undefined;
   if (!kind) return;
@@ -1028,7 +1255,7 @@ function firstReplacementByOriginalName(
   target: ScratchTarget,
   name: string
 ): Replacement | undefined {
-  for (const replacement of maps.get(target)?.variable.values() ?? []) {
+  for (const replacement of requiredMapValue(maps, target).variable.values()) {
     if (replacement.originalName === name) return replacement;
   }
   return undefined;
@@ -1092,8 +1319,7 @@ function rewriteBlocks(
   }
   const rewritten = orderedDictionary<ScratchBlockValue>();
   for (const [oldId, value] of Object.entries(target.blocks)) {
-    const nextId = blockIds.get(oldId);
-    if (!nextId) continue;
+    const nextId = requiredMapValue(blockIds, oldId);
     if (isPrimitive(value)) {
       rewritePrimitive(value, project, maps, target);
       rewritten[nextId] = value;
@@ -1124,6 +1350,7 @@ function rewriteBlocks(
     }
     for (const [fieldName, field] of Object.entries(value.fields)) {
       rewriteField(
+        oldId,
         value.opcode,
         fieldName,
         field,
@@ -1193,11 +1420,8 @@ export function applyCommonTransforms(
     broadcastPlan
   );
 
-  for (let targetIndex = 0; targetIndex < project.targets.length; targetIndex += 1) {
-    const target = project.targets[targetIndex];
-    if (!target) continue;
-    const symbols = maps.get(target);
-    if (!symbols) continue;
+  for (const [targetIndex, target] of project.targets.entries()) {
+    const symbols = requiredMapValue(maps, target);
     const occupiedIds = new Set<string>([
       ...Object.keys(target.blocks),
       ...Object.keys(target.variables),

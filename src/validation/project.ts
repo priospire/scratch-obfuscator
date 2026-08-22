@@ -1,7 +1,7 @@
 import {InputError} from '../errors.js';
 import {isPrimitive, isScratchBlock} from '../model/blocks.js';
 import {assertJsonTree, hasOwn, isRecord} from '../model/json.js';
-import type {ScratchBlock, ScratchProject, ScratchTarget} from '../types.js';
+import type {ScratchBlock, ScratchBlockValue, ScratchProject, ScratchTarget} from '../types.js';
 import {OFFICIAL_LITERAL_SHADOW_OPCODES, validateOfficialExtensions} from './extensions.js';
 import {validateOfficialSchema} from './schema.js';
 
@@ -217,8 +217,7 @@ function validatePrimitiveObjectShape(block: ScratchBlock, path: string): void {
   if (fieldNames.length !== 1 || fieldNames[0] !== expectedField) {
     fail(`${path}.fields`, `${block.opcode} must contain only its ${expectedField} field`);
   }
-  const field = block.fields[expectedField];
-  if (!Array.isArray(field)) fail(`${path}.fields.${expectedField}`, 'invalid primitive field tuple');
+  const field = block.fields[expectedField] as unknown[];
   const value = field[0];
   if (block.opcode === 'colour_picker') {
     if (field.length !== 1 || typeof value !== 'string' || !/^#[0-9a-fA-F]{6}$/u.test(value)) {
@@ -273,7 +272,7 @@ function validateBlock(
 function symbolEntries(target: ScratchTarget, kind: SymbolKind): Array<[string, string]> {
   if (kind === 'broadcast') return Object.entries(target.broadcasts);
   const declarations = kind === 'variable' ? target.variables : target.lists;
-  return Object.entries(declarations).flatMap(([id, tuple]) => typeof tuple[0] === 'string' ? [[id, tuple[0]]] : []);
+  return Object.entries(declarations).map(([id, tuple]): [string, string] => [id, tuple[0] as string]);
 }
 
 function matchingSymbolNames(target: ScratchTarget, kind: SymbolKind, name: string): string[] {
@@ -312,8 +311,7 @@ function validateGraphOwnership(
   const path = `$.targets[${targetIndex}].blocks`;
   const owners = new Map<string, Array<{id: string; edge: string; inactiveShadow: boolean}>>();
   const registerOwner = (childId: string, ownerId: string, edge: string, inactiveShadow = false): void => {
-    const child = target.blocks[childId];
-    if (!child) fail(`${path}.${ownerId}.${edge}`, `dangling block reference ${JSON.stringify(childId)}`);
+    const child = target.blocks[childId] as ScratchBlockValue;
     if (!isScratchBlock(child)) {
       if (edge === 'next') fail(`${path}.${ownerId}.${edge}`, `next edge must reference an object block, not ${JSON.stringify(childId)}`);
       return;
@@ -373,8 +371,8 @@ function validateCommentLinks(target: ScratchTarget, targetIndex: number): void 
     const comment = requireRecord(commentValue, `${targetPath}.comments.${commentId}`);
     const blockId = comment['blockId'];
     if (blockId === null || blockId === undefined) continue;
-    if (typeof blockId !== 'string') continue;
-    const block = target.blocks[blockId];
+    const linkedBlockId = blockId as string;
+    const block = target.blocks[linkedBlockId];
     if (!block || !isScratchBlock(block)) {
       fail(`${targetPath}.comments.${commentId}.blockId`, 'linked comment must reference an object block');
     }
@@ -453,9 +451,9 @@ function validateMonitor(
     : undefined;
   let target = namedTarget;
   target ??= project.targets.find(item => item.isStage);
-  if (!target) fail(path, 'cannot resolve monitor target');
+  const monitorTarget = target as ScratchTarget;
   if (opcode === 'data_variable' || opcode === 'data_listcontents') {
-    const declarations = opcode === 'data_variable' ? target.variables : target.lists;
+    const declarations = opcode === 'data_variable' ? monitorTarget.variables : monitorTarget.lists;
     const stage = project.targets.find(item => item.isStage);
     const parameter = opcode === 'data_variable' ? 'VARIABLE' : 'LIST';
     if (hasOwn(params, parameter) && typeof params[parameter] !== 'string') {
@@ -506,7 +504,6 @@ export function validateProject(
   }
 
   const stage = targets[0];
-  if (!stage) fail('$.targets[0]', 'missing Stage');
   const targetIndices = new Map(targets.map((target, index) => [target.name, index]));
   const dataMonitorOwners = new Map<string, Set<string>>();
   for (const monitorValue of root['monitors']) {
@@ -523,8 +520,7 @@ export function validateProject(
     if (removedBeforeRemapping) continue;
     const hasNamedTarget = typeof spriteName === 'string' && spriteName.length > 0;
     const targetIndex = hasNamedTarget ? targetIndices.get(spriteName) : 0;
-    const target = targetIndex === undefined ? stage : targets[targetIndex];
-    if (!target) continue;
+    const target = (targetIndex === undefined ? stage : targets[targetIndex]) as ScratchTarget;
     const kind: Exclude<SymbolKind, 'broadcast'> = opcode === 'data_variable' ? 'variable' : 'list';
     const localDeclarations = kind === 'variable' ? target.variables : target.lists;
     const stageDeclarations = kind === 'variable' ? stage.variables : stage.lists;
@@ -539,8 +535,7 @@ export function validateProject(
 
   const visibilityMutatorOwners = new Map<string, Set<string>>();
   for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
-    const target = targets[targetIndex];
-    if (!target) continue;
+    const target = targets[targetIndex] as ScratchTarget;
     for (const blockValue of Object.values(target.blocks)) {
       if (!isScratchBlock(blockValue) || !isRecord(blockValue.fields)) continue;
       const variableMutator = blockValue.opcode === 'data_showvariable' || blockValue.opcode === 'data_hidevariable';
@@ -564,8 +559,7 @@ export function validateProject(
 
   const symbolIds = new Map<string, SymbolLocation>();
   for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
-    const target = targets[targetIndex];
-    if (!target) continue;
+    const target = targets[targetIndex] as ScratchTarget;
     for (const kind of ['variable', 'list', 'broadcast'] as const) {
       for (const [id] of symbolEntries(target, kind)) {
         const path = `$.targets[${targetIndex}].${kind === 'variable' ? 'variables' : `${kind}s`}.${id}`;
@@ -604,15 +598,14 @@ export function validateProject(
 
   const project = value as ScratchProject;
   for (let index = 0; index < targets.length; index += 1) {
-    const target = targets[index];
-    if (!target) continue;
+    const target = targets[index] as ScratchTarget;
     const path = `$.targets[${index}]`;
     const blockIds = new Set(Object.keys(target.blocks));
     const commentIds = new Set(Object.keys(target.comments));
     const resolve = (kind: SymbolKind, id: string): boolean => {
       if (kind === 'broadcast') return hasOwn(stage.broadcasts, id);
-      const local = kind === 'variable' ? target.variables : kind === 'list' ? target.lists : target.broadcasts;
-      const global = kind === 'variable' ? stage.variables : kind === 'list' ? stage.lists : stage.broadcasts;
+      const local = kind === 'variable' ? target.variables : target.lists;
+      const global = kind === 'variable' ? stage.variables : stage.lists;
       return hasOwn(local, id) || hasOwn(global, id);
     };
     const resolveName = (kind: SymbolKind, name: string): boolean => {

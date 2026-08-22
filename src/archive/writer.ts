@@ -143,7 +143,7 @@ async function pushEntry(
     try {
       for await (const value of input) {
         throwIfAborted(signal);
-        const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value as Uint8Array);
+        const chunk = value as Buffer;
         actualSize += chunk.length;
         if (actualSize > entry.uncompressedSize) {
           throw new FileSystemError(`spooled asset ${JSON.stringify(entry.name)} changed while writing`);
@@ -176,7 +176,6 @@ function serializeJsonValue(value: unknown, ancestors: Set<object>, inArray = fa
     throw new TypeError('unsupported top-level JSON value');
   }
   if (typeof value === 'bigint') throw new TypeError('BigInt is not a JSON value');
-  if (typeof value !== 'object') throw new TypeError('unsupported JSON value');
   if (ancestors.has(value)) throw new TypeError('cyclic project value');
   ancestors.add(value);
   try {

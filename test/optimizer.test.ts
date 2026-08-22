@@ -1,7 +1,11 @@
 import {createRequire} from 'node:module';
 import {describe, expect, it} from 'vitest';
 import {isScratchBlock} from '../src/model/blocks.js';
-import {applySafeOptimizations, optimizeProject} from '../src/obfuscation/optimizer.js';
+import {
+  applySafeOptimizations,
+  createStaticInputEvaluator,
+  optimizeProject
+} from '../src/obfuscation/optimizer.js';
 import type {JsonValue, ScratchBlock, ScratchInput, ScratchProject} from '../src/types.js';
 import {validateProject} from '../src/validation/index.js';
 import {createFixtureProject} from './support.js';
@@ -54,16 +58,53 @@ const OPERATOR_CASES: readonly OperatorCase[] = [
 ];
 
 const MATH_CASES = [
-  ['abs', -3], ['floor', 3.9], ['ceiling', 3.1], ['sqrt', 9]
+  ['abs', -3], ['floor', 3.9], ['ceiling', 3.1], ['sqrt', 9],
+  ['sin', -30], ['sin', 90], ['cos', -60], ['cos', 180], ['tan', -45],
+  ['asin', -1], ['acos', 0], ['atan', 1], ['ln', 1], ['log', 1],
+  ['e ^', 0], ['10 ^', 0], ['unrecognized', 77]
 ] as const;
 
 const NONPORTABLE_MATH_CASES = [
-  ['sqrt', 2], ['sqrt', -1], ['sqrt', 2.5], ['sin', 30], ['cos', 60], ['tan', 45],
-  ['asin', 0.5], ['acos', 0.5], ['atan', 1],
-  ['ln', Math.E], ['log', 100], ['e ^', 1], ['10 ^', 2], ['unrecognized', 77]
+  ['sqrt', 2], ['sqrt', -1], ['sqrt', 2.5], ['sin', -0], ['sin', 17], ['cos', 17], ['tan', 17],
+  ['asin', 0.5], ['acos', 0.5], ['atan', 0.5],
+  ['ln', Math.E], ['log', 100], ['e ^', 1], ['10 ^', 2]
 ] as const;
 
 describe('safe deterministic optimizer', () => {
+  it('resolves private pooled literals only when their ownership is unambiguous', () => {
+    const project = createFixtureProject();
+    const stage = project.targets[0];
+    if (!stage) throw new Error('fixture Stage is missing');
+    stage.blocks = {
+      owner: operatorBlock('looks_say', null, {MESSAGE: [2, 'pooled'], VALUE: [2, 'reporter']}),
+      pooled: [10, 'encoded'],
+      reporter: operatorBlock('operator_join', 'owner', {STRING1: literal('a'), STRING2: literal('b')})
+    };
+    const resolve = (value: ScratchInput | string): string | undefined => (
+      value === 'pooled' ? 'decoded' : Array.isArray(value) && value[0] === 10 ? 'literal override' : undefined
+    );
+    const evaluate = createStaticInputEvaluator(stage, resolve);
+
+    expect(evaluate('owner', [2, 'pooled'])).toBe('decoded');
+    expect(evaluate('owner', [1, [10, 'visible']])).toBe('literal override');
+    expect(createStaticInputEvaluator(stage)('owner', [2, 'reporter'])).toBe('ab');
+
+    stage.blocks['second-owner'] = operatorBlock(
+      'looks_say',
+      null,
+      {MESSAGE: [2, 'pooled'], VALUE: [2, 'reporter']}
+    );
+    const shared = createStaticInputEvaluator(stage, resolve);
+    expect(shared('owner', [2, 'pooled'])).toBeUndefined();
+    expect(shared('owner', [2, 'reporter'])).toBeUndefined();
+
+    const secondOwner = stage.blocks['second-owner'];
+    if (!isScratchBlock(secondOwner)) throw new Error('second owner is missing');
+    delete secondOwner.inputs['VALUE'];
+    const wrongParent = createStaticInputEvaluator(stage, value => value === 'reporter' ? 'decoded reporter' : undefined);
+    expect(wrongParent('second-owner', [2, 'reporter'])).toBeUndefined();
+  });
+
   it('folds a nested fixed reporter tree and removes its obscured fallback', () => {
     const project = expressionProject({
       outer: operatorBlock('operator_multiply', 'set', {NUM1: [2, 'inner'], NUM2: literal(8)}),

@@ -1,7 +1,7 @@
 import type {DeterministicGenerator} from '../deterministic.js';
 import {isScratchBlock, stageOf} from '../model/blocks.js';
 import {isRecord, orderedDictionary} from '../model/json.js';
-import type {JsonValue, ScratchBlock, ScratchProject} from '../types.js';
+import type {JsonValue, ScratchBlock, ScratchInput, ScratchProject} from '../types.js';
 
 export const ANTI_CHEAT_WATERMARK_NAME = 'Obfuscated by PrioSDK Gen 4.';
 export const ANTI_CHEAT_DECOY_COUNT = 6;
@@ -34,7 +34,7 @@ const EXTENSION_HAT_OPCODES = new Set([
 interface Sentinel {
   readonly id: string;
   readonly name: string;
-  readonly expected: string | number;
+  readonly expected: string | 0;
 }
 
 interface GuardedHatSite {
@@ -136,9 +136,7 @@ function collectOccupiedNames(project: ScratchProject): Set<string> {
 
 function collectGuardedHatSites(project: ScratchProject): GuardedHatSite[] {
   const sites: GuardedHatSite[] = [];
-  for (let targetIndex = 0; targetIndex < project.targets.length; targetIndex += 1) {
-    const target = project.targets[targetIndex];
-    if (!target) continue;
+  for (const [targetIndex, target] of project.targets.entries()) {
     for (const [hatId, value] of Object.entries(target.blocks)) {
       if (!isScratchBlock(value) || !value.topLevel) continue;
       if (value.opcode.startsWith('event_when') || value.opcode === 'control_start_as_clone' ||
@@ -181,20 +179,104 @@ function textInput(value: string): JsonValue[] {
   return [1, [10, value]];
 }
 
-function sentinelInput(value: string | number): JsonValue[] {
-  return [1, [typeof value === 'number' ? 4 : 10, value]];
+function sentinelReporterInput(sentinel: Pick<Sentinel, 'id' | 'name'>): ScratchInput {
+  return [1, [12, sentinel.name, sentinel.id]];
 }
 
-function makeVariableReporter(parent: string, sentinel: Pick<Sentinel, 'id' | 'name'>): ScratchBlock {
+function makeEncodedExpectedValue(
+  parent: string,
+  expected: string | 0,
+  generator: DeterministicGenerator
+): ScratchBlock {
+  if (typeof expected === 'string') {
+    const split = 1 + generator.integer(expected.length - 1);
+    return {
+      opcode: 'operator_join',
+      next: null,
+      parent,
+      inputs: {
+        STRING1: [1, [10, expected.slice(0, split)]],
+        STRING2: [1, [10, expected.slice(split)]]
+      },
+      fields: {},
+      shadow: false,
+      topLevel: false
+    };
+  }
+
+  const mask = 1 + generator.integer(0x00ff_ffff);
   return {
-    opcode: 'data_variable',
+    opcode: 'operator_subtract',
     next: null,
     parent,
-    inputs: {},
-    fields: {VARIABLE: [sentinel.name, sentinel.id]},
+    inputs: {NUM1: [1, [4, mask]], NUM2: [1, [4, mask]]},
+    fields: {},
     shadow: false,
     topLevel: false
   };
+}
+
+function combineMismatchRoots(
+  blocks: Map<string, ScratchBlock>,
+  roots: readonly string[],
+  allocateBlock: () => string,
+  generator: DeterministicGenerator
+): string {
+  const ordered = generator.fork('leaf-order').shuffle(roots);
+  if (ordered.length === 0) throw new Error('anti-cheat condition construction failed');
+  const connect = (left: string, right: string): string => {
+    const orId = allocateBlock();
+    const leftBlock = blocks.get(left);
+    const rightBlock = blocks.get(right);
+    if (!leftBlock || !rightBlock) throw new Error('anti-cheat condition construction failed');
+    leftBlock.parent = orId;
+    rightBlock.parent = orId;
+    blocks.set(orId, {
+      opcode: 'operator_or',
+      next: null,
+      parent: null,
+      inputs: {OPERAND1: [2, left], OPERAND2: [2, right]},
+      fields: {},
+      shadow: false,
+      topLevel: false
+    });
+    return orId;
+  };
+
+  const template = generator.fork('tree-template').integer(3);
+  if (template === 1) {
+    const first = ordered[0];
+    if (!first) throw new Error('anti-cheat condition construction failed');
+    let root = first;
+    for (const next of ordered.slice(1)) root = connect(root, next);
+    return root;
+  }
+  if (template === 2) {
+    const last = ordered[ordered.length - 1];
+    if (!last) throw new Error('anti-cheat condition construction failed');
+    let root = last;
+    for (let index = ordered.length - 2; index >= 0; index -= 1) {
+      const next = ordered[index];
+      if (!next) throw new Error('anti-cheat condition construction failed');
+      root = connect(next, root);
+    }
+    return root;
+  }
+
+  let level = ordered;
+  while (level.length > 1) {
+    const nextLevel: string[] = [];
+    for (let index = 0; index < level.length; index += 2) {
+      const left = level[index];
+      const right = level[index + 1];
+      if (!left) continue;
+      nextLevel.push(right ? connect(left, right) : left);
+    }
+    level = nextLevel;
+  }
+  const root = level[0];
+  if (!root) throw new Error('anti-cheat condition construction failed');
+  return root;
 }
 
 function buildMismatchCondition(
@@ -207,7 +289,7 @@ function buildMismatchCondition(
   for (const sentinel of sentinels) {
     const notId = allocateBlock();
     const equalsId = allocateBlock();
-    const reporterId = allocateBlock();
+    const expectedId = allocateBlock();
     blocks.set(notId, {
       opcode: 'operator_not',
       next: null,
@@ -221,46 +303,18 @@ function buildMismatchCondition(
       opcode: 'operator_equals',
       next: null,
       parent: notId,
-      inputs: {OPERAND1: [2, reporterId], OPERAND2: sentinelInput(sentinel.expected)},
+      inputs: {OPERAND1: sentinelReporterInput(sentinel), OPERAND2: [2, expectedId]},
       fields: {},
       shadow: false,
       topLevel: false
     });
-    blocks.set(reporterId, makeVariableReporter(equalsId, sentinel));
+    blocks.set(
+      expectedId,
+      makeEncodedExpectedValue(equalsId, sentinel.expected, generator.fork(`expectation:${sentinel.id}`))
+    );
     conditionRoots.push(notId);
   }
-
-  let level = generator.shuffle(conditionRoots);
-  while (level.length > 1) {
-    const nextLevel: string[] = [];
-    for (let index = 0; index < level.length; index += 2) {
-      const left = level[index];
-      const right = level[index + 1];
-      if (!left) continue;
-      if (!right) {
-        nextLevel.push(left);
-        continue;
-      }
-      const orId = allocateBlock();
-      const leftBlock = blocks.get(left);
-      const rightBlock = blocks.get(right);
-      if (!leftBlock || !rightBlock) throw new Error('anti-cheat condition construction failed');
-      leftBlock.parent = orId;
-      rightBlock.parent = orId;
-      blocks.set(orId, {
-        opcode: 'operator_or',
-        next: null,
-        parent: null,
-        inputs: {OPERAND1: [2, left], OPERAND2: [2, right]},
-        fields: {},
-        shadow: false,
-        topLevel: false
-      });
-      nextLevel.push(orId);
-    }
-    level = nextLevel;
-  }
-  const rootId = level[0];
+  const rootId = combineMismatchRoots(blocks, conditionRoots, allocateBlock, generator);
   if (!rootId || !blocks.has(rootId)) throw new Error('anti-cheat condition construction failed');
   return {blocks, rootId};
 }
@@ -427,15 +481,10 @@ export function applyAntiCheatTransform(
   const additions: Array<readonly [string, JsonValue[]]> = [];
   let watermarkSentinel: Sentinel | undefined;
   if (watermark.watermarkCreated) {
-    const expected = stage.variables[watermark.watermarkVariableId]?.[1];
-    if (typeof expected !== 'string' && typeof expected !== 'number') {
-      throw new Error('anti-cheat watermark construction failed');
-    }
-    if (typeof expected === 'string') occupiedTokens.add(expected);
     watermarkSentinel = {
       id: watermark.watermarkVariableId,
       name: ANTI_CHEAT_WATERMARK_NAME,
-      expected
+      expected: 0
     };
   }
 
@@ -523,7 +572,7 @@ export function applyAntiCheatTransform(
   for (const sentinel of mismatchSentinels) {
     const notId = allocateBlock();
     const equalsId = allocateBlock();
-    const reporterId = allocateBlock();
+    const expectedId = allocateBlock();
     generated.set(notId, {
       opcode: 'operator_not',
       next: null,
@@ -537,46 +586,27 @@ export function applyAntiCheatTransform(
       opcode: 'operator_equals',
       next: null,
       parent: notId,
-      inputs: {OPERAND1: [2, reporterId], OPERAND2: sentinelInput(sentinel.expected)},
+      inputs: {OPERAND1: sentinelReporterInput(sentinel), OPERAND2: [2, expectedId]},
       fields: {},
       shadow: false,
       topLevel: false
     });
-    generated.set(reporterId, makeVariableReporter(equalsId, sentinel));
+    generated.set(
+      expectedId,
+      makeEncodedExpectedValue(
+        equalsId,
+        sentinel.expected,
+        generator.fork(`watchdog-expectation:${sentinel.id}`)
+      )
+    );
     conditionRoots.push(notId);
   }
-
-  let level = generator.fork('condition-order').shuffle(conditionRoots);
-  while (level.length > 1) {
-    const nextLevel: string[] = [];
-    for (let index = 0; index < level.length; index += 2) {
-      const left = level[index];
-      const right = level[index + 1];
-      if (!left) continue;
-      if (!right) {
-        nextLevel.push(left);
-        continue;
-      }
-      const orId = allocateBlock();
-      const leftBlock = generated.get(left);
-      const rightBlock = generated.get(right);
-      if (!leftBlock || !rightBlock) throw new Error('anti-cheat condition construction failed');
-      leftBlock.parent = orId;
-      rightBlock.parent = orId;
-      generated.set(orId, {
-        opcode: 'operator_or',
-        next: null,
-        parent: null,
-        inputs: {OPERAND1: [2, left], OPERAND2: [2, right]},
-        fields: {},
-        shadow: false,
-        topLevel: false
-      });
-      nextLevel.push(orId);
-    }
-    level = nextLevel;
-  }
-  const conditionRoot = level[0];
+  const conditionRoot = combineMismatchRoots(
+    generated,
+    conditionRoots,
+    allocateBlock,
+    generator.fork('condition-order')
+  );
   const conditionBlock = conditionRoot ? generated.get(conditionRoot) : undefined;
   const guard = generated.get(guardId);
   if (!conditionRoot || !conditionBlock || !guard) throw new Error('anti-cheat condition construction failed');

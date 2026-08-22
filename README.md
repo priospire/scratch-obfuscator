@@ -29,7 +29,7 @@ An internal tarball is also installable through npm:
 
 ```sh
 npm pack
-npm install --global ./scratch-obfuscator-0.4.0.tgz
+npm install --global ./scratch-obfuscator-0.5.0.tgz
 ```
 
 Both installed forms expose the `scratch-obfuscator` executable. This release has
@@ -90,7 +90,12 @@ through their declaration IDs before this decision, so stale saved labels do
 not freeze the wrong symbol and unrelated declarations still rename. ID-less
 variable, list, and broadcast fields are resolved with the pinned loader's exact
 Stage-name rules and rewritten with their declarations; they do not trigger a
-blanket namespace freeze. The watermark identifies the output as part of
+blanket namespace freeze. Official extension inputs are matched against the
+exact argument keys consumed by the pinned runtime, so ignored serialized
+inputs cannot keep unrelated names readable. Custom-procedure signatures and
+argument labels are handled per procedure: a malformed or duplicate signature
+freezes only its ambiguous region, while independent valid procedures still
+receive unrelated opaque labels. The watermark identifies the output as part of
 PrioSDK Gen 4.
 
 ### `-lossless`
@@ -113,7 +118,8 @@ eligibility gate admits live rewrites only for a single-threaded core-block
 surface with no timer, randomness, live-input, asynchronous, clone, broadcast,
 extension, procedure, or yield hazard. Eligible regions receive custom-block
 outlining of maximal non-yielding top-level runs, portable exact-domain constant
-folding, interior string splitting, contextual finite numeric equations,
+folding (including exact trigonometric, logarithmic, and exponential domains),
+interior string splitting, contextual finite numeric equations,
 condition inversion, opaque predicates, dual-rail private branches, bounded
 guarded data/list decoys, and scalar packing. Lossy mode adds no event hats;
 its generated data paths remain behind statically false private guards. Packing
@@ -171,6 +177,12 @@ pre-existing green-flag, key, broadcast, click, clone, and supported extension
 hats from continuing during that loaded session. One shared hidden guard
 procedure per affected target keeps the entry checks bounded.
 
+Sentinel reads use typed inline variable primitives instead of ordinary visible
+reporter blocks. String expectations are deterministically split and rejoined,
+the numeric watermark expectation is represented as a masked subtraction, and
+the mismatch tree varies among balanced and folded shapes. These encodings make
+the live checks less uniform while preserving the same trip condition.
+
 The latch, checks, and decoys add executable blocks, state, archive size, and
 runtime work. Consequently, `-lossless -anticheat` preserves the original
 program through the lossless base passes but does not retain the lossless
@@ -205,7 +217,7 @@ number of protected hats. Each target guard checks the full protected sentinel
 set before latching and stopping. The layer adds `36 + 36T + H` object blocks
 when it creates the mandatory watermark, or `32 + 32T + H` when reusing one.
 Including inline literal primitives, the corresponding normalized additions
-are `45 + 45T + H` or `40 + 40T + H`.
+are `61 + 61T + H` or `54 + 54T + H`.
 
 ## Runtime compatibility
 
@@ -299,10 +311,14 @@ npm pack
 ```
 
 `npm run qa` runs the strict typecheck, lint, production-dependency audit,
-coverage suite, and build. Coverage thresholds are 97% for statements, 93% for
-branches, 100% for functions, and 99% for lines across all production source,
-including the CLI. The current full suite reaches 97.12% statements, 93.15%
-branches, 100% functions, and 99.45% lines without excluding production files.
+coverage suite, and build. Coverage thresholds are 98% for statements, 96% for
+branches, 100% for functions, and 99.5% for lines across all production source,
+including the CLI. The current 531-test suite reaches 98.56% statements,
+96.24% branches, 100% functions, and 99.72% lines without excluding production
+files. Remaining uncovered paths are defensive responses to impossible
+generated-graph states, corrupted bundled schemas, or dependency contract
+violations; manufacturing those states would weaken the evidence rather than
+improve it.
 
 The test suite includes deterministic/property transforms, official VM
 load/serialize/reload and execution checks, per-step semantic traces, an
@@ -337,15 +353,12 @@ signatures and more than 1,800 normalized topology kinds.
 This evaluator is an offline checkout QA utility for trusted local fixtures;
 untrusted archives must go through the resource-limited production CLI.
 
-On the fixed fallback-sensitive fixture the current resistance scores are
-26.323 (original), 44.138 (lossless), 44.138 (lossy, conservatively fallen
-back), and 94.243 (no-preserve); no-preserve direct and normalized chain
-recovery are both 0.070. On the fully eligible comparison, no-preserve scores
-95.477 versus lossy's 89.805 and recovers no original 3- or 4-block chain. The
-previous no-preserve iteration scored 82.578 and trailed lossy by 1.668 on that
-same class of fixture, so the regression measures a real structural
-improvement rather than raw output growth. These are same-fixture structural
-heuristics, not absolute security or subjective-readability guarantees.
+On the fixed release fixture the current resistance scores are 15.143
+(original), 33.699 (lossless), 84.759 (lossy), and 95.584 (no-preserve).
+No-preserve direct and normalized chain recovery are both 0.047. Dedicated
+fully eligible regressions additionally require no original 3- or 4-block
+chain to survive normalization. These are same-fixture structural heuristics,
+not absolute security or subjective-readability guarantees.
 
 Pinned compatibility tools have a separate security boundary; see
 [`QA_SECURITY.md`](QA_SECURITY.md). Third-party schema licensing and trademark

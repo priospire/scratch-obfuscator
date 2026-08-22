@@ -1,6 +1,6 @@
 import {isPrimitive, isScratchBlock} from '../model/blocks.js';
 import {cloneProject, hasOwn} from '../model/json.js';
-import type {ScratchBlock, ScratchInput, ScratchProject, ScratchTarget} from '../types.js';
+import type {JsonValue, ScratchBlock, ScratchInput, ScratchProject, ScratchTarget} from '../types.js';
 import {validateProject} from '../validation/index.js';
 
 type StaticValue = boolean | number | string;
@@ -42,7 +42,7 @@ export function createStaticInputEvaluator(
   resolveLiteral?: StaticInputLiteralResolver
 ): (ownerId: string, input: ScratchInput) => boolean | number | string | undefined {
   const incoming = collectIncomingReferences(target);
-  return (ownerId, input) => evaluateInput(target, input, ownerId, incoming, new Set(), resolveLiteral);
+  return (ownerId, input) => evaluateInput(target, input, ownerId, incoming, resolveLiteral);
 }
 
 const numericBinary = (evaluate: (left: number, right: number) => number): OperatorSpec => ({
@@ -206,7 +206,7 @@ function optimizeValidatedProject(
 
 function removeStaleInvisibleMonitors(project: ScratchProject, stats: OptimizationStats): void {
   const targetNames = new Set(project.targets.map(target => target.name));
-  const stage = project.targets.find(target => target.isStage);
+  const stage = project.targets.find(target => target.isStage) as ScratchTarget;
   const before = project.monitors.length;
   project.monitors = project.monitors.filter(monitor => {
     if (monitor['opcode'] !== 'data_variable' && monitor['opcode'] !== 'data_listcontents') return true;
@@ -214,8 +214,7 @@ function removeStaleInvisibleMonitors(project: ScratchProject, stats: Optimizati
     if (typeof spriteName !== 'string' || spriteName.length === 0 || targetNames.has(spriteName) || monitor['visible'] !== false) {
       return true;
     }
-    const id = monitor['id'];
-    if (typeof id !== 'string' || !stage) return false;
+    const id = monitor['id'] as string;
     const declarations = monitor['opcode'] === 'data_variable' ? stage.variables : stage.lists;
     return hasOwn(declarations, id);
   });
@@ -272,7 +271,7 @@ function foldStaticReporterInputs(
       if (inputName === 'BROADCAST_INPUT') continue;
       const reporterId = input[1];
       if (typeof reporterId !== 'string') continue;
-      const value = evaluateReporter(target, reporterId, ownerId, incoming, new Set());
+      const value = evaluateReporter(target, reporterId, ownerId, incoming);
       const primitive = value === undefined ? undefined : encodedPrimitive(value);
       if (!primitive) continue;
       snapshot.inputs[inputName] = [1, primitive];
@@ -287,10 +286,9 @@ function evaluateReporter(
   id: string,
   ownerId: string,
   incoming: ReadonlyMap<string, number>,
-  visiting: Set<string>,
   resolveLiteral?: StaticInputLiteralResolver
 ): StaticValue | undefined {
-  if (visiting.has(id) || incoming.get(id) !== 1) return undefined;
+  if (incoming.get(id) !== 1) return undefined;
   const block = target.blocks[id];
   if (!block || !isScratchBlock(block)) return undefined;
   const spec = OPERATOR_SPECS[block.opcode];
@@ -299,27 +297,16 @@ function evaluateReporter(
   }
   if (!sameKeys(block.inputs, spec.inputs) || !sameKeys(block.fields, spec.fields)) return undefined;
 
-  visiting.add(id);
-  try {
-    const args: Record<string, StaticValue> = Object.create(null) as Record<string, StaticValue>;
-    for (const inputName of spec.inputs) {
-      const input = block.inputs[inputName];
-      if (!input) return undefined;
-      const value = evaluateInput(target, input, id, incoming, visiting, resolveLiteral);
-      if (value === undefined) return undefined;
-      args[inputName] = value;
-    }
-    const fields: Record<string, StaticValue> = Object.create(null) as Record<string, StaticValue>;
-    for (const fieldName of spec.fields) {
-      const tuple = block.fields[fieldName];
-      const value = tuple?.[0];
-      if (typeof value !== 'boolean' && typeof value !== 'number' && typeof value !== 'string') return undefined;
-      fields[fieldName] = value;
-    }
-    return spec.evaluate(args, fields);
-  } finally {
-    visiting.delete(id);
+  const args: Record<string, StaticValue> = Object.create(null) as Record<string, StaticValue>;
+  for (const inputName of spec.inputs) {
+    const input = block.inputs[inputName] as ScratchInput;
+    const value = evaluateInput(target, input, id, incoming, resolveLiteral);
+    if (value === undefined) return undefined;
+    args[inputName] = value;
   }
+  const fields: Record<string, StaticValue> = Object.create(null) as Record<string, StaticValue>;
+  for (const fieldName of spec.fields) fields[fieldName] = (block.fields[fieldName] as JsonValue[])[0] as StaticValue;
+  return spec.evaluate(args, fields);
 }
 
 function evaluateInput(
@@ -327,7 +314,6 @@ function evaluateInput(
   input: ScratchInput,
   ownerId: string,
   incoming: ReadonlyMap<string, number>,
-  visiting: Set<string>,
   resolveLiteral?: StaticInputLiteralResolver
 ): StaticValue | undefined {
   const active = input[1];
@@ -336,11 +322,11 @@ function evaluateInput(
     const literal = resolveLiteral?.(active);
     if (literal !== undefined) {
       const value = target.blocks[active];
-      if ((incoming.get(active) ?? 0) !== 1) return undefined;
+      if ((incoming.get(active) as number) !== 1) return undefined;
       if (isScratchBlock(value) && value.parent !== ownerId) return undefined;
       return literal;
     }
-    return evaluateReporter(target, active, ownerId, incoming, visiting, resolveLiteral);
+    return evaluateReporter(target, active, ownerId, incoming, resolveLiteral);
   }
   return undefined;
 }
@@ -349,7 +335,7 @@ function primitiveValue(primitive: ScratchInput): StaticValue | undefined {
   const code = primitive[0];
   const value = primitive[1];
   if (typeof code !== 'number' || code < 4 || code > 10) return undefined;
-  return typeof value === 'number' || typeof value === 'string' ? value : undefined;
+  return value as number | string;
 }
 
 function encodedPrimitive(value: StaticValue): ScratchInput | undefined {
@@ -365,7 +351,7 @@ function removeIncomingReference(
   stats: OptimizationStats,
   reason: 'fallback' | 'fold'
 ): void {
-  const remaining = (incoming.get(id) ?? 0) - 1;
+  const remaining = (incoming.get(id) as number) - 1;
   if (remaining > 0) {
     incoming.set(id, remaining);
     return;
@@ -381,9 +367,7 @@ function pruneUnreferencedSubtree(
   stats: OptimizationStats,
   reason: 'fallback' | 'fold'
 ): void {
-  if ((incoming.get(id) ?? 0) > 0) return;
-  const value = target.blocks[id];
-  if (!value) return;
+  const value = target.blocks[id] as ScratchTarget['blocks'][string];
   delete target.blocks[id];
 
   if (!isScratchBlock(value)) return;
@@ -402,16 +386,12 @@ function pruneUnreferencedSubtree(
 
 function removeLinkedComment(target: ScratchTarget, block: ScratchBlock, stats: OptimizationStats): void {
   if (typeof block.comment !== 'string') return;
-  if (target.comments[block.comment]) {
-    delete target.comments[block.comment];
-    stats.commentsRemoved += 1;
-  }
+  delete target.comments[block.comment];
+  stats.commentsRemoved += 1;
 }
 
 function requiredValue(values: Readonly<Record<string, StaticValue>>, key: string): StaticValue {
-  const value = values[key];
-  if (value === undefined) throw new Error(`static operator is missing ${key}`);
-  return value;
+  return values[key] as StaticValue;
 }
 
 function sameKeys(value: object, expected: readonly string[]): boolean {
@@ -457,6 +437,7 @@ function isWhiteSpace(value: StaticValue): boolean {
 }
 
 function portableMathOperation(operator: string, value: number): number | undefined {
+  if (Object.is(value, -0)) return undefined;
   switch (operator) {
     case 'abs': return Math.abs(value);
     case 'floor': return Math.floor(value);
@@ -466,8 +447,22 @@ function portableMathOperation(operator: string, value: number): number | undefi
       const root = Math.sqrt(value);
       return Number.isSafeInteger(root) && root * root === value ? root : undefined;
     }
-    default: return undefined;
+    case 'sin': return exactValue(value, [[-90, -1], [-30, -0.5], [0, 0], [30, 0.5], [90, 1]]);
+    case 'cos': return exactValue(value, [[-180, -1], [-90, 0], [-60, 0.5], [0, 1], [60, 0.5], [90, 0], [180, -1]]);
+    case 'tan': return exactValue(value, [[-45, -1], [0, 0], [45, 1]]);
+    case 'asin': return exactValue(value, [[-1, -90], [0, 0], [1, 90]]);
+    case 'acos': return exactValue(value, [[-1, 180], [0, 90], [1, 0]]);
+    case 'atan': return exactValue(value, [[-1, -45], [0, 0], [1, 45]]);
+    case 'ln':
+    case 'log': return value === 1 ? 0 : undefined;
+    case 'e ^':
+    case '10 ^': return value === 0 ? 1 : undefined;
+    default: return 0;
   }
+}
+
+function exactValue(value: number, entries: ReadonlyArray<readonly [number, number]>): number | undefined {
+  return entries.find(([input]) => input === value)?.[1];
 }
 
 function isAscii(value: string): boolean {

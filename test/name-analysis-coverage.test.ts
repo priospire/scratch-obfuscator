@@ -171,7 +171,7 @@ describe('name and analysis edge coverage', () => {
     expect(variableNameByValue(stage, 10)).toMatch(/^x_/u);
   });
 
-  it('freezes a target procedure transaction when one prototype contains a JSON-valid invalid default', () => {
+  it('freezes a malformed procedure region while renaming an independent valid region', () => {
     const project = emptyProject();
     const sprite = requireTarget(project, 1);
     sprite.blocks = {
@@ -192,8 +192,11 @@ describe('name and analysis edge coverage', () => {
     ]);
     const procedures = Object.values(sprite.blocks).filter(isScratchBlock);
     expect(procedures.find(value => value.opcode === 'procedures_prototype' && value.mutation?.['proccode'] === 'bad %s')).toBeDefined();
-    expect(procedures.find(value => value.opcode === 'procedures_prototype' && value.mutation?.['proccode'] === 'good')).toBeDefined();
-    expect(procedures.find(value => value.opcode === 'procedures_call')?.mutation?.['proccode']).toBe('good');
+    expect(procedures.find(value => value.opcode === 'procedures_prototype' && value.mutation?.['proccode'] === 'good')).toBeUndefined();
+    const goodPrototype = procedures.find(value => value.opcode === 'procedures_prototype' && value.mutation?.['proccode'] !== 'bad %s');
+    expect(goodPrototype?.mutation?.['proccode']).toMatch(/^x_/u);
+    expect(procedures.find(value => value.opcode === 'procedures_call')?.mutation?.['proccode'])
+      .toBe(goodPrototype?.mutation?.['proccode']);
   });
 
   it('freezes malformed default and call JSON independently without partially rewriting either target', () => {

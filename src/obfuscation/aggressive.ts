@@ -122,6 +122,8 @@ interface LocalGrowth {
 
 const COHERENT_DECOY_GROWTH = 38;
 const MAX_COHERENT_EXTRA_GROWTH = 18;
+const ENCODED_OPAQUE_GUARD_GROWTH = 6;
+const ENCODED_DUAL_RAIL_GROWTH = 10;
 
 class GrowthBudget {
   readonly #growth: number;
@@ -353,7 +355,7 @@ export function applyAggressiveTransforms(
     const target = requireTarget(project, edge.targetIndex);
     const predecessor = blockAt(target, edge.predecessorId);
     if (!predecessor || predecessor.next !== edge.successorId || !blockAt(target, edge.successorId)) continue;
-    if (!budget.trySpend(9, 2)) continue;
+    if (!budget.trySpend(ENCODED_DUAL_RAIL_GROWTH, 2)) continue;
     insertDualRail(
       target,
       edge,
@@ -374,7 +376,7 @@ export function applyAggressiveTransforms(
     const livePlan = mode === 'no-preserve'
       ? makeLiveGuardPlan(rng.fork(`guard-live-plan-${index}`))
       : undefined;
-    const growth = livePlan?.growth ?? 5;
+    const growth = livePlan?.growth ?? ENCODED_OPAQUE_GUARD_GROWTH;
     if (!budget.trySpend(growth, 2)) continue;
     const target = requireTarget(project, edge.targetIndex);
     const state = getDecoyState(edge.targetIndex);
@@ -387,7 +389,9 @@ export function applyAggressiveTransforms(
   const fallbackLivePlan = mode === 'no-preserve'
     ? makeLiveGuardPlan(rng.fork('fallback-live-plan'))
     : undefined;
-  const fallbackGuardGrowth = fallbackLivePlan ? fallbackLivePlan.growth + 1 : 5;
+  const fallbackGuardGrowth = fallbackLivePlan
+    ? fallbackLivePlan.growth + 1
+    : ENCODED_OPAQUE_GUARD_GROWTH;
   if (guards.length === 0 && budget.trySpend(fallbackGuardGrowth, 2)) {
     const targetIndex = rng.fork('guard-target').integer(project.targets.length);
     const target = requireTarget(project, targetIndex);
@@ -801,7 +805,7 @@ function outlineRun(
 }
 
 function estimateDispatcherGrowth(length: number): number {
-  return (18 * length) + 29;
+  return (18 * length) + 30;
 }
 
 function boundDispatcherRuns(project: ScratchProject, run: LinearRun): LinearRun[] {
@@ -1274,19 +1278,23 @@ function encodeNumericLiteral(
 function exactNumericEquation(value: number, rng: DeterministicGenerator): {readonly left: string; readonly right: string} {
   if (value === 0) {
     const left = Object.is(value, -0) ? -Number.MIN_VALUE : Number.MIN_VALUE;
-    if (!Object.is(left * 0.5, value)) throw new Error('signed-zero equation failed its exact-domain check');
     return {left: canonicalNumber(left), right: canonicalNumber(0.5)};
   }
+  const safeFactor = Math.abs(value) > Number.MAX_VALUE / 2 ? 2 : 0.5;
+  let equation = {
+    left: canonicalNumber(value / safeFactor),
+    right: canonicalNumber(safeFactor)
+  };
   const exponents = rng.shuffle([-32, -16, -8, -4, -2, -1, 1, 2, 4, 8, 16, 32]);
   const sign = rng.integer(2) === 0 ? 1 : -1;
   for (const exponent of exponents) {
     const factor = sign * (2 ** exponent);
     const quotient = value / factor;
     if (!Number.isFinite(quotient) || !Object.is(quotient * factor, value)) continue;
-    return {left: canonicalNumber(quotient), right: canonicalNumber(factor)};
+    equation = {left: canonicalNumber(quotient), right: canonicalNumber(factor)};
+    break;
   }
-  if (!Object.is(value * 1, value)) throw new Error('numeric equation failed its exact-domain check');
-  return {left: canonicalNumber(value), right: canonicalNumber(1)};
+  return equation;
 }
 
 function canonicalNumber(value: number): string {
@@ -1295,9 +1303,7 @@ function canonicalNumber(value: number): string {
 
 function collectConditionSites(project: ScratchProject): ConditionSite[] {
   const sites: ConditionSite[] = [];
-  for (let targetIndex = 0; targetIndex < project.targets.length; targetIndex += 1) {
-    const target = project.targets[targetIndex];
-    if (!target) continue;
+  for (const [targetIndex, target] of project.targets.entries()) {
     for (const [blockId, value] of Object.entries(target.blocks)) {
       if (!isScratchBlock(value) || (value.opcode !== 'control_if' && value.opcode !== 'control_if_else')) continue;
       sites.push({
@@ -1346,9 +1352,7 @@ function invertCondition(
 
 function collectInsertionEdges(project: ScratchProject): InsertionEdge[] {
   const edges: InsertionEdge[] = [];
-  for (let targetIndex = 0; targetIndex < project.targets.length; targetIndex += 1) {
-    const target = project.targets[targetIndex];
-    if (!target) continue;
+  for (const [targetIndex, target] of project.targets.entries()) {
     for (const [topId, topValue] of Object.entries(target.blocks)) {
       if (!isScratchBlock(topValue) || !topValue.topLevel || topValue.opcode === 'procedures_definition') continue;
       const visited = new Set<string>();
@@ -1370,9 +1374,7 @@ function collectInsertionEdges(project: ScratchProject): InsertionEdge[] {
 
 function collectTopLevelSequentialEdges(project: ScratchProject): InsertionEdge[] {
   const edges: InsertionEdge[] = [];
-  for (let targetIndex = 0; targetIndex < project.targets.length; targetIndex += 1) {
-    const target = project.targets[targetIndex];
-    if (!target) continue;
+  for (const [targetIndex, target] of project.targets.entries()) {
     for (const [topId, topValue] of Object.entries(target.blocks)) {
       if (!isScratchBlock(topValue) || !topValue.topLevel || topValue.opcode === 'procedures_definition') continue;
       const visited = new Set<string>();
@@ -1408,7 +1410,7 @@ function insertDualRail(
   const successor = requireBlock(target, edge.successorId);
   const railId = factory.block(`${domain}-branch`);
   const equalsId = factory.block(`${domain}-equals`);
-  const reporterId = factory.block(`${domain}-variable`);
+  const encodedId = factory.block(`${domain}-encoded`);
   const firstRailId = factory.block(`${domain}-first`);
   const secondRailId = factory.block(`${domain}-second`);
   const firstRailIsLive = rng.integer(2) === 0;
@@ -1425,13 +1427,12 @@ function insertDualRail(
     shadow: false,
     topLevel: false
   };
-  target.blocks[equalsId] = makeOpaqueEquality(
+  target.blocks[equalsId] = makeEncodedOpaqueEquality(
     railId,
-    reporterId,
-    state,
-    firstRailIsLive ? state.token : state.mismatch
+    encodedId,
+    state
   );
-  target.blocks[reporterId] = makeVariableReporter(equalsId, state);
+  target.blocks[encodedId] = makeEncodedOpaqueToken(equalsId, firstRailIsLive ? state.token : state.mismatch);
   target.blocks[firstRailId] = {
     opcode: 'data_setvariableto',
     next: null,
@@ -1465,13 +1466,19 @@ function insertOpaqueGuard(
   const successor = requireBlock(target, edge.successorId);
   const guardId = factory.block(`guard-${domain}`);
   const equalsId = factory.block(`guard-equals-${domain}`);
-  const reporterId = factory.block(`guard-variable-${domain}`);
+  const encodedId = factory.block(`guard-encoded-${domain}`);
   target.blocks[guardId] = makeGuard(edge.predecessorId, edge.successorId, equalsId);
-  target.blocks[equalsId] = makeFalseEquality(guardId, reporterId, state);
-  target.blocks[reporterId] = makeVariableReporter(equalsId, state);
+  target.blocks[equalsId] = makeEncodedFalseEquality(guardId, encodedId, state);
+  target.blocks[encodedId] = makeEncodedOpaqueToken(equalsId, state.mismatch);
   predecessor.next = guardId;
   successor.parent = guardId;
-  return {targetIndex: edge.targetIndex, guardId, tailId: null, chainDepth: 1, growth: 5};
+  return {
+    targetIndex: edge.targetIndex,
+    guardId,
+    tailId: null,
+    chainDepth: 1,
+    growth: ENCODED_OPAQUE_GUARD_GROWTH
+  };
 }
 
 function insertLiveRailGuard(
@@ -1511,11 +1518,17 @@ function createTopLevelGuard(
 ): GuardSite {
   const guardId = factory.block(`guard-${domain}`);
   const equalsId = factory.block(`guard-equals-${domain}`);
-  const reporterId = factory.block(`guard-variable-${domain}`);
+  const encodedId = factory.block(`guard-encoded-${domain}`);
   target.blocks[guardId] = makeGuard(null, null, equalsId, true);
-  target.blocks[equalsId] = makeFalseEquality(guardId, reporterId, state);
-  target.blocks[reporterId] = makeVariableReporter(equalsId, state);
-  return {targetIndex, guardId, tailId: null, chainDepth: 1, growth: 5};
+  target.blocks[equalsId] = makeEncodedFalseEquality(guardId, encodedId, state);
+  target.blocks[encodedId] = makeEncodedOpaqueToken(equalsId, state.mismatch);
+  return {
+    targetIndex,
+    guardId,
+    tailId: null,
+    chainDepth: 1,
+    growth: ENCODED_OPAQUE_GUARD_GROWTH
+  };
 }
 
 function createLiveRailDriver(
@@ -1675,8 +1688,49 @@ function makeGuard(parent: string | null, next: string | null, equalsId: string,
   };
 }
 
-function makeFalseEquality(parentId: string, reporterId: string, state: PrivateState): ScratchBlock {
-  return makeOpaqueEquality(parentId, reporterId, state, state.mismatch);
+function makeEncodedFalseEquality(parentId: string, encodedId: string, state: PrivateState): ScratchBlock {
+  return makeEncodedOpaqueEquality(parentId, encodedId, state);
+}
+
+function makeEncodedOpaqueEquality(
+  parentId: string,
+  encodedId: string,
+  state: PrivateState
+): ScratchBlock {
+  return {
+    opcode: 'operator_equals',
+    next: null,
+    parent: parentId,
+    inputs: {
+      OPERAND1: [1, [12, state.variableName, state.variableId]],
+      OPERAND2: [2, encodedId]
+    },
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+}
+
+function makeEncodedOpaqueToken(parentId: string, value: string): ScratchBlock {
+  const [left, right] = splitOpaqueToken(value);
+  return {
+    opcode: 'operator_join',
+    next: null,
+    parent: parentId,
+    inputs: {STRING1: textInput(left), STRING2: textInput(right)},
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+}
+
+function splitOpaqueToken(value: string): readonly [string, string] {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193) >>> 0;
+  }
+  const split = 1 + (hash % (value.length - 1));
+  return [value.slice(0, split), value.slice(split)];
 }
 
 function makeOpaqueEquality(
@@ -2164,7 +2218,9 @@ function fillDecoyBudget(
       const driverPlan = mode === 'no-preserve'
         ? makeLiveGuardPlan(rng.fork(`decoy-driver-plan-${sites.length}`))
         : undefined;
-      const guardGrowth = driverPlan ? driverPlan.growth + 1 : 5;
+      const guardGrowth = driverPlan
+        ? driverPlan.growth + 1
+        : ENCODED_OPAQUE_GUARD_GROWTH;
       if (budget.remaining >= guardGrowth && remainingGrowth >= guardGrowth) {
         site = driverPlan
           ? createLiveRailDriver(target, targetIndex, state, factory, `decoy-${sites.length}`, driverPlan)

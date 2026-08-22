@@ -622,7 +622,10 @@ function assertAntiCheat(project, label) {
   });
   assert(latchMutators.length === allowedLatchSetters.size &&
     latchMutators.every(mutator => allowedLatchSetters.has(mutator.id)), `${label} resets or otherwise mutates its latch`);
-  return 45 + (45 * eventGuards.guardedTargetCount) + eventGuards.guardedHatCount;
+  const fixedGuardGrowth = (7 * protectedSentinels.size) + 5;
+  return fixedGuardGrowth
+    + (fixedGuardGrowth * eventGuards.guardedTargetCount)
+    + eventGuards.guardedHatCount;
 }
 
 function assertEveryOriginalHatIsGuarded(
@@ -685,35 +688,58 @@ function inspectMismatchCondition(target, rootId, label) {
   const reachable = collectInputReachable(target, rootId);
   const blocks = [...reachable].map(id => ({id, block: target.blocks[id]}))
     .filter(entry => isObjectBlock(entry.block));
-  const reporters = blocks.filter(({block}) => block.opcode === 'data_variable');
   const equalsBlocks = blocks.filter(({block}) => block.opcode === 'operator_equals');
   const notBlocks = blocks.filter(({block}) => block.opcode === 'operator_not');
   const orBlocks = blocks.filter(({block}) => block.opcode === 'operator_or');
-  assert(reporters.length > 0, `${label} has no protected reporters`);
-  assert(equalsBlocks.length === reporters.length, `${label} comparison tree is incomplete`);
-  assert(notBlocks.length === reporters.length, `${label} mismatch tree is incomplete`);
-  assert(orBlocks.length === reporters.length - 1, `${label} OR tree is incomplete`);
-  assert(blocks.length === reporters.length * 4 - 1, `${label} contains an unexpected condition opcode`);
+  const expectedBlocks = blocks.filter(({block}) =>
+    block.opcode === 'operator_join' || block.opcode === 'operator_subtract');
+  assert(equalsBlocks.length > 0, `${label} has no protected comparisons`);
+  assert(notBlocks.length === equalsBlocks.length, `${label} mismatch tree is incomplete`);
+  assert(orBlocks.length === equalsBlocks.length - 1, `${label} OR tree is incomplete`);
+  assert(expectedBlocks.length === equalsBlocks.length, `${label} expectation encoding is incomplete`);
+  assert(blocks.length === equalsBlocks.length * 4 - 1, `${label} contains an unexpected condition opcode`);
 
   const sentinels = new Map();
-  for (const reporter of reporters) {
-    const variableId = reporter.block.fields?.VARIABLE?.[1];
-    const variableName = reporter.block.fields?.VARIABLE?.[0];
+  for (const equals of equalsBlocks) {
+    const reporter = inlineVariable(equals.block.inputs?.OPERAND1);
+    const variableId = reporter?.id;
+    const variableName = reporter?.name;
     assert(typeof variableId === 'string' && typeof variableName === 'string' && !sentinels.has(variableId),
       `${label} has an invalid protected variable`);
-    const equals = target.blocks[reporter.block.parent];
-    assert(isObjectBlock(equals) && equals.opcode === 'operator_equals', `${label} protected reporter is not compared`);
-    assert(Object.values(equals.inputs ?? {}).some(input => activeReference(input) === reporter.id),
-      `${label} comparison does not reference its reporter`);
-    const expectedValues = Object.values(equals.inputs ?? {}).map(primitiveScalar)
-      .filter(value => typeof value === 'string' || typeof value === 'number');
-    assert(expectedValues.length === 1, `${label} protected comparison has no unique sentinel value`);
-    const not = target.blocks[equals.parent];
-    assert(isObjectBlock(not) && not.opcode === 'operator_not' && activeReference(not.inputs?.OPERAND) === reporter.block.parent,
+    const expectedValue = evaluateBlindedExpectation(target, equals.block.inputs?.OPERAND2, label);
+    const not = target.blocks[equals.block.parent];
+    assert(isObjectBlock(not) && not.opcode === 'operator_not' && activeReference(not.inputs?.OPERAND) === equals.id,
       `${label} sentinel comparison does not trip on mismatch`);
-    sentinels.set(variableId, {name: variableName, expected: expectedValues[0]});
+    sentinels.set(variableId, {name: variableName, expected: expectedValue});
   }
   return sentinels;
+}
+
+function inlineVariable(input) {
+  const active = Array.isArray(input) ? input[1] : undefined;
+  if (!Array.isArray(active) || active[0] !== 12) return undefined;
+  return typeof active[1] === 'string' && typeof active[2] === 'string'
+    ? {name: active[1], id: active[2]}
+    : undefined;
+}
+
+function evaluateBlindedExpectation(target, input, label) {
+  const id = activeReference(input);
+  const block = id ? target.blocks[id] : undefined;
+  assert(isObjectBlock(block), `${label} protected comparison has no encoded expectation`);
+  if (block.opcode === 'operator_join') {
+    const left = primitiveText(block.inputs?.STRING1);
+    const right = primitiveText(block.inputs?.STRING2);
+    assert(typeof left === 'string' && left.length > 0 && typeof right === 'string' && right.length > 0,
+      `${label} string expectation is not split`);
+    return left + right;
+  }
+  assert(block.opcode === 'operator_subtract', `${label} uses an unexpected expectation encoding`);
+  const left = primitiveNumber(block.inputs?.NUM1);
+  const right = primitiveNumber(block.inputs?.NUM2);
+  assert(typeof left === 'number' && typeof right === 'number' && left === right,
+    `${label} numeric expectation mask is invalid`);
+  return left - right;
 }
 
 function assertSameSentinels(expected, actual, label) {
@@ -837,13 +863,11 @@ function primitiveText(input) {
   return Array.isArray(active) && active[0] === 10 && typeof active[1] === 'string' ? active[1] : undefined;
 }
 
-function primitiveScalar(input) {
+function primitiveNumber(input) {
   const active = Array.isArray(input) ? input[1] : undefined;
-  if (!Array.isArray(active)) return undefined;
-  if (active[0] === 10 && typeof active[1] === 'string') return active[1];
-  return active[0] === 4 && (typeof active[1] === 'string' || typeof active[1] === 'number')
-    ? active[1]
-    : undefined;
+  if (!Array.isArray(active) || active[0] !== 4) return undefined;
+  const value = Number(active[1]);
+  return Number.isFinite(value) ? value : undefined;
 }
 
 function findUniqueMarker(blocks, opcode, label) {

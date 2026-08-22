@@ -54,14 +54,14 @@ describe('optimizer against the official Scratch runtime', () => {
     expect(optimizedValues.slice(0, 5)).toEqual([72, 'NaN:true', 9, 0.5, true]);
     expect(Object.is(optimizedValues[5], -0)).toBe(true);
     expect(optimizedValues[6]).toBe(1);
-    expect(optimized.stats.reporterTreesFolded).toBe(4);
-    expect(optimized.stats.reporterBlocksRemoved).toBe(8);
+    expect(optimized.stats.reporterTreesFolded).toBe(5);
+    expect(optimized.stats.reporterBlocksRemoved).toBe(9);
     const remaining = Object.values(optimized.project.targets[0]?.blocks ?? {})
       .filter(isScratchBlock)
       .map(block => block.opcode);
     expect(remaining).toContain('operator_contains');
     expect(remaining).toContain('operator_multiply');
-    expect(remaining).toContain('operator_mathop');
+    expect(remaining).not.toContain('operator_mathop');
     expect(remaining).not.toContain('operator_random');
   }, 60_000);
 

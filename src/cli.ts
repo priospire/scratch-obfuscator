@@ -18,7 +18,7 @@ import {validateProject} from './validation/index.js';
 import {compareUtf8} from './deterministic.js';
 import {DEFAULT_LIMITS, type ArchiveEntry, type ObfuscationMode, type ObfuscationStats} from './types.js';
 
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 
 const HELP = `Usage: scratch-obfuscator <input.sb3> [options]
 
@@ -73,8 +73,7 @@ export function parseCliArguments(arguments_: readonly string[]): ParsedCliArgum
   let optionsEnded = false;
 
   for (let index = 0; index < argumentsNormalized.length; index += 1) {
-    const argument = argumentsNormalized[index];
-    if (argument === undefined) break;
+    const argument = argumentsNormalized[index] as string;
     if (!optionsEnded && argument === '--') {
       optionsEnded = true;
     } else if (!optionsEnded && (argument === '--lossless' || argument === '--lossy' || argument === '--no-preserve')) {
@@ -103,8 +102,7 @@ export function parseCliArguments(arguments_: readonly string[]): ParsedCliArgum
 
   if (modes.size > 1) throw new UsageError('choose only one of --lossless, --lossy, or --no-preserve');
   if (positionals.length !== 1) throw new UsageError('exactly one input .sb3 file is required');
-  const input = positionals[0];
-  if (input === undefined) throw new UsageError('exactly one input .sb3 file is required');
+  const input = positionals[0] as string;
   const mode = modes.values().next().value ?? 'lossless';
   return output === undefined
     ? {kind: 'run', input, mode, antiCheat, force}
@@ -204,11 +202,8 @@ function assertAssetsPreserved(before: readonly ArchiveEntry[], after: readonly 
     throw new FileSystemError('output verification failed: archive entry count changed');
   }
   for (let index = 0; index < beforeAssets.length; index += 1) {
-    const expected = beforeAssets[index];
-    const actual = afterAssets[index];
-    if (expected === undefined || actual === undefined) {
-      throw new FileSystemError('output verification failed: archive entry count changed');
-    }
+    const expected = beforeAssets[index] as ArchiveEntry;
+    const actual = afterAssets[index] as ArchiveEntry;
     if (expected.name !== actual.name || expected.uncompressedSize !== actual.uncompressedSize ||
         !Buffer.from(expected.contentHash).equals(Buffer.from(actual.contentHash))) {
       throw new FileSystemError(`output verification failed: asset ${JSON.stringify(expected.name)} was not preserved`);

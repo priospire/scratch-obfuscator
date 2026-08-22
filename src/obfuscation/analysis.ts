@@ -7,6 +7,7 @@ import {
   OFFICIAL_LITERAL_SHADOW_OPCODES
 } from '../validation/extensions.js';
 import {ANTI_CHEAT_WATERMARK_NAME} from './anticheat.js';
+import {createStaticInputEvaluator} from './optimizer.js';
 
 /** Straight-line commands which can be isolated without moving a yield or C-shaped stack. */
 const VIRTUALIZABLE_STACK_OPCODES = new Set([
@@ -109,6 +110,11 @@ const SPRITE_SENSING_ATTRIBUTES = new Set([
   'costume name',
   'size',
   'volume'
+]);
+const IMPLEMENTED_LITERAL_MENU_FIELDS = new Map<string, string>([
+  ['sound_beats_menu', 'BEATS'],
+  ['sound_effects_menu', 'EFFECT'],
+  ['sound_sounds_menu', 'SOUND_MENU']
 ]);
 const LOSSY_OBSERVABILITY_HAZARDS = new Set([
   'control_create_clone_of',
@@ -245,9 +251,7 @@ export function isLossyLiveTransformSafe(project: ScratchProject): boolean {
  */
 export function collectLinearRuns(project: ScratchProject, minimumLength = 4): LinearRun[] {
   const runs: LinearRun[] = [];
-  for (let targetIndex = 0; targetIndex < project.targets.length; targetIndex += 1) {
-    const target = project.targets[targetIndex];
-    if (!target) continue;
+  for (const [targetIndex, target] of project.targets.entries()) {
     const claimed = new Set<string>();
     for (const [topId, topValue] of Object.entries(target.blocks)) {
       if (!isScratchBlock(topValue) || !topValue.topLevel || topValue.opcode === 'procedures_definition') continue;
@@ -302,9 +306,7 @@ export function collectLinearRuns(project: ScratchProject, minimumLength = 4): L
 
 export function collectStringLiteralSites(project: ScratchProject): StringLiteralSite[] {
   const sites: StringLiteralSite[] = [];
-  for (let targetIndex = 0; targetIndex < project.targets.length; targetIndex += 1) {
-    const target = project.targets[targetIndex];
-    if (!target) continue;
+  for (const [targetIndex, target] of project.targets.entries()) {
     for (const [ownerId, value] of Object.entries(target.blocks)) {
       if (!isScratchBlock(value) || !isCoreBlock(value.opcode)) continue;
       for (const [inputName, input] of Object.entries(value.inputs)) {
@@ -326,9 +328,7 @@ export function collectStringLiteralSites(project: ScratchProject): StringLitera
  */
 export function collectNumericLiteralSites(project: ScratchProject): NumericLiteralSite[] {
   const sites: NumericLiteralSite[] = [];
-  for (let targetIndex = 0; targetIndex < project.targets.length; targetIndex += 1) {
-    const target = project.targets[targetIndex];
-    if (!target) continue;
+  for (const [targetIndex, target] of project.targets.entries()) {
     for (const [ownerId, value] of Object.entries(target.blocks)) {
       if (!isScratchBlock(value)) continue;
       const safeInputs = SAFE_NUMERIC_INPUTS.get(value.opcode);
@@ -392,9 +392,7 @@ export function collectVariableCandidates(project: ScratchProject): VariableCand
   const orderedCandidates: MutableVariableCandidate[] = [];
   const candidatesByTarget = project.targets.map(() => new Map<string, MutableVariableCandidate>());
 
-  for (let targetIndex = 0; targetIndex < project.targets.length; targetIndex += 1) {
-    const target = project.targets[targetIndex];
-    if (!target) continue;
+  for (const [targetIndex, target] of project.targets.entries()) {
     for (const [id, declaration] of Object.entries(target.variables)) {
       const name = declaration[0];
       const initialValue = declaration[1];
@@ -420,9 +418,12 @@ export function collectVariableCandidates(project: ScratchProject): VariableCand
     }
   }
 
-  const resolveCandidate = (id: unknown, name: unknown, usageTargetIndex: number): MutableVariableCandidate | undefined => {
-    const usageTarget = project.targets[usageTargetIndex];
-    if (!usageTarget) return undefined;
+  const resolveCandidate = (
+    id: unknown,
+    name: unknown,
+    usageTargetIndex: number,
+    usageTarget: ScratchTarget
+  ): MutableVariableCandidate | undefined => {
     if (typeof id === 'string' && id.length > 0) {
       if (Object.prototype.hasOwnProperty.call(usageTarget.variables, id)) {
         return candidatesByTarget[usageTargetIndex]?.get(id);
@@ -438,20 +439,18 @@ export function collectVariableCandidates(project: ScratchProject): VariableCand
     return globalId === undefined ? undefined : candidatesByTarget[stageIndex]?.get(globalId);
   };
 
-  for (let usageTargetIndex = 0; usageTargetIndex < project.targets.length; usageTargetIndex += 1) {
-    const usageTarget = project.targets[usageTargetIndex];
-    if (!usageTarget) continue;
+  for (const [usageTargetIndex, usageTarget] of project.targets.entries()) {
     for (const [blockId, value] of Object.entries(usageTarget.blocks)) {
       if (!isScratchBlock(value)) {
         if (isPrimitive(value) && value[0] === 12) {
-          const candidate = resolveCandidate(value[2], value[1], usageTargetIndex);
+          const candidate = resolveCandidate(value[2], value[1], usageTargetIndex, usageTarget);
           if (candidate) candidate.safe = false;
         }
         continue;
       }
 
       const variableField = value.fields['VARIABLE'];
-      const fieldCandidate = resolveCandidate(variableField?.[1], variableField?.[0], usageTargetIndex);
+      const fieldCandidate = resolveCandidate(variableField?.[1], variableField?.[0], usageTargetIndex, usageTarget);
       if (fieldCandidate) {
         if (!hasExactVariableBlockShape(value)) {
           fieldCandidate.safe = false;
@@ -468,7 +467,7 @@ export function collectVariableCandidates(project: ScratchProject): VariableCand
       for (const [inputName, input] of Object.entries(value.inputs)) {
         const active = input[1];
         if (isPrimitive(active) && active[0] === 12) {
-          const candidate = resolveCandidate(active[2], active[1], usageTargetIndex);
+          const candidate = resolveCandidate(active[2], active[1], usageTargetIndex, usageTarget);
           if (candidate) {
             candidate.usages.push({kind: 'inline', targetIndex: usageTargetIndex, blockId, inputName});
             candidate.estimatedGrowth += input[2] === undefined ? 2 : 1;
@@ -476,7 +475,7 @@ export function collectVariableCandidates(project: ScratchProject): VariableCand
         }
         const fallback = input[2];
         if (isPrimitive(fallback) && fallback[0] === 12) {
-          const candidate = resolveCandidate(fallback[2], fallback[1], usageTargetIndex);
+          const candidate = resolveCandidate(fallback[2], fallback[1], usageTargetIndex, usageTarget);
           if (candidate) candidate.safe = false;
         }
       }
@@ -507,7 +506,7 @@ function hasOpaqueVariableSurface(target: ScratchTarget): boolean {
     if (!isScratchBlock(value)) continue;
     if (isOfficialExtensionOpcode(value.opcode)) continue;
     if (!OFFICIAL_CORE_OPCODES.has(value.opcode)) return true;
-    if (value.mutation !== undefined && !isRecognizedProcedureMutation(value)) return true;
+    if (value.mutation !== undefined && !isRecognizedProcedureMutation(value.opcode, value.mutation)) return true;
   }
   return false;
 }
@@ -518,10 +517,8 @@ function isOfficialExtensionOpcode(opcode: string): boolean {
   return OFFICIAL_EXTENSION_OPCODES.get(opcode.slice(0, separator))?.has(opcode) === true;
 }
 
-function isRecognizedProcedureMutation(block: ScratchBlock): boolean {
-  if (block.opcode !== 'procedures_call' && block.opcode !== 'procedures_prototype') return false;
-  const mutation = block.mutation;
-  if (!mutation) return false;
+function isRecognizedProcedureMutation(opcode: string, mutation: Readonly<Record<string, JsonValue>>): boolean {
+  if (opcode !== 'procedures_call' && opcode !== 'procedures_prototype') return false;
   const allowedKeys = new Set([
     'argumentdefaults',
     'argumentids',
@@ -626,18 +623,33 @@ function literalReporterValue(target: ScratchTarget, id: string): string | undef
   if (!OFFICIAL_LITERAL_SHADOW_OPCODES.has(reporter.opcode) || Object.keys(reporter.fields).length !== 1 || Object.keys(reporter.inputs).length > 0) {
     return undefined;
   }
-  const value = Object.values(reporter.fields)[0]?.[0];
+  const entry = Object.entries(reporter.fields)[0];
+  if (entry === undefined) return undefined;
+  const implementedField = IMPLEMENTED_LITERAL_MENU_FIELDS.get(reporter.opcode);
+  if (implementedField !== undefined && entry[0] !== implementedField) return undefined;
+  const value = entry[1][0];
   return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
     ? String(value)
     : undefined;
 }
 
+function staticInputEvaluator(
+  target: ScratchTarget
+): (ownerId: string, input: ScratchInput) => boolean | number | string | undefined {
+  return createStaticInputEvaluator(target, value => (
+    typeof value === 'string' ? literalReporterValue(target, value) : literalPrimitiveValue(value)
+  ));
+}
+
 function sensingBlockSelection(
   project: ScratchProject,
   owner: ScratchTarget,
-  input: ScratchInput | undefined
+  ownerId: string,
+  input: ScratchInput | undefined,
+  evaluateStaticInput: (ownerId: string, input: ScratchInput) => boolean | number | string | undefined
 ): SensingObjectSelection {
-  const active = input?.[1];
+  if (input === undefined) return selectionForSensingLiteral(project, 'undefined');
+  const active = input[1];
   if (active === null || active === undefined) return selectionForSensingLiteral(project, 'undefined');
   if (isPrimitive(active)) {
     const literal = literalPrimitiveValue(active);
@@ -645,7 +657,9 @@ function sensingBlockSelection(
   }
   if (typeof active !== 'string') return {kind: 'dynamic'};
   const literal = literalReporterValue(owner, active);
-  return literal === undefined ? {kind: 'dynamic'} : selectionForSensingLiteral(project, literal);
+  if (literal !== undefined) return selectionForSensingLiteral(project, literal);
+  const fixed = evaluateStaticInput(ownerId, input);
+  return fixed === undefined ? {kind: 'dynamic'} : selectionForSensingLiteral(project, String(fixed));
 }
 
 function scratchString(value: JsonValue | undefined): string {
@@ -694,9 +708,13 @@ function collectSensedVariables(project: ScratchProject): VariablesByTarget {
     addSensedVariable(result, targets, property);
   };
   for (const target of project.targets) {
-    for (const value of Object.values(target.blocks)) {
+    const evaluateStaticInput = staticInputEvaluator(target);
+    for (const [blockId, value] of Object.entries(target.blocks)) {
       if (!isScratchBlock(value) || value.opcode !== 'sensing_of') continue;
-      register(sensingBlockSelection(project, target, value.inputs['OBJECT']), value.fields['PROPERTY']?.[0]);
+      register(
+        sensingBlockSelection(project, target, blockId, value.inputs['OBJECT'], evaluateStaticInput),
+        value.fields['PROPERTY']?.[0]
+      );
     }
   }
   for (const monitor of project.monitors) {
