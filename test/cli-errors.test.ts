@@ -110,23 +110,19 @@ describe('CLI error mapping and output behavior', () => {
     const input = join(directory, 'warning.sb3');
     const output = join(directory, 'warning-output.sb3');
     const project = minimalProject();
-    const targets = project['targets'] as Array<Record<string, unknown>>;
-    const stage = targets[0];
-    if (stage === undefined) throw new Error('fixture stage is missing');
-    stage['variables'] = {variable: ['Score', 0]};
-    stage['blocks'] = {
-      sensing: {
-        opcode: 'sensing_of',
-        next: null,
-        parent: null,
-        inputs: {OBJECT: [1, [10, 'Stage']]},
-        fields: {PROPERTY: ['Score']},
-        shadow: false,
-        topLevel: true,
-        x: 0,
-        y: 0
-      }
-    };
+    project['monitors'] = [{
+      id: 'stale-variable',
+      mode: 'default',
+      opcode: 'data_variable',
+      params: {VARIABLE: 'Readable stale name'},
+      spriteName: 'Missing sprite',
+      value: 0,
+      width: 0,
+      height: 0,
+      x: 0,
+      y: 0,
+      visible: false
+    }];
     const assetName = '00000000000000000000000000000000.svg';
     await writeFile(input, zipSync({
       'project.json': Buffer.from(JSON.stringify(project)),
@@ -135,6 +131,7 @@ describe('CLI error mapping and output behavior', () => {
     const capture = collectingIo();
     expect(await runCli([input, '-o', output], capture.io), capture.stderr.join('')).toBe(0);
     expect(capture.stderr.join('')).toContain('warning:');
+    expect(capture.stderr.join('')).not.toContain('Readable stale name');
   });
 });
 

@@ -56,7 +56,7 @@ describe('aggressive dispatcher runtime regressions', () => {
         new DeterministicGenerator(new Uint8Array(32).fill(seedByte), 'dispatcher-runtime'),
         resultStats
       );
-      expect(resultStats.virtualizedBlocks).toBe(25);
+      expect(resultStats.virtualizedBlocks).toBe(24);
       for (const template of collectDispatcherTemplates(project)) dispatcherTemplates.add(template);
       expect(countIndirectTransitions(project)).toBeGreaterThan(resultStats.virtualizedBlocks);
 
@@ -76,6 +76,40 @@ describe('aggressive dispatcher runtime regressions', () => {
     }
     expect(dispatcherTemplates).toEqual(new Set(['control_if', 'control_if_else']));
   }, 60_000);
+
+  for (const [tokenKind, seedByte] of [['label', 73], ['tag', 74]] as const) {
+    it(`rejects a single-character authenticated transition ${tokenKind} tamper`, async () => {
+      const project = makeIncrementProject(8);
+      const resultStats = stats(project);
+      applyAggressiveTransforms(
+        project,
+        'no-preserve',
+        new DeterministicGenerator(new Uint8Array(32).fill(seedByte), `dispatcher-${tokenKind}-tamper-runtime`),
+        resultStats
+      );
+
+      expect(resultStats.virtualizedBlocks).toBe(8);
+      expect(countAuthenticatedRoutes(project)).toBeGreaterThan(resultStats.virtualizedBlocks);
+      const tamper = corruptTransitionToken(project, tokenKind);
+      expect(tamper).toBeDefined();
+      if (!tamper) throw new Error(`transition ${tokenKind} is unavailable`);
+      expect(countCharacterDifferences(tamper.before, tamper.after)).toBe(1);
+
+      const vm = new ScratchVm();
+      vm.attachStorage(new ScratchStorage());
+      try {
+        await vm.loadProject(createFixtureArchive(project));
+        vm.start();
+        vm.greenFlag();
+        for (let step = 0; step < 500 && vm.runtime.threads.length > 0; step += 1) vm.runtime._step();
+        expect(vm.runtime.threads).toHaveLength(0);
+        const sprite = vm.runtime.targets.find(target => !target.isStage);
+        expect(sprite?.variables['counter-id']?.value).toBe(0);
+      } finally {
+        vm.quit();
+      }
+    }, 60_000);
+  }
 
   it('removes a virtualized scalar declaration while preserving clone-local list state', async () => {
     const project = makeCloneProject();
@@ -299,6 +333,70 @@ function countIndirectTransitions(project: ScratchProject): number {
     }
   }
   return count;
+}
+
+function countAuthenticatedRoutes(project: ScratchProject): number {
+  let count = 0;
+  for (const target of project.targets) {
+    for (const value of Object.values(target.blocks)) {
+      if (!isScratchBlock(value) || value.opcode !== 'operator_and') continue;
+      const equalityIds = ['OPERAND1', 'OPERAND2'].map(name => value.inputs[name]?.[1]);
+      const variableIds = equalityIds.flatMap(equalityId => {
+        const equality = typeof equalityId === 'string' ? target.blocks[equalityId] : undefined;
+        if (!equality || !isScratchBlock(equality) || equality.opcode !== 'operator_equals') return [];
+        const reporterId = equality.inputs['OPERAND1']?.[1];
+        const reporter = typeof reporterId === 'string' ? target.blocks[reporterId] : undefined;
+        const variableId = reporter && isScratchBlock(reporter) && reporter.opcode === 'data_variable'
+          ? reporter.fields['VARIABLE']?.[1]
+          : undefined;
+        return typeof variableId === 'string' ? [variableId] : [];
+      });
+      if (variableIds.length === 2 && variableIds[0] !== variableIds[1]) count += 1;
+    }
+  }
+  return count;
+}
+
+function corruptTransitionToken(
+  project: ScratchProject,
+  kind: 'label' | 'tag'
+): {readonly before: string; readonly after: string} | undefined {
+  for (const target of project.targets) {
+    for (const declaration of Object.values(target.lists)) {
+      const values = declaration[1];
+      if (!Array.isArray(values)) continue;
+      const marker: unknown = values[0];
+      const width: unknown = values[1];
+      if (typeof marker !== 'string' || !marker.startsWith('r_') || typeof width !== 'number') continue;
+      const labelIndex = 2 + width;
+      const tagIndex = labelIndex + 1;
+      const label: unknown = values[labelIndex];
+      const tag: unknown = values[tagIndex];
+      if (
+        typeof label !== 'string'
+        || !label.startsWith('!')
+        || typeof tag !== 'string'
+        || !tag.startsWith('?')
+      ) continue;
+      const tokenIndex = kind === 'label' ? labelIndex : tagIndex;
+      const before = kind === 'label' ? label : tag;
+      const finalCharacter = before.at(-1);
+      if (!finalCharacter) throw new Error(`transition ${kind} is empty`);
+      const after = `${before.slice(0, -1)}${finalCharacter === '0' ? '1' : '0'}`;
+      values[tokenIndex] = after;
+      return {before, after};
+    }
+  }
+  return undefined;
+}
+
+function countCharacterDifferences(left: string, right: string): number {
+  if (left.length !== right.length) return Number.POSITIVE_INFINITY;
+  let differences = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) differences += 1;
+  }
+  return differences;
 }
 
 function makeNumericEquationProject(): ScratchProject {

@@ -1,6 +1,6 @@
 import type {DeterministicGenerator} from '../deterministic.js';
 import {isScratchBlock, stageOf} from '../model/blocks.js';
-import {orderedDictionary} from '../model/json.js';
+import {isRecord, orderedDictionary} from '../model/json.js';
 import type {JsonValue, ScratchBlock, ScratchProject} from '../types.js';
 
 export const ANTI_CHEAT_WATERMARK_NAME = 'Obfuscated by PrioSDK Gen 4.';
@@ -34,7 +34,7 @@ const EXTENSION_HAT_OPCODES = new Set([
 interface Sentinel {
   readonly id: string;
   readonly name: string;
-  readonly expected: string;
+  readonly expected: string | number;
 }
 
 interface GuardedHatSite {
@@ -120,9 +120,16 @@ function collectOccupiedNames(project: ScratchProject): Set<string> {
     for (const name of Object.values(target.broadcasts)) occupied.add(name);
     for (const value of Object.values(target.blocks)) {
       if (!isScratchBlock(value)) continue;
+      const sensingProperty = value.opcode === 'sensing_of' ? value.fields['PROPERTY']?.[0] : undefined;
+      if (typeof sensingProperty === 'string') occupied.add(sensingProperty);
       const proccode = value.mutation?.['proccode'];
       if (typeof proccode === 'string') occupied.add(proccode);
     }
+  }
+  for (const monitor of project.monitors) {
+    if (monitor['opcode'] !== 'sensing_of') continue;
+    const params = monitor['params'];
+    if (isRecord(params) && typeof params['PROPERTY'] === 'string') occupied.add(params['PROPERTY']);
   }
   return occupied;
 }
@@ -163,16 +170,19 @@ export function applyWatermarkTransform(
   }
 
   const watermarkVariableId = uniqueId(generator.fork('variable-id'), 'v_', collectOccupiedIds(project));
-  const value = uniqueToken(generator.fork('value'), new Set());
   const variables = orderedDictionary<JsonValue[]>();
   for (const [id, declaration] of Object.entries(stage.variables)) variables[id] = declaration;
-  variables[watermarkVariableId] = [ANTI_CHEAT_WATERMARK_NAME, value];
+  variables[watermarkVariableId] = [ANTI_CHEAT_WATERMARK_NAME, 0];
   stage.variables = variables;
   return Object.freeze({watermarkVariableId, watermarkCreated: true});
 }
 
 function textInput(value: string): JsonValue[] {
   return [1, [10, value]];
+}
+
+function sentinelInput(value: string | number): JsonValue[] {
+  return [1, [typeof value === 'number' ? 4 : 10, value]];
 }
 
 function makeVariableReporter(parent: string, sentinel: Pick<Sentinel, 'id' | 'name'>): ScratchBlock {
@@ -211,7 +221,7 @@ function buildMismatchCondition(
       opcode: 'operator_equals',
       next: null,
       parent: notId,
-      inputs: {OPERAND1: [2, reporterId], OPERAND2: textInput(sentinel.expected)},
+      inputs: {OPERAND1: [2, reporterId], OPERAND2: sentinelInput(sentinel.expected)},
       fields: {},
       shadow: false,
       topLevel: false
@@ -418,8 +428,10 @@ export function applyAntiCheatTransform(
   let watermarkSentinel: Sentinel | undefined;
   if (watermark.watermarkCreated) {
     const expected = stage.variables[watermark.watermarkVariableId]?.[1];
-    if (typeof expected !== 'string') throw new Error('anti-cheat watermark construction failed');
-    occupiedTokens.add(expected);
+    if (typeof expected !== 'string' && typeof expected !== 'number') {
+      throw new Error('anti-cheat watermark construction failed');
+    }
+    if (typeof expected === 'string') occupiedTokens.add(expected);
     watermarkSentinel = {
       id: watermark.watermarkVariableId,
       name: ANTI_CHEAT_WATERMARK_NAME,
@@ -525,7 +537,7 @@ export function applyAntiCheatTransform(
       opcode: 'operator_equals',
       next: null,
       parent: notId,
-      inputs: {OPERAND1: [2, reporterId], OPERAND2: textInput(sentinel.expected)},
+      inputs: {OPERAND1: [2, reporterId], OPERAND2: sentinelInput(sentinel.expected)},
       fields: {},
       shadow: false,
       topLevel: false

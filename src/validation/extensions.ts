@@ -2,20 +2,149 @@ import {isScratchBlock, opcodePrefix} from '../model/blocks.js';
 import type {ScratchProject} from '../types.js';
 import {InputError} from '../errors.js';
 
-export const OFFICIAL_EXTENSION_IDS = new Set([
-  'boost',
-  'ev3',
-  'faceSensing',
-  'gdxfor',
-  'makeymakey',
-  'microbit',
-  'music',
-  'pen',
-  'text2speech',
-  'translate',
-  'videoSensing',
-  'wedo2'
+function extensionOpcodeSurface(
+  extensionId: string,
+  blockOpcodes: readonly string[],
+  menuNames: readonly string[]
+): ReadonlySet<string> {
+  return new Set([
+    ...blockOpcodes.map(opcode => `${extensionId}_${opcode}`),
+    ...menuNames.map(menuName => `${extensionId}_menu_${menuName}`)
+  ]);
+}
+
+/** Blocks and serialized menu helpers registered by the bundled Scratch VM 15.1.0 extensions. */
+export const OFFICIAL_EXTENSION_OPCODES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ['boost', extensionOpcodeSurface('boost', [
+    'getMotorPosition',
+    'getTiltAngle',
+    'motorOff',
+    'motorOn',
+    'motorOnFor',
+    'motorOnForRotation',
+    'seeingColor',
+    'setLightHue',
+    'setMotorDirection',
+    'setMotorPower',
+    'whenColor',
+    'whenTilted'
+  ], [
+    'COLOR',
+    'MOTOR_DIRECTION',
+    'MOTOR_ID',
+    'MOTOR_REPORTER_ID',
+    'TILT_DIRECTION',
+    'TILT_DIRECTION_ANY'
+  ])],
+  ['ev3', extensionOpcodeSurface('ev3', [
+    'beep',
+    'buttonPressed',
+    'getBrightness',
+    'getDistance',
+    'getMotorPosition',
+    'motorSetPower',
+    'motorTurnClockwise',
+    'motorTurnCounterClockwise',
+    'whenBrightnessLessThan',
+    'whenButtonPressed',
+    'whenDistanceLessThan'
+  ], ['motorPorts', 'sensorPorts'])],
+  ['faceSensing', extensionOpcodeSurface('faceSensing', [
+    'faceIsDetected',
+    'faceSize',
+    'faceTilt',
+    'goToPart',
+    'pointInFaceTiltDirection',
+    'setSizeToFaceSize',
+    'whenFaceDetected',
+    'whenSpriteTouchesPart',
+    'whenTilted'
+  ], ['PART', 'TILT'])],
+  ['gdxfor', extensionOpcodeSurface('gdxfor', [
+    'getAcceleration',
+    'getForce',
+    'getSpinSpeed',
+    'getTilt',
+    'isFreeFalling',
+    'isTilted',
+    'whenForcePushedOrPulled',
+    'whenGesture',
+    'whenTilted'
+  ], ['axisOptions', 'gestureOptions', 'pushPullOptions', 'tiltAnyOptions', 'tiltOptions'])],
+  ['makeymakey', extensionOpcodeSurface('makeymakey', [
+    'whenCodePressed',
+    'whenMakeyKeyPressed'
+  ], ['KEY', 'SEQUENCE'])],
+  ['microbit', extensionOpcodeSurface('microbit', [
+    'displayClear',
+    'displaySymbol',
+    'displayText',
+    'getTiltAngle',
+    'isButtonPressed',
+    'isTilted',
+    'whenButtonPressed',
+    'whenGesture',
+    'whenPinConnected',
+    'whenTilted'
+  ], ['buttons', 'gestures', 'pinState', 'tiltDirection', 'tiltDirectionAny', 'touchPins'])],
+  ['music', extensionOpcodeSurface('music', [
+    'changeTempo',
+    'getTempo',
+    'midiPlayDrumForBeats',
+    'midiSetInstrument',
+    'playDrumForBeats',
+    'playNoteForBeats',
+    'restForBeats',
+    'setInstrument',
+    'setTempo'
+  ], ['DRUM', 'INSTRUMENT'])],
+  ['pen', extensionOpcodeSurface('pen', [
+    'changePenColorParamBy',
+    'changePenHueBy',
+    'changePenShadeBy',
+    'changePenSizeBy',
+    'clear',
+    'penDown',
+    'penUp',
+    'setPenColorParamTo',
+    'setPenColorToColor',
+    'setPenHueToNumber',
+    'setPenShadeToNumber',
+    'setPenSizeTo',
+    'stamp'
+  ], ['colorParam'])],
+  ['text2speech', extensionOpcodeSurface('text2speech', [
+    'setLanguage',
+    'setVoice',
+    'speakAndWait'
+  ], ['languages', 'voices'])],
+  ['translate', extensionOpcodeSurface('translate', [
+    'getTranslate',
+    'getViewerLanguage'
+  ], ['languages'])],
+  ['videoSensing', extensionOpcodeSurface('videoSensing', [
+    'setVideoTransparency',
+    'videoOn',
+    'videoToggle',
+    'whenMotionGreaterThan'
+  ], ['ATTRIBUTE', 'SUBJECT', 'VIDEO_STATE'])],
+  ['wedo2', extensionOpcodeSurface('wedo2', [
+    'getDistance',
+    'getTiltAngle',
+    'isTilted',
+    'motorOff',
+    'motorOn',
+    'motorOnFor',
+    'playNoteFor',
+    'setLightHue',
+    'setMotorDirection',
+    'startMotorPower',
+    'whenDistance',
+    'whenTilted'
+  ], ['MOTOR_DIRECTION', 'MOTOR_ID', 'OP', 'TILT_DIRECTION', 'TILT_DIRECTION_ANY'])]
 ]);
+
+export const OFFICIAL_EXTENSION_IDS = new Set(OFFICIAL_EXTENSION_OPCODES.keys());
 
 /** Core primitives, hats, legacy blocks, and serialized shadow/menu blocks in Scratch VM 15.1.0. */
 export const OFFICIAL_CORE_OPCODES = new Set([
@@ -194,6 +323,47 @@ export const OFFICIAL_CORE_OPCODES = new Set([
   'text'
 ]);
 
+const OFFICIAL_CORE_LITERAL_SHADOW_OPCODES = [
+  'argument_editor_boolean',
+  'argument_editor_string_number',
+  'colour_picker',
+  'control_create_clone_of_menu',
+  'data_listindexall',
+  'data_listindexrandom',
+  'event_broadcast_menu',
+  'event_touchingobjectmenu',
+  'looks_backdrops',
+  'looks_costume',
+  'math_angle',
+  'math_integer',
+  'math_number',
+  'math_positive_number',
+  'math_whole_number',
+  'matrix',
+  'motion_glideto_menu',
+  'motion_goto_menu',
+  'motion_pointtowards_menu',
+  'note',
+  'procedures_declaration',
+  'procedures_prototype',
+  'sensing_distancetomenu',
+  'sensing_keyoptions',
+  'sensing_of_object_menu',
+  'sensing_touchingobjectmenu',
+  'sound_beats_menu',
+  'sound_effects_menu',
+  'sound_sounds_menu',
+  'text'
+] as const;
+
+/** Official shadows whose pinned runtime value is their sole field when they have no inputs. */
+export const OFFICIAL_LITERAL_SHADOW_OPCODES: ReadonlySet<string> = new Set([
+  ...OFFICIAL_CORE_LITERAL_SHADOW_OPCODES,
+  ...[...OFFICIAL_EXTENSION_OPCODES].flatMap(([extensionId, opcodes]) => (
+    [...opcodes].filter(opcode => opcode.startsWith(`${extensionId}_menu_`))
+  ))
+]);
+
 export function validateOfficialExtensions(project: ScratchProject): void {
   const declared = new Set<string>();
   for (const extension of project.extensions) {
@@ -223,7 +393,13 @@ export function validateOfficialExtensions(project: ScratchProject): void {
 function validateOpcode(opcode: string, declared: ReadonlySet<string>, location: string): void {
   if (OFFICIAL_CORE_OPCODES.has(opcode)) return;
   const prefix = opcodePrefix(opcode);
-  if (OFFICIAL_EXTENSION_IDS.has(prefix)) {
+  const extensionOpcodes = OFFICIAL_EXTENSION_OPCODES.get(prefix);
+  if (extensionOpcodes) {
+    if (!extensionOpcodes.has(opcode)) {
+      throw new InputError(
+        `${location} has unsupported opcode ${JSON.stringify(opcode)} for bundled extension ${JSON.stringify(prefix)}`
+      );
+    }
     if (!declared.has(prefix)) {
       throw new InputError(`${location} uses undeclared extension ${JSON.stringify(prefix)}`);
     }

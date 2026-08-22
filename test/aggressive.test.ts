@@ -82,15 +82,27 @@ describe('aggressive transforms', () => {
       const value = sprite?.blocks[id];
       expect(value && isScratchBlock(value) && value.next ? originalIds.has(value.next) : false).toBe(false);
     }
-    const encodedLabels = collectDispatcherLabels(project);
+    const encodedLabels = collectDispatcherTokens(project, '!');
+    const encodedTags = collectDispatcherTokens(project, '?');
     expect(encodedLabels.size).toBeGreaterThan(resultStats.virtualizedBlocks);
+    expect(encodedTags.size).toBeGreaterThan(resultStats.virtualizedBlocks);
+    expect([...encodedLabels].every(label => /^![0-9._~-]{24}$/.test(label))).toBe(true);
+    expect([...encodedTags].every(tag => /^\?[0-9._~-]{24}$/.test(tag))).toBe(true);
+    expect([...encodedLabels].some(label => encodedTags.has(label))).toBe(false);
     const transitionListEntries = Object.entries(sprite?.lists ?? {}).filter(([, declaration]) => (
       Array.isArray(declaration[1])
       && declaration[1].some(item => typeof item === 'string' && item.startsWith('r_'))
     ));
     expect(transitionListEntries).not.toHaveLength(0);
-    const transitionWidths = transitionListEntries.flatMap(([, declaration]) => parseTransitionWidths(declaration[1]));
-    expect(new Set(transitionWidths)).toEqual(new Set([1, 2, 3, 4]));
+    const transitionRecords = transitionListEntries.flatMap(([, declaration]) => (
+      parseTransitionRecords(declaration[1])
+    ));
+    expect(new Set(transitionRecords.map(record => record.width))).toEqual(new Set([1, 2, 3, 4]));
+    expect(transitionRecords.length).toBeGreaterThan(resultStats.virtualizedBlocks);
+    expect(transitionRecords.every(record => /^![0-9._~-]{24}$/.test(record.label))).toBe(true);
+    expect(transitionRecords.every(record => /^\?[0-9._~-]{24}$/.test(record.tag))).toBe(true);
+    expect(transitionRecords.every(record => Number.isNaN(Number(record.label)) && Number.isNaN(Number(record.tag)))).toBe(true);
+    expect(transitionRecords.every(record => !/[A-Za-z]/.test(record.label + record.tag))).toBe(true);
     const transitionListIds = new Set(transitionListEntries.map(([id]) => id));
     const indirectTransitions = Object.values(sprite?.blocks ?? {}).filter(value => {
       if (!isScratchBlock(value) || value.opcode !== 'data_setvariableto') return false;
@@ -114,7 +126,7 @@ describe('aggressive transforms', () => {
     validateProject(project);
   });
 
-  it('keeps cloud, monitored, sensed, missing-input, and unsupported variable uses out of virtualization', () => {
+  it('keeps monitored, sensed, and unsupported uses native while accepting sprite-local cloud markers', () => {
     const project = fixtureProject();
     const sprite = project.targets[1];
     if (!sprite) throw new Error('fixture is missing its sprite');
@@ -138,7 +150,7 @@ describe('aggressive transforms', () => {
 
     const candidates = collectVariableCandidates(project);
 
-    expect(candidates.map(candidate => candidate.id)).toEqual(['original-variable-id']);
+    expect(candidates.map(candidate => candidate.id)).toEqual(['original-variable-id', 'cloud-local']);
 
     const primitiveReference = structuredClone(project);
     const primitiveSprite = primitiveReference.targets[1];
@@ -163,7 +175,10 @@ describe('aggressive transforms', () => {
     const extensionSprite = extension.targets[1];
     if (!extensionSprite) throw new Error('fixture is missing its sprite');
     extensionSprite.blocks['extension'] = block('pen_clear', null, null, false);
-    expect(collectVariableCandidates(extension)).toHaveLength(0);
+    expect(collectVariableCandidates(extension).map(candidate => candidate.id)).toEqual([
+      'original-variable-id',
+      'cloud-local'
+    ]);
 
     const opaqueMutation = structuredClone(project);
     const opaqueSprite = opaqueMutation.targets[1];
@@ -180,7 +195,10 @@ describe('aggressive transforms', () => {
       ...block('procedures_call', null, null, false),
       mutation: {tagName: 'mutation', children: [], proccode: 'known', argumentids: '[]', warp: 'false'}
     };
-    expect(collectVariableCandidates(recognizedMutation).map(candidate => candidate.id)).toEqual(['original-variable-id']);
+    expect(collectVariableCandidates(recognizedMutation).map(candidate => candidate.id)).toEqual([
+      'original-variable-id',
+      'cloud-local'
+    ]);
   });
 
   it('creates non-empty NFC-stable invisible names without unsafe controls', () => {
@@ -460,7 +478,7 @@ describe('aggressive transforms', () => {
 
     applyAggressiveTransforms(project, 'no-preserve', generator(55), resultStats);
 
-    expect(resultStats.virtualizedBlocks).toBe(29);
+    expect(resultStats.virtualizedBlocks).toBe(28);
     expect(dispatcherRouteOpcodes(project).length).toBeGreaterThanOrEqual(31);
     expect(Object.values(sprite.variables).filter(tuple => typeof tuple[0] === 'string' && tuple[0].startsWith('\u2063')).length).toBeGreaterThanOrEqual(2);
     validateProject(project);
@@ -990,38 +1008,46 @@ function hasFieldReference(project: ScratchProject, id: string): boolean {
   return false;
 }
 
-function collectDispatcherLabels(project: ScratchProject): Set<string> {
-  const labels = new Set<string>();
+function collectDispatcherTokens(project: ScratchProject, prefix: '!' | '?'): Set<string> {
+  const tokens = new Set<string>();
   for (const targetValue of project.targets) {
     for (const value of Object.values(targetValue.blocks)) {
-      if (!isScratchBlock(value) || (value.opcode !== 'control_if_else' && value.opcode !== 'control_if')) continue;
-      const conditionId = value.inputs['CONDITION']?.[1];
-      const condition = typeof conditionId === 'string' ? targetValue.blocks[conditionId] : undefined;
-      if (!condition || !isScratchBlock(condition) || condition.opcode !== 'operator_equals') continue;
-      const literal = condition.inputs['OPERAND2']?.[1];
-      if (isPrimitive(literal) && literal[0] === 4 && (typeof literal[1] === 'string' || typeof literal[1] === 'number')) {
-        labels.add(String(literal[1]));
+      if (!isScratchBlock(value) || value.opcode !== 'operator_equals') continue;
+      const reporterId = value.inputs['OPERAND1']?.[1];
+      const reporter = typeof reporterId === 'string' ? targetValue.blocks[reporterId] : undefined;
+      if (!reporter || !isScratchBlock(reporter) || reporter.opcode !== 'data_variable') continue;
+      const literal = value.inputs['OPERAND2']?.[1];
+      if (isPrimitive(literal) && literal[0] === 10 && typeof literal[1] === 'string' && literal[1].startsWith(prefix)) {
+        tokens.add(literal[1]);
       }
     }
   }
-  return labels;
+  return tokens;
 }
 
-function parseTransitionWidths(value: unknown): number[] {
+interface DispatcherTransitionRecord {
+  readonly width: number;
+  readonly label: string;
+  readonly tag: string;
+}
+
+function parseTransitionRecords(value: unknown): DispatcherTransitionRecord[] {
   if (!Array.isArray(value)) return [];
   const entries = value as readonly unknown[];
-  const widths: number[] = [];
+  const records: DispatcherTransitionRecord[] = [];
   let cursor = 0;
   while (cursor < entries.length) {
     const marker: unknown = entries[cursor];
     const width: unknown = entries[cursor + 1];
     if (typeof marker !== 'string' || !marker.startsWith('r_') || typeof width !== 'number' || width < 1 || width > 4) return [];
     const labelIndex = cursor + 2 + width;
-    if (typeof entries[labelIndex] !== 'number') return [];
-    widths.push(width);
-    cursor = labelIndex + 1;
+    const label: unknown = entries[labelIndex];
+    const tag: unknown = entries[labelIndex + 1];
+    if (typeof label !== 'string' || !label.startsWith('!') || typeof tag !== 'string' || !tag.startsWith('?')) return [];
+    records.push({width, label, tag});
+    cursor = labelIndex + 2;
   }
-  return widths;
+  return records;
 }
 
 function isDualRail(targetValue: ScratchTarget | undefined, value: ScratchBlockValue): boolean {

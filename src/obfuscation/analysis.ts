@@ -1,5 +1,11 @@
 import {countBlockEquivalents, isPrimitive, isScratchBlock} from '../model/blocks.js';
+import {isRecord} from '../model/json.js';
 import type {JsonValue, ScratchBlock, ScratchBlockValue, ScratchInput, ScratchProject, ScratchTarget} from '../types.js';
+import {
+  OFFICIAL_CORE_OPCODES,
+  OFFICIAL_EXTENSION_OPCODES,
+  OFFICIAL_LITERAL_SHADOW_OPCODES
+} from '../validation/extensions.js';
 import {ANTI_CHEAT_WATERMARK_NAME} from './anticheat.js';
 
 /** Straight-line commands which can be isolated without moving a yield or C-shaped stack. */
@@ -94,6 +100,16 @@ const SAFE_NUMERIC_INPUTS = new Map<string, ReadonlySet<string>>([
 
 const CANONICAL_FINITE_DECIMAL = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/u;
 
+const STAGE_SENSING_ATTRIBUTES = new Set(['background #', 'backdrop #', 'backdrop name', 'volume']);
+const SPRITE_SENSING_ATTRIBUTES = new Set([
+  'x position',
+  'y position',
+  'direction',
+  'costume #',
+  'costume name',
+  'size',
+  'volume'
+]);
 const LOSSY_OBSERVABILITY_HAZARDS = new Set([
   'control_create_clone_of',
   'control_delete_this_clone',
@@ -349,27 +365,32 @@ export function collectNumericLiteralSites(project: ScratchProject): NumericLite
 
 /** Return non-cloud, non-monitored variables whose every runtime-visible use is understood. */
 export function collectVariableCandidates(project: ScratchProject): VariableCandidate[] {
-  const monitoredIds = new Set<string>();
-  for (const monitor of project.monitors) collectStrings(monitor, monitoredIds);
-  const sensedNames = collectSensedPropertyNames(project);
+  const monitoredVariables = collectMonitoredVariables(project);
+  const sensedVariables = collectSensedVariables(project);
   const opaqueTargets = project.targets.map(hasOpaqueVariableSurface);
   const hasAnyOpaqueTarget = opaqueTargets.some(Boolean);
   const stageIndex = project.targets.findIndex(target => target.isStage);
   const stage = stageIndex < 0 ? undefined : project.targets[stageIndex];
-  const stageNames = new Map<string, string[]>();
+  const cloudVariableIds = new Set<string>();
   if (stage) {
     for (const [id, declaration] of Object.entries(stage.variables)) {
-      const name = declaration[0];
-      if (typeof name !== 'string') continue;
-      const ids = stageNames.get(name) ?? [];
-      ids.push(id);
-      stageNames.set(name, ids);
+      if (declaration.length === 3 && declaration[2] === true && cloudVariableIds.size < 10) {
+        cloudVariableIds.add(id);
+      }
     }
   }
 
+  const declarationIdsByName = project.targets.map(target => {
+    const ids = new Map<string, string>();
+    for (const [id, declaration] of Object.entries(target.variables)) {
+      const name = declaration[0];
+      if (typeof name === 'string' && !ids.has(name)) ids.set(name, id);
+    }
+    return ids;
+  });
+
   const orderedCandidates: MutableVariableCandidate[] = [];
-  const candidatesById = new Map<string, MutableVariableCandidate>();
-  const duplicateIds = new Set<string>();
+  const candidatesByTarget = project.targets.map(() => new Map<string, MutableVariableCandidate>());
 
   for (let targetIndex = 0; targetIndex < project.targets.length; targetIndex += 1) {
     const target = project.targets[targetIndex];
@@ -380,9 +401,9 @@ export function collectVariableCandidates(project: ScratchProject): VariableCand
       if (
         typeof name !== 'string'
         || initialValue === undefined
-        || declaration[2] === true
-        || monitoredIds.has(id)
-        || sensedNames.has(name)
+        || (target.isStage && cloudVariableIds.has(id))
+        || monitoredVariables.get(target)?.has(id) === true
+        || sensedVariables.get(target)?.has(id) === true
         || (target.isStage && name === ANTI_CHEAT_WATERMARK_NAME)
       ) continue;
       const candidate: MutableVariableCandidate = {
@@ -395,22 +416,26 @@ export function collectVariableCandidates(project: ScratchProject): VariableCand
         safe: target.isStage ? !hasAnyOpaqueTarget : opaqueTargets[targetIndex] !== true
       };
       orderedCandidates.push(candidate);
-      const previous = candidatesById.get(id);
-      if (previous) {
-        previous.safe = false;
-        candidate.safe = false;
-        duplicateIds.add(id);
-      }
-      candidatesById.set(id, candidate);
+      candidatesByTarget[targetIndex]?.set(id, candidate);
     }
   }
 
-  const resolveCandidate = (id: unknown, usageTargetIndex: number): MutableVariableCandidate | undefined => {
-    if (typeof id !== 'string' || duplicateIds.has(id)) return undefined;
-    const candidate = candidatesById.get(id);
-    if (!candidate) return undefined;
-    const declarationTarget = project.targets[candidate.targetIndex];
-    return declarationTarget?.isStage || candidate.targetIndex === usageTargetIndex ? candidate : undefined;
+  const resolveCandidate = (id: unknown, name: unknown, usageTargetIndex: number): MutableVariableCandidate | undefined => {
+    const usageTarget = project.targets[usageTargetIndex];
+    if (!usageTarget) return undefined;
+    if (typeof id === 'string' && id.length > 0) {
+      if (Object.prototype.hasOwnProperty.call(usageTarget.variables, id)) {
+        return candidatesByTarget[usageTargetIndex]?.get(id);
+      }
+      if (stage && usageTarget !== stage && Object.prototype.hasOwnProperty.call(stage.variables, id)) {
+        return candidatesByTarget[stageIndex]?.get(id);
+      }
+      return undefined;
+    }
+    if (typeof name !== 'string') return undefined;
+    if (!stage) return undefined;
+    const globalId = declarationIdsByName[stageIndex]?.get(name);
+    return globalId === undefined ? undefined : candidatesByTarget[stageIndex]?.get(globalId);
   };
 
   for (let usageTargetIndex = 0; usageTargetIndex < project.targets.length; usageTargetIndex += 1) {
@@ -419,18 +444,14 @@ export function collectVariableCandidates(project: ScratchProject): VariableCand
     for (const [blockId, value] of Object.entries(usageTarget.blocks)) {
       if (!isScratchBlock(value)) {
         if (isPrimitive(value) && value[0] === 12) {
-          const candidate = resolveCandidate(value[2], usageTargetIndex);
+          const candidate = resolveCandidate(value[2], value[1], usageTargetIndex);
           if (candidate) candidate.safe = false;
         }
         continue;
       }
 
       const variableField = value.fields['VARIABLE'];
-      let fieldCandidate = resolveCandidate(variableField?.[1], usageTargetIndex);
-      if (!fieldCandidate && variableField && typeof variableField[0] === 'string') {
-        const matchingIds = stageNames.get(variableField[0]);
-        if (matchingIds?.length === 1) fieldCandidate = resolveCandidate(matchingIds[0], usageTargetIndex);
-      }
+      const fieldCandidate = resolveCandidate(variableField?.[1], variableField?.[0], usageTargetIndex);
       if (fieldCandidate) {
         if (!hasExactVariableBlockShape(value)) {
           fieldCandidate.safe = false;
@@ -447,7 +468,7 @@ export function collectVariableCandidates(project: ScratchProject): VariableCand
       for (const [inputName, input] of Object.entries(value.inputs)) {
         const active = input[1];
         if (isPrimitive(active) && active[0] === 12) {
-          const candidate = resolveCandidate(active[2], usageTargetIndex);
+          const candidate = resolveCandidate(active[2], active[1], usageTargetIndex);
           if (candidate) {
             candidate.usages.push({kind: 'inline', targetIndex: usageTargetIndex, blockId, inputName});
             candidate.estimatedGrowth += input[2] === undefined ? 2 : 1;
@@ -455,7 +476,7 @@ export function collectVariableCandidates(project: ScratchProject): VariableCand
         }
         const fallback = input[2];
         if (isPrimitive(fallback) && fallback[0] === 12) {
-          const candidate = resolveCandidate(fallback[2], usageTargetIndex);
+          const candidate = resolveCandidate(fallback[2], fallback[1], usageTargetIndex);
           if (candidate) candidate.safe = false;
         }
       }
@@ -484,10 +505,17 @@ function hasExactVariableBlockShape(block: ScratchBlock): boolean {
 function hasOpaqueVariableSurface(target: ScratchTarget): boolean {
   for (const value of Object.values(target.blocks)) {
     if (!isScratchBlock(value)) continue;
-    if (!isCoreBlock(value.opcode)) return true;
+    if (isOfficialExtensionOpcode(value.opcode)) continue;
+    if (!OFFICIAL_CORE_OPCODES.has(value.opcode)) return true;
     if (value.mutation !== undefined && !isRecognizedProcedureMutation(value)) return true;
   }
   return false;
+}
+
+function isOfficialExtensionOpcode(opcode: string): boolean {
+  const separator = opcode.indexOf('_');
+  if (separator < 1) return false;
+  return OFFICIAL_EXTENSION_OPCODES.get(opcode.slice(0, separator))?.has(opcode) === true;
 }
 
 function isRecognizedProcedureMutation(block: ScratchBlock): boolean {
@@ -536,31 +564,147 @@ function isRunnableHat(opcode: string): boolean {
   return opcode.startsWith('event_when') || opcode === 'control_start_as_clone';
 }
 
-function collectStrings(value: JsonValue | Record<string, JsonValue>, into: Set<string>): void {
-  if (typeof value === 'string') {
-    into.add(value);
-  } else if (Array.isArray(value)) {
-    for (const item of value) collectStrings(item, into);
-  } else if (value !== null && typeof value === 'object') {
-    for (const item of Object.values(value)) collectStrings(item, into);
+type VariablesByTarget = Map<ScratchTarget, Set<string>>;
+
+type SensingObjectSelection =
+  | {readonly kind: 'dynamic'}
+  | {readonly kind: 'missing'}
+  | {readonly kind: 'target'; readonly target: ScratchTarget};
+
+function targetVariableSet(map: VariablesByTarget, target: ScratchTarget): Set<string> {
+  const existing = map.get(target);
+  if (existing) return existing;
+  const created = new Set<string>();
+  map.set(target, created);
+  return created;
+}
+
+function collectMonitoredVariables(project: ScratchProject): VariablesByTarget {
+  const result: VariablesByTarget = new Map();
+  const stage = project.targets.find(target => target.isStage);
+  if (!stage) return result;
+  for (const monitor of project.monitors) {
+    if (monitor['opcode'] !== 'data_variable' || typeof monitor['id'] !== 'string') continue;
+    const spriteName = monitor['spriteName'];
+    const requestedTarget = typeof spriteName === 'string' && spriteName.length > 0
+      ? project.targets.find(target => !target.isStage && target.name === spriteName) ?? stage
+      : stage;
+    const declarationTarget = Object.prototype.hasOwnProperty.call(requestedTarget.variables, monitor['id'])
+      ? requestedTarget
+      : Object.prototype.hasOwnProperty.call(stage.variables, monitor['id']) ? stage : undefined;
+    if (declarationTarget) targetVariableSet(result, declarationTarget).add(monitor['id']);
+  }
+  return result;
+}
+
+function isNativeSensingAttribute(target: ScratchTarget, property: string): boolean {
+  return (target.isStage ? STAGE_SENSING_ATTRIBUTES : SPRITE_SENSING_ATTRIBUTES).has(property);
+}
+
+function selectionForSensingLiteral(project: ScratchProject, literal: string): SensingObjectSelection {
+  if (literal === '_stage_') {
+    const stage = project.targets.find(target => target.isStage);
+    return stage ? {kind: 'target', target: stage} : {kind: 'missing'};
+  }
+  const target = project.targets.find(candidate => !candidate.isStage && candidate.name === literal);
+  return target ? {kind: 'target', target} : {kind: 'missing'};
+}
+
+function literalPrimitiveValue(primitive: ScratchInput): string | undefined {
+  const code = primitive[0];
+  if (typeof code !== 'number' || code < 4 || code > 11) return undefined;
+  const value = primitive[1];
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+    ? String(value)
+    : undefined;
+}
+
+function literalReporterValue(target: ScratchTarget, id: string): string | undefined {
+  const reporter = target.blocks[id];
+  if (isPrimitive(reporter)) return literalPrimitiveValue(reporter);
+  if (!isScratchBlock(reporter)) return undefined;
+  if (!OFFICIAL_LITERAL_SHADOW_OPCODES.has(reporter.opcode) || Object.keys(reporter.fields).length !== 1 || Object.keys(reporter.inputs).length > 0) {
+    return undefined;
+  }
+  const value = Object.values(reporter.fields)[0]?.[0];
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+    ? String(value)
+    : undefined;
+}
+
+function sensingBlockSelection(
+  project: ScratchProject,
+  owner: ScratchTarget,
+  input: ScratchInput | undefined
+): SensingObjectSelection {
+  const active = input?.[1];
+  if (active === null || active === undefined) return selectionForSensingLiteral(project, 'undefined');
+  if (isPrimitive(active)) {
+    const literal = literalPrimitiveValue(active);
+    return literal === undefined ? {kind: 'dynamic'} : selectionForSensingLiteral(project, literal);
+  }
+  if (typeof active !== 'string') return {kind: 'dynamic'};
+  const literal = literalReporterValue(owner, active);
+  return literal === undefined ? {kind: 'dynamic'} : selectionForSensingLiteral(project, literal);
+}
+
+function scratchString(value: JsonValue | undefined): string {
+  if (value === undefined) return 'undefined';
+  if (value === null) return 'null';
+  if (Array.isArray(value)) {
+    return value.map(item => item === null ? '' : scratchString(item)).join(',');
+  }
+  if (typeof value === 'object') return '[object Object]';
+  return String(value);
+}
+
+function sensingMonitorSelection(
+  project: ScratchProject,
+  params: Readonly<Record<string, JsonValue>>
+): SensingObjectSelection {
+  const object = params['OBJECT'];
+  if (object === '_stage_') return selectionForSensingLiteral(project, object);
+  const literal = scratchString(object);
+  const target = project.targets.find(candidate => !candidate.isStage && candidate.name === literal);
+  return target ? {kind: 'target', target} : {kind: 'missing'};
+}
+
+function addSensedVariable(
+  result: VariablesByTarget,
+  targets: readonly ScratchTarget[],
+  property: string
+): void {
+  for (const target of targets) {
+    if (isNativeSensingAttribute(target, property)) continue;
+    for (const [id, declaration] of Object.entries(target.variables)) {
+      if (declaration[0] !== property) continue;
+      targetVariableSet(result, target).add(id);
+      break;
+    }
   }
 }
 
-function collectSensedPropertyNames(project: ScratchProject): Set<string> {
-  const result = new Set<string>();
-  for (const monitor of project.monitors) {
-    if (monitor['opcode'] !== 'sensing_of') continue;
-    const params = monitor['params'];
-    if (params === null || typeof params !== 'object' || Array.isArray(params)) continue;
-    const property = params['PROPERTY'];
-    if (typeof property === 'string') result.add(property);
-  }
+function collectSensedVariables(project: ScratchProject): VariablesByTarget {
+  const result: VariablesByTarget = new Map();
+  const register = (selection: SensingObjectSelection, property: unknown): void => {
+    if (typeof property !== 'string') return;
+    const targets = selection.kind === 'dynamic'
+      ? project.targets
+      : selection.kind === 'target' ? [selection.target] : [];
+    addSensedVariable(result, targets, property);
+  };
   for (const target of project.targets) {
     for (const value of Object.values(target.blocks)) {
       if (!isScratchBlock(value) || value.opcode !== 'sensing_of') continue;
-      const property = value.fields['PROPERTY']?.[0];
-      if (typeof property === 'string') result.add(property);
+      register(sensingBlockSelection(project, target, value.inputs['OBJECT']), value.fields['PROPERTY']?.[0]);
     }
+  }
+  for (const monitor of project.monitors) {
+    if (monitor['opcode'] !== 'sensing_of' || !isRecord(monitor['params'])) continue;
+    register(
+      sensingMonitorSelection(project, monitor['params']),
+      monitor['params']['PROPERTY']
+    );
   }
   return result;
 }

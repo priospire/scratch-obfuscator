@@ -164,6 +164,7 @@ describe('anti-cheat transform', () => {
     expect(Object.keys(stageOf(first).variables).slice(0, originalVariables.length)).toEqual(originalVariables);
     expect(Object.keys(stageOf(first).blocks)).toEqual(originalBlocks);
     expect(stageOf(first).variables[firstResult.watermarkVariableId]?.[0]).toBe(ANTI_CHEAT_WATERMARK_NAME);
+    expect(stageOf(first).variables[firstResult.watermarkVariableId]?.[1]).toBe(0);
     expect(stageOf(first).variables[firstResult.watermarkVariableId]).toHaveLength(2);
     validateProject(first);
 
@@ -198,6 +199,7 @@ describe('anti-cheat transform', () => {
     const stage = stageOf(first);
     const watermark = stage.variables[firstResult.watermarkVariableId];
     expect(watermark?.[0]).toBe(ANTI_CHEAT_WATERMARK_NAME);
+    expect(watermark?.[1]).toBe(0);
     expect(watermark).toHaveLength(2);
     expect(Object.values(stage.variables).filter(value => value[0] === ANTI_CHEAT_WATERMARK_NAME)).toHaveLength(1);
     expect(Object.keys(stage.variables).slice(0, originalVariableIds.length)).toEqual(originalVariableIds);
@@ -227,6 +229,49 @@ describe('anti-cheat transform', () => {
         }
       }
     }
+  });
+
+  it('keeps generated Stage sentinel names away from missing sensing properties', () => {
+    const project = createFixtureProject();
+    const stage = stageOf(project);
+    const predictor = generator().fork('variable-names');
+    const blockProperty = predictor.id('x_', 36);
+    const monitorProperty = predictor.id('x_', 36);
+    stage.blocks['missing-sensing-property'] = {
+      opcode: 'sensing_of',
+      next: null,
+      parent: null,
+      inputs: {OBJECT: [1, [10, '_stage_']]},
+      fields: {PROPERTY: [blockProperty]},
+      shadow: false,
+      topLevel: true,
+      x: 0,
+      y: 0
+    };
+    project.monitors.push({
+      id: 'missing-sensing-monitor',
+      mode: 'default',
+      opcode: 'sensing_of',
+      params: {PROPERTY: monitorProperty, OBJECT: '_stage_'},
+      spriteName: null,
+      value: 0,
+      width: 0,
+      height: 0,
+      x: 0,
+      y: 0,
+      visible: false,
+      sliderMin: 0,
+      sliderMax: 100,
+      isDiscrete: true
+    });
+
+    const result = applyAntiCheatTransform(project, generator());
+    validateProject(project);
+
+    const generatedNames = [...result.decoyVariableIds, result.latchVariableId]
+      .map(id => stage.variables[id]?.[0]);
+    expect(generatedNames).not.toContain(blockProperty);
+    expect(generatedNames).not.toContain(monitorProperty);
   });
 
   it('reuses an existing Stage watermark without changing its value', () => {

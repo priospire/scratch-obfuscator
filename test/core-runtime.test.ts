@@ -60,7 +60,7 @@ const ScratchStorage = (storageValue as Record<string, unknown>)['ScratchStorage
 const JsZip = jsZipValue as JsZipModule;
 
 describe('common transforms against the official Scratch VM', () => {
-  it('preserves name-only local lookup and binds broadcasts through Stage despite sprite decoys', async () => {
+  it('preserves Stage name-only lookup and binds broadcasts through Stage despite sprite decoys', async () => {
     const source = nameOnlyProject();
     validateProject(source);
     const transformed = obfuscateProject(source, 'lossless', new Uint8Array(32).fill(37)).project;
@@ -71,18 +71,41 @@ describe('common transforms against the official Scratch VM', () => {
     if (!stage || !sprite) throw new Error('transformed targets missing');
     const blocks = Object.values(sprite.blocks).filter(isScratchBlock);
     const variableField = blocks.find(block => block.opcode === 'data_changevariableby')?.fields['VARIABLE'];
+    const listField = blocks.find(block => block.opcode === 'data_addtolist')?.fields['LIST'];
     const broadcastField = blocks.find(block => block.opcode === 'event_whenbroadcastreceived')?.fields['BROADCAST_OPTION'];
-    const stageScalarId = Object.keys(stage.variables).find(id => stage.variables[id]?.[2] !== true);
-    expect(variableField?.[1]).toBe(stageScalarId);
-    expect(variableField?.[1]).not.toBe(Object.keys(sprite.variables)[0]);
-    expect(broadcastField?.[1]).toBe(Object.keys(stage.broadcasts)[0]);
-    expect(broadcastField?.[1]).not.toBe(Object.keys(sprite.broadcasts)[0]);
+    const stageScalarId = Object.keys(stage.variables).find(id => stage.variables[id]?.[1] === 0);
+    const stageListId = Object.keys(stage.lists)[0];
+    const stageBroadcastId = Object.keys(stage.broadcasts)[0];
+    expect(variableField).toEqual([stage.variables[stageScalarId ?? '']?.[0], stageScalarId]);
+    expect(listField).toEqual([stage.lists[stageListId ?? '']?.[0], stageListId]);
+    expect(broadcastField).toEqual([stage.broadcasts[stageBroadcastId ?? ''], stageBroadcastId]);
     const dynamicBroadcast = Object.values(stage.blocks)
       .filter(isScratchBlock)
       .find(block => block.opcode === 'event_broadcast')
       ?.inputs['BROADCAST_INPUT']?.[1];
-    expect(dynamicBroadcast).toEqual([11, 'go', null]);
+    expect(dynamicBroadcast).toEqual([11, stage.broadcasts[stageBroadcastId ?? ''], stageBroadcastId]);
 
+    expect(await executeSnapshot(transformed)).toEqual(await executeSnapshot(source));
+  }, 60_000);
+
+  it('preserves computed broadcast lookup while still obfuscating its selector variable', async () => {
+    const source = nameOnlyProject();
+    const sourceStage = source.targets[0];
+    const broadcast = sourceStage?.blocks['broadcast_message'];
+    if (!sourceStage || !isScratchBlock(broadcast)) throw new Error('fixture broadcast block missing');
+    sourceStage.variables['broadcast_selector'] = ['Readable broadcast selector', 'go'];
+    sourceStage.blocks['broadcast_selector_reporter'] = {
+      opcode: 'data_variable', next: null, parent: 'broadcast_message', inputs: {},
+      fields: {VARIABLE: ['Readable broadcast selector', 'broadcast_selector']}, shadow: false, topLevel: false
+    };
+    broadcast.inputs['BROADCAST_INPUT'] = [3, 'broadcast_selector_reporter', [11, 'go', 'broadcast_go']];
+    validateProject(source);
+
+    const transformed = obfuscateProject(source, 'lossless', new Uint8Array(32).fill(38)).project;
+    validateProject(transformed);
+    const transformedStage = transformed.targets[0];
+    expect(Object.values(transformedStage?.broadcasts ?? {})).toContain('go');
+    expect(Object.values(transformedStage?.variables ?? {}).some(tuple => tuple[0] === 'Readable broadcast selector')).toBe(false);
     expect(await executeSnapshot(transformed)).toEqual(await executeSnapshot(source));
   }, 60_000);
 
@@ -170,11 +193,25 @@ function nameOnlyProject(): ScratchProject {
   const project = createFixtureProject();
   const sprite = project.targets[1];
   if (!sprite) throw new Error('fixture Sprite missing');
+  sprite.variables['local_decoy'] = ['Readable score', 100];
+  sprite.lists['local_name_only_list'] = ['Readable list', ['local']];
   sprite.broadcasts['sprite_decoy'] = 'GO';
   const change = sprite.blocks['change_local'];
+  const move = sprite.blocks['move_sprite'];
   const receiver = sprite.blocks['receive_script'];
-  if (!isScratchBlock(change) || !isScratchBlock(receiver)) throw new Error('fixture blocks missing');
+  if (!isScratchBlock(change) || !isScratchBlock(move) || !isScratchBlock(receiver)) throw new Error('fixture blocks missing');
   change.fields['VARIABLE'] = ['Readable score', null];
+  change.next = 'append_local_list';
+  move.parent = 'append_local_list';
+  sprite.blocks['append_local_list'] = {
+    opcode: 'data_addtolist',
+    next: 'move_sprite',
+    parent: 'change_local',
+    inputs: {ITEM: [1, [10, 'updated']]},
+    fields: {LIST: ['Readable list', '']},
+    shadow: false,
+    topLevel: false
+  };
   receiver.fields['BROADCAST_OPTION'] = ['go'];
   const stage = project.targets[0];
   const broadcast = stage?.blocks['broadcast_message'];

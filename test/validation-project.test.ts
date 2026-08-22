@@ -2,7 +2,7 @@ import {describe, expect, it} from 'vitest';
 import {InputError} from '../src/errors.js';
 import {countBlockEquivalents, isPrimitive, isScratchBlock, opcodePrefix, stageOf} from '../src/model/blocks.js';
 import {assertJsonTree, cloneProject, hasOwn, isRecord, orderedDictionary} from '../src/model/json.js';
-import type {ScratchProject} from '../src/types.js';
+import type {ScratchInput, ScratchProject} from '../src/types.js';
 import {validateProject} from '../src/validation/index.js';
 
 function minimalProject(): ScratchProject {
@@ -156,14 +156,29 @@ describe('project validation', () => {
     expect(() => validateProject({meta: {semver: '3.0.0'}, targets: [], bad: 1n})).toThrow(/non-JSON/);
   });
 
-  it('handles prototype-like dictionary keys as data', () => {
-    const project = minimalProject();
-    const target = project.targets[0];
-    if (!target) throw new Error('fixture is missing Stage');
-    target.variables = JSON.parse('{"__proto__":["safe",0]}') as Record<string, [string, number]>;
-    target.blocks['read'] = {opcode: 'data_variable', next: null, parent: null, inputs: {}, fields: {VARIABLE: ['safe', '__proto__']}, shadow: false, topLevel: true, x: 0, y: 0};
-    expect(() => validateProject(project)).not.toThrow();
-  });
+  it.each(['__proto__', 'toString', 'valueOf', 'hasOwnProperty'])(
+    'rejects loader-unsafe prototype-colliding symbol ID %s',
+    id => {
+      const project = minimalProject();
+      const target = project.targets[0];
+      if (!target) throw new Error('fixture is missing Stage');
+      const variables = Object.create(null) as Record<string, [string, number]>;
+      variables[id] = ['unsafe', 0];
+      target.variables = variables;
+      expect(() => validateProject(project)).toThrow(/collides with the Scratch loader's object prototype/u);
+    }
+  );
+
+  it.each(['a&b', 'a<b', 'a>b', "a'b", 'a"b'])(
+    'rejects symbol ID %s which the Scratch loader would rewrite',
+    id => {
+      const project = minimalProject();
+      const target = project.targets[0];
+      if (!target) throw new Error('fixture is missing Stage');
+      target.variables[id] = ['unsafe', 0];
+      expect(() => validateProject(project)).toThrow(/contains characters rewritten by the Scratch loader/u);
+    }
+  );
 
   it('rejects malformed root metadata and collection shapes', () => {
     const cases: unknown[] = [
@@ -244,7 +259,46 @@ describe('project validation', () => {
     target.blocks = {
       variable: [12, 'value', 'variable', 1, 2],
       list: [13, 'list', 'list', 3, 4],
-      broadcastUser: {opcode: 'event_broadcast', next: null, parent: null, inputs: {BROADCAST_INPUT: [1, [11, 'dynamic message', null]]}, fields: {}, shadow: false, topLevel: true, x: 0, y: 0}
+      broadcastUser: {opcode: 'event_broadcast', next: null, parent: null, inputs: {BROADCAST_INPUT: [1, [11, 'message', null]]}, fields: {}, shadow: false, topLevel: true, x: 0, y: 0}
+    };
+    expect(() => validateProject(valid)).not.toThrow();
+  });
+
+  it('rejects object primitives whose payload would crash or disappear during official serialization', () => {
+    expectInvalid((_project, target) => {
+      raw(target.blocks)['number'] = {...plainBlock('math_number'), fields: {VARIABLE: ['value', 'variable']}};
+    }, /must contain only its NUM field/);
+    expectInvalid((_project, target) => {
+      raw(target.blocks)['text'] = {
+        ...plainBlock('text'),
+        fields: {TEXT: ['value']},
+        inputs: {ignored: [1, [10, 'lost']]}
+      };
+    }, /discarded by the Scratch primitive serializer/);
+    expectInvalid((_project, target) => {
+      raw(target.blocks)['number'] = {...plainBlock('math_number'), fields: {NUM: [true]}};
+    }, /require one string or number/);
+    expectInvalid((_project, target) => {
+      raw(target.blocks)['text'] = {...plainBlock('text'), fields: {TEXT: ['value', 'discarded']}};
+    }, /require one string or number/);
+    expectInvalid((_project, target) => {
+      raw(target.blocks)['color'] = {...plainBlock('colour_picker'), fields: {COLOUR: ['red']}};
+    }, /require one #RRGGBB string/);
+    expectInvalid((_project, target) => {
+      raw(target.blocks)['variable'] = {...plainBlock('data_variable'), fields: {VARIABLE: [true, 'variable']}};
+    }, /require a string name/);
+    const valid = minimalProject();
+    const target = fixtureTarget(valid);
+    target.blocks['variable'] = {
+      opcode: 'data_variable',
+      next: null,
+      parent: null,
+      inputs: {},
+      fields: {VARIABLE: ['value', 'variable']},
+      shadow: false,
+      topLevel: true,
+      x: 1,
+      y: 2
     };
     expect(() => validateProject(valid)).not.toThrow();
   });
@@ -263,6 +317,38 @@ describe('project validation', () => {
       child: {opcode: 'operator_join', next: null, parent: 'parent', inputs: {STRING1: [1, [10, 'a']], STRING2: [1, [10, 2]]}, fields: {}, shadow: false, topLevel: false}
     };
     expect(() => validateProject(valid)).not.toThrow();
+  });
+
+  it('rejects broadcast input shapes that the runtime would treat as malformed shadows', () => {
+    const projectFor = (input: ScratchInput | undefined): ScratchProject => {
+      const project = minimalProject();
+      const stage = fixtureTarget(project);
+      stage.broadcasts['message'] = 'go';
+      stage.blocks['broadcast'] = {
+        ...plainBlock('event_broadcast'),
+        inputs: input === undefined ? {} : {BROADCAST_INPUT: input}
+      } as unknown as ScratchProject['targets'][number]['blocks'][string];
+      return project;
+    };
+
+    expect(() => validateProject(projectFor(undefined))).toThrow(/requires a broadcast input/);
+    expect(() => validateProject(projectFor([1, [10, 'go']]))).toThrow(/must be a broadcast menu/);
+    expect(() => validateProject(projectFor([2, null]))).toThrow(/executable active reporter/);
+    expect(() => validateProject(projectFor([3, [12, 'value', 'variable'], [10, 'go']]))).toThrow(/retain a broadcast menu shadow/);
+    expect(() => validateProject(projectFor([2, [12, 'value', 'variable']]))).not.toThrow();
+    expect(() => validateProject(projectFor([3, [12, 'value', 'variable'], [11, 'go', 'message']]))).not.toThrow();
+
+    const referencedMenu = projectFor([1, 'menu']);
+    fixtureTarget(referencedMenu).blocks['menu'] = {
+      opcode: 'event_broadcast_menu',
+      next: null,
+      parent: 'broadcast',
+      inputs: {},
+      fields: {BROADCAST_OPTION: ['go', 'message']},
+      shadow: true,
+      topLevel: false
+    };
+    expect(() => validateProject(referencedMenu)).not.toThrow();
   });
 
   it('permits only recoverable inactive shadow ownership artifacts when requested', () => {
@@ -373,9 +459,17 @@ describe('project validation', () => {
     } as unknown as ScratchProject['targets'][number]['blocks'];
     project.targets.push(sprite);
     expect(() => validateProject(project)).not.toThrow();
+
+    const broadcastCaseMismatch = structuredClone(project);
+    const caseMismatchSprite = broadcastCaseMismatch.targets[1];
+    if (!caseMismatchSprite) throw new Error('fixture Sprite missing');
+    caseMismatchSprite.blocks = {
+      invalid: {...plainBlock('event_whenbroadcastreceived'), fields: {BROADCAST_OPTION: ['go']}}
+    } as unknown as ScratchProject['targets'][number]['blocks'];
+    expect(() => validateProject(broadcastCaseMismatch)).toThrow(/dangling name-only broadcast/);
   });
 
-  it('resolves name-only fields through Stage as the whole-project loader does', () => {
+  it('resolves name-only fields and broadcasts through Stage as the runtime does', () => {
     const project = minimalProject();
     const stage = fixtureTarget(project);
     stage.variables['sameGlobal'] = ['same', 1];
@@ -395,6 +489,15 @@ describe('project validation', () => {
     project.targets.push(sprite);
     expect(() => validateProject(project)).not.toThrow();
 
+    const localOnly = structuredClone(project);
+    const localOnlySprite = localOnly.targets[1];
+    if (!localOnlySprite) throw new Error('fixture Sprite missing');
+    localOnlySprite.variables['localOnly'] = ['local only', 3];
+    localOnlySprite.blocks = {
+      invalid: {...plainBlock('data_variable'), fields: {VARIABLE: ['local only']}}
+    } as unknown as ScratchProject['targets'][number]['blocks'];
+    expect(() => validateProject(localOnly)).toThrow(/dangling name-only variable/);
+
     const localBroadcast = structuredClone(project);
     const localSprite = localBroadcast.targets[1];
     if (!localSprite) throw new Error('fixture Sprite missing');
@@ -412,7 +515,7 @@ describe('project validation', () => {
     expect(() => validateProject(localPrimitive)).toThrow(/dangling broadcast reference/);
   });
 
-  it('rejects missing or ambiguous name-only symbol references', () => {
+  it('rejects missing name-only references and accepts deterministic first-name matches', () => {
     for (const [kind, fieldName] of [['variable', 'VARIABLE'], ['list', 'LIST']] as const) {
       const missing = minimalProject();
       fixtureTarget(missing).blocks['missing'] = {
@@ -430,7 +533,7 @@ describe('project validation', () => {
       target.blocks['ambiguous'] = {
         ...plainBlock(kind === 'variable' ? 'data_variable' : 'data_listcontents'), fields: {[fieldName]: ['duplicate']}
       } as unknown as ScratchProject['targets'][number]['blocks'][string];
-      expect(() => validateProject(ambiguous)).toThrow(new RegExp(`ambiguous name-only ${kind}`));
+      expect(() => validateProject(ambiguous)).not.toThrow();
     }
 
     const broadcasts = minimalProject();
@@ -439,7 +542,79 @@ describe('project validation', () => {
     stage.blocks['ambiguous'] = {
       ...plainBlock('event_whenbroadcastreceived'), fields: {BROADCAST_OPTION: ['Message', null]}
     } as unknown as ScratchProject['targets'][number]['blocks'][string];
-    expect(() => validateProject(broadcasts)).toThrow(/ambiguous name-only broadcast/);
+    expect(() => validateProject(broadcasts)).not.toThrow();
+  });
+
+  it('matches null broadcast primitives to exact Stage broadcasts', () => {
+    const exact = minimalProject();
+    const exactStage = fixtureTarget(exact);
+    exactStage.broadcasts['message'] = 'Go';
+    exactStage.blocks['broadcast'] = {
+      ...plainBlock('event_broadcast'),
+      inputs: {BROADCAST_INPUT: [1, [11, 'Go', null]]}
+    } as unknown as ScratchProject['targets'][number]['blocks'][string];
+    expect(() => validateProject(exact)).not.toThrow();
+
+    const caseMismatch = structuredClone(exact);
+    const mismatchedBroadcast = fixtureTarget(caseMismatch).blocks['broadcast'];
+    if (!isScratchBlock(mismatchedBroadcast)) throw new Error('fixture broadcast missing');
+    mismatchedBroadcast.inputs['BROADCAST_INPUT'] = [1, [11, 'go', null]];
+    expect(() => validateProject(caseMismatch)).toThrow(/dangling name-only broadcast reference "go"/);
+
+    const wrongType = minimalProject();
+    fixtureTarget(wrongType).blocks['broadcast'] = {
+      ...plainBlock('event_broadcast'),
+      inputs: {BROADCAST_INPUT: [1, [11, 'value', null]]}
+    } as unknown as ScratchProject['targets'][number]['blocks'][string];
+    expect(() => validateProject(wrongType)).toThrow(/dangling name-only broadcast reference "value"/);
+  });
+
+  it('enforces one homogeneous implicit-reference group per effective loader ID', () => {
+    const fieldFor = (name: string, id: undefined | null | ''): Array<string | null> => (
+      id === undefined ? [name] : [name, id]
+    );
+
+    for (const id of [undefined, null, ''] as const) {
+      const homogeneous = minimalProject();
+      const homogeneousStage = fixtureTarget(homogeneous);
+      homogeneousStage.blocks = {
+        first: {...plainBlock('data_variable'), fields: {VARIABLE: fieldFor('value', id)}},
+        second: {...plainBlock('data_variable'), fields: {VARIABLE: fieldFor('value', id)}}
+      } as unknown as ScratchProject['targets'][number]['blocks'];
+      expect(() => validateProject(homogeneous)).not.toThrow();
+
+      const divergent = minimalProject();
+      const divergentStage = fixtureTarget(divergent);
+      divergentStage.variables['other'] = ['other', 1];
+      divergentStage.blocks = {
+        first: {...plainBlock('data_variable'), fields: {VARIABLE: fieldFor('value', id)}},
+        second: {...plainBlock('data_variable'), fields: {VARIABLE: fieldFor('other', id)}}
+      } as unknown as ScratchProject['targets'][number]['blocks'];
+      expect(() => validateProject(divergent)).toThrow(/would coalesce with a distinct reference/);
+
+      const mixed = minimalProject();
+      const mixedStage = fixtureTarget(mixed);
+      mixedStage.lists['items'] = ['items', []];
+      mixedStage.blocks = {
+        variable: {...plainBlock('data_variable'), fields: {VARIABLE: fieldFor('value', id)}},
+        list: {...plainBlock('data_listcontents'), fields: {LIST: fieldFor('items', id)}}
+      } as unknown as ScratchProject['targets'][number]['blocks'];
+      expect(() => validateProject(mixed)).toThrow(/would coalesce with a distinct reference/);
+    }
+  });
+
+  it('rejects blocks with competing typed symbol fields', () => {
+    const project = minimalProject();
+    const stage = fixtureTarget(project);
+    stage.lists['items'] = ['items', []];
+    stage.blocks['ambiguous'] = {
+      ...plainBlock('data_variable'),
+      fields: {
+        VARIABLE: ['value', 'variable'],
+        LIST: ['items', 'items']
+      }
+    } as unknown as ScratchProject['targets'][number]['blocks'][string];
+    expect(() => validateProject(project)).toThrow(/multiple typed symbol fields have loader-dependent precedence/);
   });
 
   it('rejects duplicate symbol IDs within runtime-visible scopes before VM loading can rebind them', () => {
@@ -547,23 +722,31 @@ describe('project validation', () => {
       .toThrow(/monitor visibility references for multiple owners and cannot be safely disambiguated/);
   });
 
-  it('rejects implicit-ID collisions and field coalescing performed by the Scratch loader', () => {
-    const sentinel = minimalProject();
-    const sentinelTarget = fixtureTarget(sentinel);
-    sentinelTarget.variables['null'] = ['sentinel', 0];
-    sentinelTarget.blocks['nameOnly'] = {
-      ...plainBlock('data_variable'), fields: {VARIABLE: ['value', null]}
-    } as unknown as ScratchProject['targets'][number]['blocks'][string];
-    expect(() => validateProject(sentinel)).toThrow(/implicit symbol ID "null" collides/);
+  it('rejects effective-ID collisions without rejecting independently resolved name-only fields', () => {
+    for (const [effectiveId, field] of [
+      ['undefined', ['value']],
+      ['null', ['value', null]]
+    ] as const) {
+      const sentinel = minimalProject();
+      const sentinelTarget = fixtureTarget(sentinel);
+      sentinelTarget.variables[effectiveId] = ['sentinel', 0];
+      for (const [opcode, fieldName] of [
+        ['data_showvariable', 'VARIABLE'],
+        ['event_whenbroadcastreceived', 'BROADCAST_OPTION']
+      ] as const) {
+        sentinelTarget.blocks['nameOnly'] = {
+          ...plainBlock(opcode), fields: {[fieldName]: [...field]}
+        } as unknown as ScratchProject['targets'][number]['blocks'][string];
+        expect(() => validateProject(sentinel)).toThrow(
+          new RegExp(`implicit symbol ID ${JSON.stringify(effectiveId)} collides`)
+        );
+      }
+    }
 
-    const coalesced = minimalProject();
-    const coalescedTarget = fixtureTarget(coalesced);
-    coalescedTarget.variables['other'] = ['other', 0];
-    coalescedTarget.blocks = {
-      first: {...plainBlock('data_variable'), fields: {VARIABLE: ['value']}},
-      second: {...plainBlock('data_variable'), fields: {VARIABLE: ['other']}}
-    } as unknown as ScratchProject['targets'][number]['blocks'];
-    expect(() => validateProject(coalesced)).toThrow(/would coalesce distinct references/);
+    const emptyDeclaration = minimalProject();
+    fixtureTarget(emptyDeclaration).variables[''] = ['sentinel', 0];
+    expect(() => validateProject(emptyDeclaration)).toThrow(/invalid variable declaration/);
+
   });
 
   it('rejects malformed block members and comment references', () => {

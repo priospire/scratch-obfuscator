@@ -32,6 +32,19 @@ export interface OptimizationOptions {
   readonly foldConstants?: boolean;
 }
 
+export type StaticInputLiteralResolver = (
+  value: ScratchInput | string
+) => boolean | number | string | undefined;
+
+/** Build a per-target evaluator which reuses its incoming-reference index. */
+export function createStaticInputEvaluator(
+  target: ScratchTarget,
+  resolveLiteral?: StaticInputLiteralResolver
+): (ownerId: string, input: ScratchInput) => boolean | number | string | undefined {
+  const incoming = collectIncomingReferences(target);
+  return (ownerId, input) => evaluateInput(target, input, ownerId, incoming, new Set(), resolveLiteral);
+}
+
 const numericBinary = (evaluate: (left: number, right: number) => number): OperatorSpec => ({
   inputs: ['NUM1', 'NUM2'],
   fields: [],
@@ -256,6 +269,7 @@ function foldStaticReporterInputs(
   for (const [ownerId, snapshot] of Object.entries(target.blocks)) {
     if (!isScratchBlock(snapshot) || target.blocks[ownerId] !== snapshot) continue;
     for (const [inputName, input] of Object.entries(snapshot.inputs)) {
+      if (inputName === 'BROADCAST_INPUT') continue;
       const reporterId = input[1];
       if (typeof reporterId !== 'string') continue;
       const value = evaluateReporter(target, reporterId, ownerId, incoming, new Set());
@@ -273,7 +287,8 @@ function evaluateReporter(
   id: string,
   ownerId: string,
   incoming: ReadonlyMap<string, number>,
-  visiting: Set<string>
+  visiting: Set<string>,
+  resolveLiteral?: StaticInputLiteralResolver
 ): StaticValue | undefined {
   if (visiting.has(id) || incoming.get(id) !== 1) return undefined;
   const block = target.blocks[id];
@@ -290,7 +305,7 @@ function evaluateReporter(
     for (const inputName of spec.inputs) {
       const input = block.inputs[inputName];
       if (!input) return undefined;
-      const value = evaluateInput(target, input, id, incoming, visiting);
+      const value = evaluateInput(target, input, id, incoming, visiting, resolveLiteral);
       if (value === undefined) return undefined;
       args[inputName] = value;
     }
@@ -312,12 +327,20 @@ function evaluateInput(
   input: ScratchInput,
   ownerId: string,
   incoming: ReadonlyMap<string, number>,
-  visiting: Set<string>
+  visiting: Set<string>,
+  resolveLiteral?: StaticInputLiteralResolver
 ): StaticValue | undefined {
   const active = input[1];
-  if (isPrimitive(active)) return primitiveValue(active);
+  if (isPrimitive(active)) return resolveLiteral?.(active) ?? primitiveValue(active);
   if (typeof active === 'string') {
-    return evaluateReporter(target, active, ownerId, incoming, visiting);
+    const literal = resolveLiteral?.(active);
+    if (literal !== undefined) {
+      const value = target.blocks[active];
+      if ((incoming.get(active) ?? 0) !== 1) return undefined;
+      if (isScratchBlock(value) && value.parent !== ownerId) return undefined;
+      return literal;
+    }
+    return evaluateReporter(target, active, ownerId, incoming, visiting, resolveLiteral);
   }
   return undefined;
 }

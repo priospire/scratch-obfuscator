@@ -29,7 +29,7 @@ An internal tarball is also installable through npm:
 
 ```sh
 npm pack
-npm install --global ./scratch-obfuscator-0.3.0.tgz
+npm install --global ./scratch-obfuscator-0.4.0.tgz
 ```
 
 Both installed forms expose the `scratch-obfuscator` executable. This release has
@@ -70,16 +70,28 @@ stderr; the identifier mapping is never printed.
 
 ## Obfuscation modes
 
-All modes remap block, variable, list, broadcast, and procedure-argument IDs.
-rename eligible non-cloud variables, lists, procedure labels, and arguments.
-strip comments, overlap top-level stacks, remove inactive saved defaults hidden
+All modes remap block, variable, list, broadcast, and procedure-argument IDs;
+rename ordinary variables, lists, procedure labels, and arguments; strip
+comments; overlap top-level stacks; remove inactive saved defaults hidden
 under active reporters, and minify `project.json`. Every output also contains
 an intentionally readable Stage watermark variable. If that exact Stage
 watermark already exists, its value is retained. Target order, block-map order,
 input/field order, declaration order, and hat order remain stable. Every other
-renamable display symbol receives a long deterministic opaque name; names that
-Scratch resolves dynamically remain frozen when changing them could alter
-behavior.
+renamable display symbol receives a long deterministic opaque name. The first
+ten valid Stage cloud variables retain their service-visible names. Name-based
+sensing is resolved per declaration: static target selectors and sensing
+monitors are rewritten to the corresponding opaque name, while a
+runtime-dependent target selector couples only the first-match scalar
+declarations it can reach. A name is retained only where a native sensing
+attribute collision, cloud identity, mandatory watermark, genuinely computed
+broadcast lookup, or an active typed menu used as a literal reporter makes
+changing that exact name behaviorally unsafe. Typed menu labels are resolved
+through their declaration IDs before this decision, so stale saved labels do
+not freeze the wrong symbol and unrelated declarations still rename. ID-less
+variable, list, and broadcast fields are resolved with the pinned loader's exact
+Stage-name rules and rewritten with their declarations; they do not trigger a
+blanket namespace freeze. The watermark identifies the output as part of
+PrioSDK Gen 4.
 
 ### `-lossless`
 
@@ -122,12 +134,15 @@ and targets the same sequential final effects, while explicitly waiving timer
 and live-input sampling time, responsiveness, redraw cadence, thread
 interleaving, race outcomes, and manual stack-click behavior.
 
-Eligible top-level straight-line runs are split into dispatcher regions of 4–17
+Eligible top-level straight-line runs are split into dispatcher regions of 4–12
 supported core commands and routed through encoded program counters. Native hats, C-blocks,
 yield/async anchors, unknown regions, warp/procedure bodies, recursion, and
 uncertain re-entrant ownership remain native. Dispatchers use shuffled handler
-procedures, permuted labels, indirect transition lists with variable-width junk,
-two branch templates, trampolines, and fake states. Additional passes pool and
+procedures, permuted labels, authenticated label/tag state on independent
+rails, letter-free nonnumeric token domains, indirect transition lists with
+variable-width junk, two branch templates,
+trampolines, and fake states. A changed transition label or tag no longer selects
+a handler. Additional passes pool and
 split eligible strings, precompute portable static reporter trees, encode exact
 numeric domains, pack eligible Stage and sprite scalars into shuffled per-scope
 list slots, add opaque branches and fake data/procedures, and select decoys from
@@ -216,18 +231,29 @@ accepted only when every record resolves to the same declaration owner;
 ambiguous multi-owner records and cross-owner show/hide coupling remain
 rejected to preserve Scratch's monitor coalescing behavior.
 
-Supported code is official Scratch 3 core code plus the bundled extension IDs
+Supported code is official Scratch 3 core code plus the exact bundled extension
+opcode and serialized-menu surface
 registered by Scratch VM 15.1.0: Boost, EV3, Face Sensing, Go Direct Force &
 Acceleration, Makey Makey, micro:bit, Music, Pen, Text to Speech, Translate,
 Video Sensing, and WeDo 2.0. Official extension payloads are retained. Custom or
 nonstandard extension IDs/opcodes are rejected with an input diagnostic.
 
-Cloud variable names are frozen because they identify remote state. Stage,
-sprite, costume/backdrop, sound, and broadcast display names remain readable
-where computed-name lookup can observe them. Name-based sensing and ambiguous
-legacy references conservatively freeze the affected namespace. Comments,
-workspace layout, and manual editing behavior are outside the equivalence
-boundary.
+The first ten valid Stage cloud variable names are frozen because Scratch uses
+them to identify remote state; cloud-like markers outside that runtime quota are
+renamed. Stage, sprite, costume/backdrop, and sound display names remain readable.
+Typed broadcast names are renamed and case-equivalent receiver channels stay
+coupled. A statically evaluable computed selector preserves only the Stage
+channel it can select, because rewriting its reporter tree would change the
+saved executable graph. A runtime-dependent selector preserves the Stage
+broadcast namespace, while unrelated sprite-only broadcast declarations still
+rename. Empty and unmatched selectors remain no-ops and cannot collide with a
+generated name. For `sensing of`,
+`_stage_` selects the Stage while the literal display name `Stage` is treated as
+a missing sprite, matching the pinned runtime. Static selectors, duplicate-name
+first-match behavior, monitors, native attributes, and dynamic selectors are
+handled independently instead of freezing an entire variable namespace.
+Comments, workspace layout, and manual editing behavior are outside the
+equivalence boundary.
 
 ## Deterministic archive and input limits
 
@@ -273,9 +299,10 @@ npm pack
 ```
 
 `npm run qa` runs the strict typecheck, lint, production-dependency audit,
-coverage suite, and build. Coverage thresholds are 95% for statements,
-functions, and lines and 90% for branches across all production source,
-including the CLI.
+coverage suite, and build. Coverage thresholds are 97% for statements, 93% for
+branches, 100% for functions, and 99% for lines across all production source,
+including the CLI. The current full suite reaches 97.12% statements, 93.15%
+branches, 100% functions, and 99.45% lines without excluding production files.
 
 The test suite includes deterministic/property transforms, official VM
 load/serialize/reload and execution checks, per-step semantic traces, an

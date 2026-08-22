@@ -64,6 +64,26 @@ describe('optimizer against the official Scratch runtime', () => {
     expect(remaining).toContain('operator_mathop');
     expect(remaining).not.toContain('operator_random');
   }, 60_000);
+
+  it('retains a computed broadcast selector as an active reporter and preserves delivery', async () => {
+    const source = createFixtureProject();
+    const stage = source.targets[0];
+    const broadcast = stage?.blocks['broadcast_message'];
+    if (!stage || !broadcast || !isScratchBlock(broadcast)) throw new Error('fixture broadcast is unavailable');
+    broadcast.inputs['BROADCAST_INPUT'] = [3, 'broadcast-name', [11, 'go', 'broadcast_go']];
+    stage.blocks['broadcast-name'] = reporter('operator_join', 'broadcast_message', {
+      STRING1: literal('g'),
+      STRING2: literal('o')
+    });
+
+    const optimized = optimizeProject(source);
+    const optimizedBroadcast = optimized.project.targets[0]?.blocks['broadcast_message'];
+    expect(optimizedBroadcast && isScratchBlock(optimizedBroadcast)
+      ? optimizedBroadcast.inputs['BROADCAST_INPUT']
+      : undefined).toEqual([2, 'broadcast-name']);
+    expect(await executeVariable(source, false, 'local_score')).toBe(4);
+    expect(await executeVariable(optimized.project, true, 'local_score')).toBe(4);
+  }, 60_000);
 });
 
 async function execute(project: ScratchProject, roundTrip = false): Promise<unknown[]> {
@@ -87,6 +107,32 @@ async function execute(project: ScratchProject, roundTrip = false): Promise<unkn
     const values: unknown[] = [];
     for (const item of value as unknown[]) values.push(item);
     return values;
+  } finally {
+    reloaded?.quit();
+    vm.quit();
+  }
+}
+
+async function executeVariable(
+  project: ScratchProject,
+  roundTrip: boolean,
+  variableId: string
+): Promise<unknown> {
+  const vm = createVm();
+  let reloaded: ScratchVmInstance | undefined;
+  try {
+    await vm.loadProject(createFixtureArchive(project));
+    if (roundTrip) {
+      const saved = await vm.saveProjectSb3();
+      reloaded = createVm();
+      await reloaded.loadProject(await blobBytes(saved));
+    }
+    const active = reloaded ?? vm;
+    active.start();
+    active.greenFlag();
+    for (let step = 0; step < 300 && active.runtime.threads.length > 0; step += 1) active.runtime._step();
+    expect(active.runtime.threads).toHaveLength(0);
+    return active.runtime.targets.find(target => !target.isStage)?.variables[variableId]?.value;
   } finally {
     reloaded?.quit();
     vm.quit();

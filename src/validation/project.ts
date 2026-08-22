@@ -2,12 +2,11 @@ import {InputError} from '../errors.js';
 import {isPrimitive, isScratchBlock} from '../model/blocks.js';
 import {assertJsonTree, hasOwn, isRecord} from '../model/json.js';
 import type {ScratchBlock, ScratchProject, ScratchTarget} from '../types.js';
-import {validateOfficialExtensions} from './extensions.js';
+import {OFFICIAL_LITERAL_SHADOW_OPCODES, validateOfficialExtensions} from './extensions.js';
 import {validateOfficialSchema} from './schema.js';
 
 type SymbolKind = 'variable' | 'list' | 'broadcast';
-type NameResolution = 'unique' | 'missing' | 'ambiguous';
-type RegisterImplicitReference = (kind: SymbolKind, name: string, effectiveId: string, path: string, isDynamicPrimitive: boolean) => void;
+type RegisterImplicitReference = (kind: SymbolKind, name: string, effectiveId: string, path: string) => void;
 
 export interface ProjectValidationOptions {
   readonly allowRecoverableLocalSymbolIdCollisions?: boolean;
@@ -22,36 +21,34 @@ interface SymbolLocation {
   readonly isStage: boolean;
 }
 
-const RECOVERABLE_TOP_LEVEL_SHADOW_OPCODES = new Set([
-  'argument_editor_boolean',
-  'argument_editor_string_number',
-  'colour_picker',
-  'control_create_clone_of_menu',
-  'data_listindexall',
-  'data_listindexrandom',
-  'event_broadcast_menu',
-  'event_touchingobjectmenu',
-  'looks_backdrops',
-  'looks_costume',
-  'math_angle',
-  'math_integer',
-  'math_number',
-  'math_positive_number',
-  'math_whole_number',
-  'matrix',
-  'motion_glideto_menu',
-  'motion_goto_menu',
-  'motion_pointtowards_menu',
-  'note',
-  'sensing_distancetomenu',
-  'sensing_keyoptions',
-  'sensing_of_object_menu',
-  'sensing_touchingobjectmenu',
-  'sound_beats_menu',
-  'sound_effects_menu',
-  'sound_sounds_menu',
-  'text'
+const PROTOTYPE_COLLIDING_IDS = new Set([
+  '__defineGetter__',
+  '__defineSetter__',
+  '__lookupGetter__',
+  '__lookupSetter__',
+  '__proto__',
+  'constructor',
+  'hasOwnProperty',
+  'isPrototypeOf',
+  'propertyIsEnumerable',
+  'prototype',
+  'toLocaleString',
+  'toString',
+  'valueOf'
 ]);
+const XML_UNSAFE_ID = /[<>&'"]/u;
+const PRIMITIVE_OBJECT_FIELDS: Readonly<Record<string, string>> = Object.freeze({
+  colour_picker: 'COLOUR',
+  data_listcontents: 'LIST',
+  data_variable: 'VARIABLE',
+  event_broadcast_menu: 'BROADCAST_OPTION',
+  math_angle: 'NUM',
+  math_integer: 'NUM',
+  math_number: 'NUM',
+  math_positive_number: 'NUM',
+  math_whole_number: 'NUM',
+  text: 'TEXT'
+});
 
 function fail(path: string, message: string): never {
   throw new InputError(`${path}: ${message}`);
@@ -75,6 +72,18 @@ function requireBoolean(value: unknown, path: string): boolean {
 function requireFiniteNumber(value: unknown, path: string): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) fail(path, 'expected a finite number');
   return value;
+}
+
+function validateSerializedId(id: string, path: string, kind: string, xmlNormalized: boolean): void {
+  if (id.length === 0) {
+    fail(path, xmlNormalized ? `invalid ${kind} declaration: ID must not be empty` : `${kind} IDs must not be empty`);
+  }
+  if (PROTOTYPE_COLLIDING_IDS.has(id)) {
+    fail(path, `${kind} ID ${JSON.stringify(id)} collides with the Scratch loader's object prototype`);
+  }
+  if (xmlNormalized && XML_UNSAFE_ID.test(id)) {
+    fail(path, `${kind} ID ${JSON.stringify(id)} contains characters rewritten by the Scratch loader`);
+  }
 }
 
 function isScalar(value: unknown): value is string | boolean | number {
@@ -108,7 +117,7 @@ function validatePrimitive(
     if (typeof name !== 'string') fail(path, 'invalid symbol primitive');
     const kind: SymbolKind = code === 11 ? 'broadcast' : code === 12 ? 'variable' : 'list';
     if (code === 11 && id === null) {
-      registerImplicitReference(kind, name, 'null', path, true);
+      registerImplicitReference(kind, name, 'null', path);
       return;
     }
     if (typeof id !== 'string' || id.length === 0) fail(path, 'invalid symbol primitive');
@@ -150,7 +159,6 @@ function validateField(
   value: unknown,
   path: string,
   resolve: (kind: SymbolKind, id: string) => boolean,
-  resolveName: (kind: SymbolKind, name: string) => NameResolution,
   registerImplicitReference: RegisterImplicitReference
 ): void {
   if (!Array.isArray(value) || value.length < 1 || value.length > 2 || !isScalar(value[0])) fail(path, 'invalid field tuple');
@@ -163,19 +171,76 @@ function validateField(
   }
   if (typeof value[0] !== 'string') fail(`${path}[0]`, `expected a string for a name-only ${kind} reference`);
   const effectiveId = value.length === 1 ? 'undefined' : value[1] === null ? 'null' : '';
-  registerImplicitReference(kind, value[0], effectiveId, path, false);
-  const resolution = resolveName(kind, value[0]);
-  if (resolution === 'missing') fail(`${path}[0]`, `dangling name-only ${kind} reference ${JSON.stringify(value[0])}`);
-  if (resolution === 'ambiguous') fail(`${path}[0]`, `ambiguous name-only ${kind} reference ${JSON.stringify(value[0])}`);
+  registerImplicitReference(kind, value[0], effectiveId, path);
+}
+
+function isBroadcastMenuItem(item: unknown, blocks: ScratchTarget['blocks']): boolean {
+  if (isPrimitive(item)) return item[0] === 11;
+  if (typeof item !== 'string') return false;
+  const referenced = blocks[item];
+  return isPrimitive(referenced)
+    ? referenced[0] === 11
+    : isScratchBlock(referenced) && referenced.opcode === 'event_broadcast_menu';
+}
+
+function isActiveBroadcastReporter(item: unknown, blocks: ScratchTarget['blocks']): boolean {
+  if (isPrimitive(item)) return item[0] === 12 || item[0] === 13;
+  if (typeof item !== 'string') return false;
+  const referenced = blocks[item];
+  if (isPrimitive(referenced)) return referenced[0] === 12 || referenced[0] === 13;
+  return isScratchBlock(referenced) && !referenced.shadow && !OFFICIAL_LITERAL_SHADOW_OPCODES.has(referenced.opcode);
+}
+
+function validateBroadcastInputShape(
+  block: ScratchBlock,
+  blocks: ScratchTarget['blocks'],
+  path: string
+): void {
+  if (block.opcode !== 'event_broadcast' && block.opcode !== 'event_broadcastandwait') return;
+  const input = block.inputs['BROADCAST_INPUT'];
+  if (!input) fail(`${path}.inputs.BROADCAST_INPUT`, 'broadcast command requires a broadcast input');
+  if (input[0] === 1 && !isBroadcastMenuItem(input[1], blocks)) {
+    fail(`${path}.inputs.BROADCAST_INPUT`, 'shadow-only broadcast input must be a broadcast menu');
+  }
+  if ((input[0] === 2 || input[0] === 3) && !isActiveBroadcastReporter(input[1], blocks)) {
+    fail(`${path}.inputs.BROADCAST_INPUT`, 'computed broadcast input must have an executable active reporter');
+  }
+  if (input[0] === 3 && !isBroadcastMenuItem(input[2], blocks)) {
+    fail(`${path}.inputs.BROADCAST_INPUT`, 'obscured broadcast input must retain a broadcast menu shadow');
+  }
+}
+
+function validatePrimitiveObjectShape(block: ScratchBlock, path: string): void {
+  const expectedField = PRIMITIVE_OBJECT_FIELDS[block.opcode];
+  if (expectedField === undefined) return;
+  const fieldNames = Object.keys(block.fields);
+  if (fieldNames.length !== 1 || fieldNames[0] !== expectedField) {
+    fail(`${path}.fields`, `${block.opcode} must contain only its ${expectedField} field`);
+  }
+  const field = block.fields[expectedField];
+  if (!Array.isArray(field)) fail(`${path}.fields.${expectedField}`, 'invalid primitive field tuple');
+  const value = field[0];
+  if (block.opcode === 'colour_picker') {
+    if (field.length !== 1 || typeof value !== 'string' || !/^#[0-9a-fA-F]{6}$/u.test(value)) {
+      fail(`${path}.fields.${expectedField}`, 'color primitives require one #RRGGBB string');
+    }
+  } else if (block.opcode === 'data_variable' || block.opcode === 'data_listcontents' || block.opcode === 'event_broadcast_menu') {
+    if (typeof value !== 'string') fail(`${path}.fields.${expectedField}[0]`, 'typed primitives require a string name');
+  } else if (field.length !== 1 || (typeof value !== 'string' && typeof value !== 'number')) {
+    fail(`${path}.fields.${expectedField}`, 'numeric and text primitives require one string or number');
+  }
+  if (Object.keys(block.inputs).length > 0) {
+    fail(path, `${block.opcode} contains data discarded by the Scratch primitive serializer`);
+  }
 }
 
 function validateBlock(
   block: ScratchBlock,
   path: string,
+  blocks: ScratchTarget['blocks'],
   blockIds: ReadonlySet<string>,
   commentIds: ReadonlySet<string>,
   resolve: (kind: SymbolKind, id: string) => boolean,
-  resolveName: (kind: SymbolKind, name: string) => NameResolution,
   registerImplicitReference: RegisterImplicitReference
 ): void {
   if (block.opcode.length === 0) fail(`${path}.opcode`, 'must not be empty');
@@ -186,6 +251,8 @@ function validateBlock(
   }
   requireRecord(block.inputs, `${path}.inputs`);
   requireRecord(block.fields, `${path}.fields`);
+  const typedFields = ['VARIABLE', 'LIST', 'BROADCAST_OPTION'].filter(name => block.fields[name] !== undefined);
+  if (typedFields.length > 1) fail(`${path}.fields`, 'multiple typed symbol fields have loader-dependent precedence');
   requireBoolean(block.shadow, `${path}.shadow`);
   requireBoolean(block.topLevel, `${path}.topLevel`);
   if (block.x !== undefined) requireFiniteNumber(block.x, `${path}.x`);
@@ -196,7 +263,11 @@ function validateBlock(
   }
   if (block.mutation !== undefined) requireRecord(block.mutation, `${path}.mutation`);
   for (const [name, input] of Object.entries(block.inputs)) validateInput(input, `${path}.inputs.${name}`, blockIds, resolve, registerImplicitReference);
-  for (const [name, field] of Object.entries(block.fields)) validateField(name, field, `${path}.fields.${name}`, resolve, resolveName, registerImplicitReference);
+  validateBroadcastInputShape(block, blocks, path);
+  for (const [name, field] of Object.entries(block.fields)) {
+    validateField(name, field, `${path}.fields.${name}`, resolve, registerImplicitReference);
+  }
+  validatePrimitiveObjectShape(block, path);
 }
 
 function symbolEntries(target: ScratchTarget, kind: SymbolKind): Array<[string, string]> {
@@ -277,7 +348,7 @@ function validateGraphOwnership(
       && value.next === null
       && incoming.length === 1
       && incoming[0]?.inactiveShadow === true
-      && (!value.topLevel || RECOVERABLE_TOP_LEVEL_SHADOW_OPCODES.has(value.opcode));
+      && (!value.topLevel || OFFICIAL_LITERAL_SHADOW_OPCODES.has(value.opcode));
     if (recoverableInactiveShadow) continue;
     if (value.topLevel) {
       if (value.parent !== null) fail(`${path}.${blockId}.parent`, 'top-level block must have a null parent');
@@ -338,17 +409,20 @@ function validateTargetShape(targetValue: unknown, index: number): ScratchTarget
   if (!Array.isArray(sounds)) fail(`${path}.sounds`, 'expected an array');
 
   for (const [id, tuple] of Object.entries(variables)) {
-    if (id.length === 0 || !Array.isArray(tuple) || (tuple.length !== 2 && tuple.length !== 3) || typeof tuple[0] !== 'string' || !isScalar(tuple[1]) || (tuple.length === 3 && tuple[2] !== true)) {
+    validateSerializedId(id, `${path}.variables.${id}`, 'variable', true);
+    if (!Array.isArray(tuple) || (tuple.length !== 2 && tuple.length !== 3) || typeof tuple[0] !== 'string' || !isScalar(tuple[1]) || (tuple.length === 3 && tuple[2] !== true)) {
       fail(`${path}.variables.${id}`, 'invalid variable declaration');
     }
   }
   for (const [id, tuple] of Object.entries(lists)) {
-    if (id.length === 0 || !Array.isArray(tuple) || tuple.length !== 2 || typeof tuple[0] !== 'string' || !Array.isArray(tuple[1]) || !tuple[1].every(isScalar)) {
+    validateSerializedId(id, `${path}.lists.${id}`, 'list', true);
+    if (!Array.isArray(tuple) || tuple.length !== 2 || typeof tuple[0] !== 'string' || !Array.isArray(tuple[1]) || !tuple[1].every(isScalar)) {
       fail(`${path}.lists.${id}`, 'invalid list declaration');
     }
   }
   for (const [id, name] of Object.entries(broadcasts)) {
-    if (id.length === 0 || typeof name !== 'string') fail(`${path}.broadcasts.${id}`, 'invalid broadcast declaration');
+    validateSerializedId(id, `${path}.broadcasts.${id}`, 'broadcast', true);
+    if (typeof name !== 'string') fail(`${path}.broadcasts.${id}`, 'invalid broadcast declaration');
   }
   for (let costumeIndex = 0; costumeIndex < costumes.length; costumeIndex += 1) {
     const costume = requireRecord(costumes[costumeIndex], `${path}.costumes[${costumeIndex}]`);
@@ -541,9 +615,8 @@ export function validateProject(
       const global = kind === 'variable' ? stage.variables : kind === 'list' ? stage.lists : stage.broadcasts;
       return hasOwn(local, id) || hasOwn(global, id);
     };
-    const resolveName = (kind: SymbolKind, name: string): NameResolution => {
-      const matches = matchingSymbolNames(stage, kind, name);
-      return matches.length === 1 ? 'unique' : matches.length === 0 ? 'missing' : 'ambiguous';
+    const resolveName = (kind: SymbolKind, name: string): boolean => {
+      return matchingSymbolNames(stage, kind, name).length > 0;
     };
     const runtimeSymbolIds = new Set<string>();
     for (const scope of target === stage ? [stage] : [target, stage]) {
@@ -551,27 +624,22 @@ export function validateProject(
         for (const [id] of symbolEntries(scope, kind)) runtimeSymbolIds.add(id);
       }
     }
-    const implicitReferences = new Map<string, {kind: SymbolKind; name: string; hasField: boolean; divergentDynamic: boolean}>();
-    const registerImplicitReference: RegisterImplicitReference = (kind, name, effectiveId, referencePath, isDynamicPrimitive) => {
+    const implicitReferences = new Map<string, {kind: SymbolKind; name: string; path: string}>();
+    const registerImplicitReference: RegisterImplicitReference = (kind, name, effectiveId, referencePath) => {
       if (runtimeSymbolIds.has(effectiveId)) {
         fail(referencePath, `implicit symbol ID ${JSON.stringify(effectiveId)} collides with a declaration visible to the Scratch loader`);
       }
+      if (!resolveName(kind, name)) {
+        fail(referencePath, `dangling name-only ${kind} reference ${JSON.stringify(name)}`);
+      }
       const previous = implicitReferences.get(effectiveId);
-      if (!previous) {
-        implicitReferences.set(effectiveId, {kind, name, hasField: !isDynamicPrimitive, divergentDynamic: false});
-        return;
+      if (previous && (previous.kind !== kind || previous.name !== name)) {
+        fail(
+          referencePath,
+          `implicit symbol ID ${JSON.stringify(effectiveId)} would coalesce with a distinct reference first seen at ${previous.path}`
+        );
       }
-      if (previous.kind !== kind || previous.name !== name) {
-        if (isDynamicPrimitive && !previous.hasField) {
-          previous.divergentDynamic = true;
-          return;
-        }
-        fail(referencePath, `implicit symbol ID ${JSON.stringify(effectiveId)} would coalesce distinct references during Scratch loading`);
-      }
-      if (!isDynamicPrimitive && previous.divergentDynamic) {
-        fail(referencePath, `implicit symbol ID ${JSON.stringify(effectiveId)} would coalesce distinct references during Scratch loading`);
-      }
-      if (!isDynamicPrimitive) previous.hasField = true;
+      if (!previous) implicitReferences.set(effectiveId, {kind, name, path: referencePath});
     };
     for (const [commentId, commentValue] of Object.entries(target.comments)) {
       const comment = requireRecord(commentValue, `${path}.comments.${commentId}`);
@@ -582,8 +650,9 @@ export function validateProject(
       requireString(comment['text'], `${path}.comments.${commentId}.text`);
     }
     for (const [blockId, block] of Object.entries(target.blocks)) {
-      if (blockId.length === 0) fail(`${path}.blocks`, 'block IDs must not be empty');
-      if (isScratchBlock(block)) validateBlock(block, `${path}.blocks.${blockId}`, blockIds, commentIds, resolve, resolveName, registerImplicitReference);
+      const blockPath = blockId.length === 0 ? `${path}.blocks` : `${path}.blocks.${blockId}`;
+      validateSerializedId(blockId, blockPath, 'block', false);
+      if (isScratchBlock(block)) validateBlock(block, `${path}.blocks.${blockId}`, target.blocks, blockIds, commentIds, resolve, registerImplicitReference);
       else validatePrimitive(block, `${path}.blocks.${blockId}`, resolve, registerImplicitReference);
     }
     validateNoExecutableCycles(target, index);

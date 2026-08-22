@@ -165,7 +165,8 @@ describe('common lossless transforms', () => {
     expect(Object.keys(stage.comments)).toEqual([]);
     expect(Object.values(stage.blocks).filter(value => !Array.isArray(value) && value.topLevel).every(value => !Array.isArray(value) && value.x === 0 && value.y === 0)).toBe(true);
     expect(Object.values(stage.variables).find(tuple => tuple[2] === true)?.[0]).toBe('☁ cloud score');
-    expect(Object.values(stage.broadcasts)).toEqual(['Launch']);
+    expect(Object.values(stage.broadcasts)[0]).toMatch(/^x_/);
+    expect(Object.values(stage.broadcasts)).not.toContain('Launch');
     expect(resultStats.commentsRemoved).toBe(1);
     expect(resultStats.identifiersRenamed).toBeGreaterThan(6);
 
@@ -198,11 +199,162 @@ describe('common lossless transforms', () => {
     const listField = blocks.find(block => block.opcode === 'data_listcontents')?.fields['LIST'];
     const broadcastField = blocks.find(block => block.opcode === 'event_whenbroadcastreceived')?.fields['BROADCAST_OPTION'];
     const stageVariableId = Object.keys(stage.variables).find(id => stage.variables[id]?.[2] !== true);
+    const stageListId = Object.keys(stage.lists)[0];
+    const stageBroadcastId = Object.keys(stage.broadcasts)[0];
     expect(variableField).toEqual([stage.variables[stageVariableId ?? '']?.[0], stageVariableId]);
-    expect(variableField?.[1]).not.toBe(Object.keys(sprite.variables)[0]);
-    expect(listField).toEqual([Object.values(stage.lists)[0]?.[0], Object.keys(stage.lists)[0]]);
-    expect(broadcastField).toEqual(['Launch', Object.keys(stage.broadcasts)[0]]);
-    expect(broadcastField?.[1]).not.toBe(Object.keys(sprite.broadcasts)[0]);
+    expect(listField).toEqual([stage.lists[stageListId ?? '']?.[0], stageListId]);
+    expect(broadcastField).toEqual([stage.broadcasts[stageBroadcastId ?? ''], stageBroadcastId]);
+  });
+
+  it('renames static broadcast names but freezes the Stage namespace for a computed broadcast input', () => {
+    const staticProject = projectFixture();
+    const staticStage = staticProject.targets[0];
+    const staticSprite = staticProject.targets[1];
+    if (!staticStage || !staticSprite) throw new Error('fixture targets missing');
+    staticStage.broadcasts['duplicate-message'] = 'LAUNCH';
+    staticStage.broadcasts['unicode-message'] = 'Σ';
+    staticStage.broadcasts['unicode-equivalent-message'] = 'ς';
+    staticSprite.broadcasts['unused-local-message'] = 'Readable local message';
+    applyCommonTransforms(staticProject, new DeterministicGenerator(new Uint8Array(32).fill(18), 'static-broadcast'), stats());
+    expect(Object.values(staticStage?.broadcasts ?? {})).not.toContain('Launch');
+    const stageNames = Object.values(staticStage.broadcasts);
+    const spriteNames = Object.values(staticSprite.broadcasts);
+    expect(stageNames[0]).toBe(stageNames[1]);
+    expect(stageNames[2]).toBe(stageNames[3]);
+    expect(stageNames[2]).not.toBe(stageNames[0]);
+    expect(spriteNames[0]).toMatch(/^x_/u);
+    expect(spriteNames[0]).not.toBe('Readable local message');
+
+    const dynamicProject = projectFixture();
+    const sprite = dynamicProject.targets[1];
+    const broadcast = sprite?.blocks['broadcast'];
+    if (!sprite || !broadcast || Array.isArray(broadcast)) throw new Error('fixture broadcast block missing');
+    broadcast.inputs['BROADCAST_INPUT'] = [3, 'computed-broadcast', [11, 'Launch', 'message']];
+    sprite.blocks['computed-broadcast'] = {
+      opcode: 'sensing_answer', next: null, parent: 'broadcast', inputs: {}, fields: {}, shadow: false, topLevel: false
+    };
+    sprite.broadcasts['local-message'] = 'LAUNCH';
+    validateProject(dynamicProject);
+    applyCommonTransforms(dynamicProject, new DeterministicGenerator(new Uint8Array(32).fill(18), 'dynamic-broadcast'), stats());
+    expect(Object.values(dynamicProject.targets[0]?.broadcasts ?? {})).toEqual(['Launch']);
+    expect(Object.values(sprite.broadcasts)[0]).toMatch(/^x_/u);
+    expect(Object.values(sprite.broadcasts)).not.toContain('LAUNCH');
+  });
+
+  it('rewrites a stale typed broadcast name through its Stage ID', () => {
+    const project = projectFixture();
+    const sprite = project.targets[1];
+    const broadcast = sprite?.blocks['broadcast'];
+    if (!sprite || !broadcast || !isScratchBlock(broadcast)) throw new Error('fixture broadcast block missing');
+    broadcast.inputs['BROADCAST_INPUT'] = [1, [11, 'lAuNcH', 'message']];
+    validateProject(project);
+
+    applyCommonTransforms(
+      project,
+      new DeterministicGenerator(new Uint8Array(32).fill(18), 'static-text-broadcast'),
+      stats()
+    );
+    validateProject(project);
+
+    const stageBroadcastName = Object.values(project.targets[0]?.broadcasts ?? {})[0];
+    expect(stageBroadcastName).toMatch(/^x_/u);
+    const transformed = Object.values(sprite.blocks).find(value => (
+      isScratchBlock(value) && value.opcode === 'event_broadcast'
+    ));
+    if (!transformed || !isScratchBlock(transformed)) throw new Error('transformed broadcast block missing');
+    expect(inputPrimitive(transformed, 'BROADCAST_INPUT', 1)).toEqual([
+      11,
+      stageBroadcastName,
+      Object.keys(project.targets[0]?.broadcasts ?? {})[0]
+    ]);
+  });
+
+  it('preserves only fixed computed or constrained-literal channels', () => {
+    const project = projectFixture();
+    const stage = project.targets[0];
+    const sprite = project.targets[1];
+    const broadcast = sprite?.blocks['broadcast'];
+    if (!stage || !sprite || !broadcast || !isScratchBlock(broadcast)) throw new Error('fixture targets missing');
+    stage.broadcasts['numeric-message'] = '5';
+    stage.broadcasts['unrelated-message'] = 'Unrelated';
+    broadcast.inputs['BROADCAST_INPUT'] = [2, 'computed-name'];
+    sprite.blocks['computed-name'] = {
+      opcode: 'operator_join', next: null, parent: 'broadcast',
+      inputs: {STRING1: [1, [10, 'La']], STRING2: [1, [10, 'unch']]},
+      fields: {}, shadow: false, topLevel: false
+    };
+    sprite.blocks['numeric-broadcast'] = {
+      opcode: 'event_broadcast', next: null, parent: null,
+      inputs: {BROADCAST_INPUT: [3, 'numeric-name', [11, '5', 'numeric-message']]},
+      fields: {}, shadow: false, topLevel: true, x: 1, y: 1
+    };
+    sprite.blocks['numeric-name'] = {
+      opcode: 'operator_add', next: null, parent: 'numeric-broadcast',
+      inputs: {NUM1: [1, [4, 2]], NUM2: [1, [4, 3]]}, fields: {}, shadow: false, topLevel: false
+    };
+    validateProject(project);
+
+    const resultStats = stats();
+    applyCommonTransforms(project, new DeterministicGenerator(new Uint8Array(32).fill(21), 'fixed-broadcast'), resultStats);
+    validateProject(project);
+
+    const names = Object.values(stage.broadcasts);
+    expect(names).toContain('Launch');
+    expect(names).toContain('5');
+    expect(names).not.toContain('Unrelated');
+    expect(names.find(name => name !== 'Launch' && name !== '5')).toMatch(/^x_/u);
+    expect(Object.values(sprite.blocks).some(value => isScratchBlock(value) && value.opcode === 'operator_add')).toBe(true);
+    expect(resultStats.warnings).toContain('Broadcast display names were preserved because the project computes broadcast names at runtime.');
+  });
+
+  it('keeps empty and unmatched fixed selectors inert under generated-name collisions', () => {
+    const generator = new DeterministicGenerator(new Uint8Array(32).fill(22), 'broadcast-collision');
+    const probe = projectFixture();
+    applyCommonTransforms(probe, generator, stats());
+    const collidingSelector = Object.values(probe.targets[0]?.broadcasts ?? {})[0];
+    if (typeof collidingSelector !== 'string') throw new Error('probe broadcast name missing');
+
+    const project = projectFixture();
+    const stage = project.targets[0];
+    const sprite = project.targets[1];
+    const broadcast = sprite?.blocks['broadcast'];
+    if (!stage || !sprite || !broadcast || !isScratchBlock(broadcast)) throw new Error('fixture targets missing');
+    stage.broadcasts['empty-message'] = '';
+    const split = Math.floor(collidingSelector.length / 2);
+    broadcast.inputs['BROADCAST_INPUT'] = [3, 'colliding-name', [11, 'Launch', 'message']];
+    sprite.blocks['colliding-name'] = {
+      opcode: 'operator_join', next: null, parent: 'broadcast',
+      inputs: {
+        STRING1: [1, [10, collidingSelector.slice(0, split)]],
+        STRING2: [1, [10, collidingSelector.slice(split)]]
+      },
+      fields: {}, shadow: false, topLevel: false
+    };
+    sprite.blocks['empty-broadcast'] = {
+      opcode: 'event_broadcast', next: null, parent: null,
+      inputs: {BROADCAST_INPUT: [3, 'empty-name', [11, '', 'empty-message']]},
+      fields: {}, shadow: false, topLevel: true, x: 1, y: 1
+    };
+    sprite.blocks['empty-name'] = {
+      opcode: 'operator_join', next: null, parent: 'empty-broadcast',
+      inputs: {STRING1: [1, [10, '']], STRING2: [1, [10, '']]},
+      fields: {}, shadow: false, topLevel: false
+    };
+    validateProject(project);
+
+    applyCommonTransforms(
+      project,
+      new DeterministicGenerator(new Uint8Array(32).fill(22), 'broadcast-collision'),
+      stats()
+    );
+    validateProject(project);
+
+    expect(Object.values(stage.broadcasts).some(name => name.toLowerCase() === collidingSelector.toLowerCase())).toBe(false);
+    const selectors = Object.values(sprite.blocks)
+      .filter(value => isScratchBlock(value) && value.opcode === 'operator_join')
+      .map(value => isScratchBlock(value) ? joinedLiteral(value) : undefined);
+    expect(selectors).toContain(collidingSelector);
+    expect(selectors).toContain('');
   });
 
   it('is deterministic for the same project and seed', () => {
@@ -213,7 +365,7 @@ describe('common lossless transforms', () => {
     expect(JSON.stringify(left)).toBe(JSON.stringify(right));
   });
 
-  it('freezes variable names when name-based sensing exists', () => {
+  it('does not freeze unrelated Stage names for a missing sprite property', () => {
     const project = projectFixture();
     const sprite = project.targets[1];
     if (!sprite) return;
@@ -222,8 +374,10 @@ describe('common lossless transforms', () => {
     };
     const resultStats = stats();
     applyCommonTransforms(project, new DeterministicGenerator(new Uint8Array(32), 'sensing'), resultStats);
-    expect(project.targets[0]?.variables[Object.keys(project.targets[0]?.variables ?? {})[0] ?? '']?.[0]).toBe('Score');
-    expect(resultStats.warnings).toHaveLength(1);
+    expect(Object.values(project.targets[0]?.variables ?? {}).some(declaration => declaration[0] === 'Score')).toBe(false);
+    const sensing = Object.values(sprite.blocks).find(value => isScratchBlock(value) && value.opcode === 'sensing_of');
+    expect(sensing && isScratchBlock(sensing) ? sensing.fields['PROPERTY']?.[0] : undefined).toBe('Score');
+    expect(resultStats.warnings).toEqual([]);
   });
 
   it('renames consistent custom procedure codes, argument IDs, and reporter names', () => {
@@ -239,6 +393,7 @@ describe('common lossless transforms', () => {
       reporter: {opcode: 'argument_reporter_string_number', next: null, parent: 'prototype', inputs: {}, fields: {VALUE: ['value', null]}, shadow: true, topLevel: false},
       body: {opcode: 'looks_say', next: null, parent: 'definition', inputs: {MESSAGE: [1, 'bodyReporter']}, fields: {}, shadow: false, topLevel: false},
       bodyReporter: {opcode: 'argument_reporter_string_number', next: null, parent: 'body', inputs: {}, fields: {VALUE: ['value', null]}, shadow: false, topLevel: false},
+      unrelated: {opcode: 'looks_show', next: null, parent: null, inputs: {}, fields: {VALUE: ['value']}, shadow: false, topLevel: true, x: 0, y: 0},
       call: {
         opcode: 'procedures_call', next: null, parent: null, inputs: {argOne: [1, [10, 'hello']]}, fields: {}, shadow: false, topLevel: true, x: 1, y: 2,
         mutation: {tagName: 'mutation', children: [], proccode: 'do %s', argumentids: '["argOne"]', warp: 'false'}
@@ -256,6 +411,7 @@ describe('common lossless transforms', () => {
     const reporterNames = blocks.filter(block => block.opcode.startsWith('argument_reporter_')).map(block => block.fields['VALUE']?.[0]);
     expect(new Set(reporterNames).size).toBe(1);
     expect(reporterNames[0]).not.toBe('value');
+    expect(blocks.find(block => block.opcode === 'looks_show')?.fields['VALUE']?.[0]).toBe('value');
   });
 
   it('rejects invalid public mode and seed values', () => {
@@ -508,6 +664,16 @@ function inputPrimitive(block: ScratchBlock, inputName: string, slot: number): J
   const value = block.inputs[inputName]?.[slot];
   if (!Array.isArray(value)) throw new Error(`fixture input ${inputName} is not a primitive`);
   return value;
+}
+
+function joinedLiteral(block: ScratchBlock): string {
+  const left = inputPrimitive(block, 'STRING1', 1)[1];
+  const right = inputPrimitive(block, 'STRING2', 1)[1];
+  if ((typeof left !== 'string' && typeof left !== 'number') ||
+      (typeof right !== 'string' && typeof right !== 'number')) {
+    throw new Error('fixture join inputs must be text or numbers');
+  }
+  return `${left}${right}`;
 }
 
 function rawDictionary(value: object): Record<string, unknown> {

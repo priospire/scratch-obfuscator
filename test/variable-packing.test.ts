@@ -133,6 +133,39 @@ describe('scalar variable packing', () => {
     }
   }, 60_000);
 
+  it('packs name-only fields with the loader Stage-resolution rule in both aggressive modes', async () => {
+    for (const mode of ['lossy', 'no-preserve'] as const) {
+      const project = nameOnlyPackingProject();
+      const resultStats = stats(project, mode);
+      const candidates = collectVariableCandidates(project);
+      expect(candidates.find(candidate => candidate.id === 'stage-shared')?.usages).toHaveLength(4);
+      expect(candidates.find(candidate => candidate.id === 'local-shared')?.usages).toHaveLength(0);
+
+      applyAggressiveTransforms(
+        project,
+        mode,
+        new DeterministicGenerator(new Uint8Array(32).fill(mode === 'lossy' ? 107 : 109), `packing-name-only-${mode}`),
+        resultStats
+      );
+      expect(resultStats.variablesVirtualized, `${mode} did not pack both eligible same-name scalars`).toBe(2);
+      validateProject(project);
+
+      const vm = new ScratchVm();
+      vm.attachStorage(new ScratchStorage());
+      try {
+        await vm.loadProject(createFixtureArchive(project));
+        vm.start();
+        vm.greenFlag();
+        for (let step = 0; step < 2_000 && vm.runtime.threads.length > 0; step += 1) vm.runtime._step();
+        expect(vm.runtime.threads, `${mode} name-only script did not terminate`).toHaveLength(0);
+        const stage = vm.runtime.targets.find(target => target.isStage);
+        expect(stage?.variables['results']?.value, `${mode} changed loader-reconciled name-only lookup`).toEqual([100, 8]);
+      } finally {
+        vm.quit();
+      }
+    }
+  }, 60_000);
+
   it('rejects global packing for observable or opaque references in any target', () => {
     const shown = packingProject();
     const shownSprite = requireTarget(shown, 1);
@@ -148,7 +181,11 @@ describe('scalar variable packing', () => {
 
     const extension = packingProject();
     requireTarget(extension, 1).blocks['extension'] = block('pen_clear', null, null, true);
-    expect(candidateIds(extension)).not.toContain('global-value');
+    expect(candidateIds(extension)).toContain('global-value');
+
+    const inventedExtension = packingProject();
+    requireTarget(inventedExtension, 1).blocks['extension'] = block('pen_readVariableByName', null, null, true);
+    expect(candidateIds(inventedExtension)).not.toContain('global-value');
 
     const mutation = packingProject();
     const setGlobal = requireTarget(mutation, 1).blocks['set-global'];
@@ -359,6 +396,76 @@ function packingProject(): ScratchProject {
       false,
       {ITEM: [1, [12, 'local', 'local-value']]},
       {LIST: ['results', 'results']}
+    )
+  };
+  project.monitors = [];
+  project.extensions = [];
+  validateProject(project);
+  return project;
+}
+
+function nameOnlyPackingProject(): ScratchProject {
+  const project = createFixtureProject();
+  const stage = requireTarget(project, 0);
+  const sprite = requireTarget(project, 1);
+  stage.variables = {'stage-shared': ['shared', 100]};
+  stage.lists = {results: ['results', []]};
+  stage.broadcasts = {};
+  stage.blocks = {};
+  stage.comments = {};
+  sprite.variables = {'local-shared': ['shared', 2]};
+  sprite.lists = {};
+  sprite.broadcasts = {};
+  sprite.comments = {};
+  sprite.blocks = {
+    flag: block('event_whenflagclicked', 'append-before', null, true),
+    'append-before': block(
+      'data_addtolist',
+      'set-local',
+      'flag',
+      false,
+      {ITEM: [1, 'read-before']},
+      {LIST: ['results', 'results']}
+    ),
+    'read-before': block(
+      'data_variable',
+      null,
+      'append-before',
+      false,
+      {},
+      {VARIABLE: ['shared']}
+    ),
+    'set-local': block(
+      'data_setvariableto',
+      'change-local',
+      'append-before',
+      false,
+      {VALUE: [1, [4, '5']]},
+      {VARIABLE: ['shared']}
+    ),
+    'change-local': block(
+      'data_changevariableby',
+      'append-local',
+      'set-local',
+      false,
+      {VALUE: [1, [4, '3']]},
+      {VARIABLE: ['shared', null]}
+    ),
+    'append-local': block(
+      'data_addtolist',
+      null,
+      'change-local',
+      false,
+      {ITEM: [1, 'read-after']},
+      {LIST: ['results', 'results']}
+    ),
+    'read-after': block(
+      'data_variable',
+      null,
+      'append-local',
+      false,
+      {},
+      {VARIABLE: ['shared', '']}
     )
   };
   project.monitors = [];

@@ -10,6 +10,8 @@ const ASCII_OPAQUE = new RegExp(`^x_[${OPAQUE_ALPHABET}](?:[${OPAQUE_ALPHABET}]{
 const INVISIBLE_OPAQUE = /^\u2063[\u200b\u2060]{32,}$/u;
 const PRIVATE_USE_OPAQUE = new RegExp(`^\\ue000[0-9a-z]+_x_[${OPAQUE_ALPHABET}]{18}$`, 'u');
 const SENTINEL_TOKEN = /^[!#$%*+\-./:;=?@^_~]{32}$/u;
+const DISPATCH_LABEL_TOKEN = /^![0-9._~-]{24}$/u;
+const DISPATCH_TAG_TOKEN = /^\?[0-9._~-]{24}$/u;
 const LIVE_SENSING_OPCODES = new Set(['sensing_answer', 'sensing_mousex', 'sensing_mousey', 'sensing_timer']);
 const LIVE_CONDITION_OPCODES = new Set(['operator_contains', 'operator_equals', 'operator_gt', 'operator_lt']);
 
@@ -297,16 +299,49 @@ function assertNoPreserveVirtualization(project, label) {
     assert(successor.block.parent !== current.id, `${label} retained direct marker parent ${current.block.opcode} -> ${successor.block.opcode}`);
   }
 
-  const variableReporters = new Set(blocks.filter(entry => entry.block.opcode === 'data_variable').map(entry => entry.id));
-  const equalsWithPcReporter = new Set(blocks.filter(entry => {
-    if (entry.block.opcode !== 'operator_equals') return false;
-    return Object.values(entry.block.inputs ?? {}).some(input => Array.isArray(input) && variableReporters.has(input[1]));
-  }).map(entry => entry.id));
-  assert(blocks.some(entry => {
-    if (entry.block.opcode !== 'control_if_else') return false;
-    const condition = entry.block.inputs?.CONDITION;
-    return Array.isArray(condition) && equalsWithPcReporter.has(condition[1]);
-  }), `${label} dispatcher is not keyed by an encoded program-counter variable`);
+  let hasAuthenticatedDispatcher = false;
+  for (const target of project.targets) {
+    const targetBlocks = new Map(Object.entries(target.blocks).filter(([, block]) => isObjectBlock(block)));
+    const reporterVariables = new Map();
+    for (const [id, block] of targetBlocks) {
+      if (block.opcode !== 'data_variable') continue;
+      const variableId = block.fields?.VARIABLE?.[1];
+      if (typeof variableId === 'string') reporterVariables.set(id, variableId);
+    }
+    const equalityRecords = new Map();
+    for (const [id, block] of targetBlocks) {
+      if (block.opcode !== 'operator_equals') continue;
+      const variableIds = Object.values(block.inputs ?? {})
+        .map(activeReference)
+        .map(reference => reporterVariables.get(reference))
+        .filter(variableId => typeof variableId === 'string');
+      const tokens = Object.values(block.inputs ?? {}).map(primitiveText).filter(token => typeof token === 'string');
+      if (variableIds.length === 1 && tokens.length === 1 &&
+          (DISPATCH_LABEL_TOKEN.test(tokens[0]) || DISPATCH_TAG_TOKEN.test(tokens[0]))) {
+        equalityRecords.set(id, {variableId: variableIds[0], token: tokens[0]});
+      }
+    }
+    const authenticatedConditions = new Set();
+    for (const [id, block] of targetBlocks) {
+      if (block.opcode !== 'operator_and') continue;
+      const operands = [activeReference(block.inputs?.OPERAND1), activeReference(block.inputs?.OPERAND2)];
+      const records = operands.map(operand => equalityRecords.get(operand));
+      if (!records.every(record => record !== undefined)) continue;
+      const variableIds = records.map(record => record.variableId);
+      const hasLabel = records.some(record => DISPATCH_LABEL_TOKEN.test(record.token));
+      const hasTag = records.some(record => DISPATCH_TAG_TOKEN.test(record.token));
+      if (variableIds[0] !== variableIds[1] && hasLabel && hasTag) {
+        authenticatedConditions.add(id);
+      }
+    }
+    if ([...targetBlocks.values()].some(block =>
+      (block.opcode === 'control_if' || block.opcode === 'control_if_else')
+      && authenticatedConditions.has(activeReference(block.inputs?.CONDITION)))) {
+      hasAuthenticatedDispatcher = true;
+      break;
+    }
+  }
+  assert(hasAuthenticatedDispatcher, `${label} dispatcher is not keyed by independent authenticated state variables`);
 }
 
 function assertNoPreserveCoherentSystems(project, label) {
@@ -561,7 +596,7 @@ function assertAntiCheat(project, label) {
   }
 
   assert(protectedSentinels.has(watermarkId), `${label} watchdog does not protect its watermark`);
-  assert(watermarkDeclaration && SENTINEL_TOKEN.test(String(watermarkDeclaration[1])), `${label} watermark sentinel is invalid`);
+  assert(watermarkDeclaration?.[1] === 0, `${label} watermark sentinel is invalid`);
   const decoyIds = [...protectedSentinels.keys()].filter(id => id !== watermarkId && id !== latchId);
   assert(decoyIds.length === 6, `${label} must contain six protected decoy variables`);
   for (const id of decoyIds) {
@@ -670,8 +705,8 @@ function inspectMismatchCondition(target, rootId, label) {
     assert(isObjectBlock(equals) && equals.opcode === 'operator_equals', `${label} protected reporter is not compared`);
     assert(Object.values(equals.inputs ?? {}).some(input => activeReference(input) === reporter.id),
       `${label} comparison does not reference its reporter`);
-    const expectedValues = Object.values(equals.inputs ?? {}).map(primitiveText)
-      .filter(value => typeof value === 'string');
+    const expectedValues = Object.values(equals.inputs ?? {}).map(primitiveScalar)
+      .filter(value => typeof value === 'string' || typeof value === 'number');
     assert(expectedValues.length === 1, `${label} protected comparison has no unique sentinel value`);
     const not = target.blocks[equals.parent];
     assert(isObjectBlock(not) && not.opcode === 'operator_not' && activeReference(not.inputs?.OPERAND) === reporter.block.parent,
@@ -800,6 +835,15 @@ function activeReference(input) {
 function primitiveText(input) {
   const active = Array.isArray(input) ? input[1] : undefined;
   return Array.isArray(active) && active[0] === 10 && typeof active[1] === 'string' ? active[1] : undefined;
+}
+
+function primitiveScalar(input) {
+  const active = Array.isArray(input) ? input[1] : undefined;
+  if (!Array.isArray(active)) return undefined;
+  if (active[0] === 10 && typeof active[1] === 'string') return active[1];
+  return active[0] === 4 && (typeof active[1] === 'string' || typeof active[1] === 'number')
+    ? active[1]
+    : undefined;
 }
 
 function findUniqueMarker(blocks, opcode, label) {
