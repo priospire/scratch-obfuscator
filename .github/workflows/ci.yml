@@ -69,7 +69,7 @@ jobs:
           path: artifacts
       - run: node scripts/compare-hashes.mjs artifacts
 
-  gui-smoke:
+  browser-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -94,9 +94,10 @@ jobs:
       - run: node dist/cli.js fixture.sb3 -o no-preserve-anticheat.sb3 -no-preserve -anticheat
       - run: node scripts/assert-release-outputs.mjs fixture.sb3 lossless.sb3 lossy.sb3 no-preserve.sb3 lossless-anticheat.sb3 lossy-anticheat.sb3 no-preserve-anticheat.sb3
       - run: npm --prefix qa/gui ci --ignore-scripts
+      - run: npm --prefix qa/gui run audit
       - run: node scripts/gui-smoke.mjs lossless.sb3 lossy.sb3 no-preserve.sb3 lossless-anticheat.sb3 lossy-anticheat.sb3 no-preserve-anticheat.sb3
         env:
-          GUI_QA_ROOT: qa/gui
+          BROWSER_QA_ROOT: qa/gui
 
   extended-fuzz:
     if: github.event_name == 'workflow_dispatch' && inputs.extended_fuzz

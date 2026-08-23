@@ -1,0 +1,11 @@
+{
+  "name": "text-encoding",
+  "version": "0.7.0",
+  "private": true,
+  "description": "Node.js standards-based encoding bridge for headless runtime QA",
+  "license": "UNLICENSED",
+  "main": "index.cjs",
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -3,27 +3,28 @@ import {readFile, stat} from 'node:fs/promises';
 import {createRequire} from 'node:module';
 import {dirname, extname, isAbsolute, join, normalize, resolve, sep} from 'node:path';
 import process from 'node:process';
-import {pathToFileURL, URL} from 'node:url';
+import {fileURLToPath, pathToFileURL, URL} from 'node:url';
 
-const dependencyBase = process.env.GUI_QA_ROOT
-  ? join(resolve(process.env.GUI_QA_ROOT), 'package.json')
-  : import.meta.url;
+const browserQaRoot = process.env.BROWSER_QA_ROOT ?? process.env.GUI_QA_ROOT;
+const dependencyBase = browserQaRoot
+  ? join(resolve(browserQaRoot), 'package.json')
+  : join(dirname(fileURLToPath(import.meta.url)), '..', 'qa', 'gui', 'package.json');
 const require = createRequire(dependencyBase);
-const guiRoot = dirname(require.resolve('@scratch/scratch-gui'));
+const browserRuntimeRoot = dirname(require.resolve('@turbowarp/scaffolding'));
 const puppeteerUrl = pathToFileURL(require.resolve('puppeteer-core')).href;
 
 const chromeCandidates = process.platform === 'win32' ? [
-  process.env.GUI_CHROME,
+  process.env.BROWSER_CHROME ?? process.env.GUI_CHROME,
   join(process.env.ProgramFiles ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
   join(process.env['ProgramFiles(x86)'] ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
   join(process.env.LOCALAPPDATA ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
   join(process.env.ProgramFiles ?? '', 'Microsoft', 'Edge', 'Application', 'msedge.exe')
 ] : process.platform === 'darwin' ? [
-  process.env.GUI_CHROME,
+  process.env.BROWSER_CHROME ?? process.env.GUI_CHROME,
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   '/Applications/Chromium.app/Contents/MacOS/Chromium'
 ] : [
-  process.env.GUI_CHROME,
+  process.env.BROWSER_CHROME ?? process.env.GUI_CHROME,
   '/usr/bin/google-chrome',
   '/usr/bin/google-chrome-stable',
   '/usr/bin/chromium',
@@ -45,29 +46,31 @@ const mimeTypes = new Map([
 
 const runner = `<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Scratch GUI smoke</title></head>
+<head>
+  <meta charset="utf-8">
+  <title>Scratch-compatible browser runtime smoke</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; }
+    #app { width: 480px; height: 360px; }
+  </style>
+</head>
 <body>
   <main id="app"></main>
-  <script src="/gui/scratch-gui-standalone.js"></script>
+  <script src="/runtime/scaffolding-min.js"></script>
   <script>
     window.__smokeErrors = [];
     window.addEventListener('error', event => window.__smokeErrors.push(String(event.error || event.message)));
     window.addEventListener('unhandledrejection', event => window.__smokeErrors.push(String(event.reason)));
     window.__smokeReady = new Promise((resolve, reject) => {
       try {
-        const state = new GUI.EditorState({locale: 'en'});
-        const root = GUI.createStandaloneRoot(state, document.getElementById('app'));
-        window.__smokeRoot = root;
-        root.render({
-          backpackVisible: false,
-          canEditTitle: false,
-          canSave: false,
-          showComingSoon: false,
-          onVmInit: vm => {
-            window.__smokeVm = vm;
-            resolve(true);
-          }
-        });
+        const runtime = new Scaffolding.Scaffolding();
+        runtime.shouldConnectPeripherals = false;
+        runtime.usePackagedRuntime = false;
+        runtime.setup();
+        runtime.appendTo(document.getElementById('app'));
+        window.__smokeRuntime = runtime;
+        window.__smokeVm = runtime.vm;
+        resolve(true);
       } catch (error) {
         reject(error);
       }
@@ -85,13 +88,13 @@ const findExecutable = async () => {
       // Try the next platform-specific location.
     }
   }
-  throw new Error('Chrome or Chromium was not found; set GUI_CHROME to its executable path');
+  throw new Error('Chrome or Chromium was not found; set BROWSER_CHROME to its executable path');
 };
 
-const resolveGuiFile = requestPath => {
-  const relative = normalize(decodeURIComponent(requestPath.slice('/gui/'.length))).replace(/^([/\\])+/, '');
-  const candidate = resolve(guiRoot, relative);
-  const expectedPrefix = `${resolve(guiRoot)}${sep}`;
+const resolveBrowserRuntimeFile = requestPath => {
+  const relative = normalize(decodeURIComponent(requestPath.slice('/runtime/'.length))).replace(/^([/\\])+/, '');
+  const candidate = resolve(browserRuntimeRoot, relative);
+  const expectedPrefix = `${resolve(browserRuntimeRoot)}${sep}`;
   return candidate.startsWith(expectedPrefix) ? candidate : null;
 };
 
@@ -103,11 +106,11 @@ const server = createServer(async (request, response) => {
       response.end(runner);
       return;
     }
-    if (!requestPath.startsWith('/gui/')) {
+    if (!requestPath.startsWith('/runtime/')) {
       response.writeHead(404).end();
       return;
     }
-    const filePath = resolveGuiFile(requestPath);
+    const filePath = resolveBrowserRuntimeFile(requestPath);
     if (!filePath || !(await stat(filePath)).isFile()) {
       response.writeHead(404).end();
       return;
@@ -139,7 +142,7 @@ if (projectPaths.length === 0 || projectPaths.some(path => !isAbsolute(path))) {
       findExecutable(),
       listen()
     ]);
-    if (!address || typeof address === 'string') throw new Error('failed to bind GUI smoke server');
+    if (!address || typeof address === 'string') throw new Error('failed to bind browser smoke server');
     browser = await puppeteer.launch({
       executablePath,
       headless: true,
@@ -156,7 +159,11 @@ if (projectPaths.length === 0 || projectPaths.some(path => !isAbsolute(path))) {
       const bytes = await readFile(projectPath);
       const result = await page.evaluate(async encoded => {
         const decode = value => Uint8Array.from(globalThis.atob(value), character => character.charCodeAt(0));
+        const runtime = globalThis.__smokeRuntime;
         const vm = globalThis.__smokeVm;
+        const toBytes = async value => value instanceof Uint8Array
+          ? value
+          : new Uint8Array(await value.arrayBuffer());
         const snapshot = () => ({
           targetCount: vm.runtime.targets.length,
           targets: vm.runtime.targets.map(target => ({
@@ -169,17 +176,17 @@ if (projectPaths.length === 0 || projectPaths.some(path => !isAbsolute(path))) {
             }))
           }))
         });
-        await vm.loadProject(decode(encoded));
+        await runtime.loadProject(decode(encoded));
         const firstLoad = snapshot();
         const firstSave = await vm.saveProjectSb3();
-        const firstBytes = new Uint8Array(await firstSave.arrayBuffer());
-        await vm.loadProject(firstBytes);
+        const firstBytes = await toBytes(firstSave);
+        await runtime.loadProject(firstBytes);
         const secondLoad = snapshot();
         const secondSave = await vm.saveProjectSb3();
-        const secondSize = (await secondSave.arrayBuffer()).byteLength;
+        const secondSize = (await toBytes(secondSave)).byteLength;
         return {
           errors: globalThis.__smokeErrors.slice(),
-          hasWorkspace: Boolean(globalThis.document.querySelector('.blocklyWorkspace')),
+          hasStage: Boolean(globalThis.document.querySelector('#app canvas')),
           firstSize: firstBytes.byteLength,
           secondSize,
           firstLoad,
@@ -187,11 +194,11 @@ if (projectPaths.length === 0 || projectPaths.some(path => !isAbsolute(path))) {
         };
       }, bytes.toString('base64'));
       await page.close();
-      if (hostErrors.length > 0 || result.errors.length > 0 || !result.hasWorkspace || result.firstSize === 0 || result.secondSize === 0 ||
+      if (hostErrors.length > 0 || result.errors.length > 0 || !result.hasStage || result.firstSize === 0 || result.secondSize === 0 ||
           result.firstLoad.targetCount === 0 || JSON.stringify(result.firstLoad) !== JSON.stringify(result.secondLoad)) {
-        throw new Error(`${projectPath}: GUI roundtrip failed: ${JSON.stringify(result)}`);
+        throw new Error(`${projectPath}: browser runtime roundtrip failed: ${JSON.stringify(result)}`);
       }
-      process.stdout.write(`GUI roundtrip OK: ${projectPath} (${result.firstLoad.targetCount} targets)\n`);
+      process.stdout.write(`Browser runtime roundtrip OK: ${projectPath} (${result.firstLoad.targetCount} targets)\n`);
     }
   } finally {
     await browser?.close();

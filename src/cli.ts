@@ -18,7 +18,7 @@ import {validateProject} from './validation/index.js';
 import {compareUtf8} from './deterministic.js';
 import {DEFAULT_LIMITS, type ArchiveEntry, type ObfuscationMode, type ObfuscationStats} from './types.js';
 
-const VERSION = '0.5.0';
+const VERSION = '0.5.1';
 
 const HELP = `Usage: scratch-obfuscator <input.sb3> [options]
 

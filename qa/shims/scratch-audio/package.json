@@ -1,0 +1,11 @@
+{
+  "name": "scratch-audio",
+  "version": "2.0.268",
+  "private": true,
+  "description": "Fail-closed audio boundary for headless core-runtime QA",
+  "license": "UNLICENSED",
+  "main": "index.cjs",
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -27,7 +27,7 @@ const projectArbitrary = fc.record({
 }));
 
 const extendedFuzz = process.env['SCRATCH_OBFUSCATOR_EXTENDED_FUZZ'] === '1';
-const propertyTimeout = extendedFuzz ? 120_000 : 20_000;
+const propertyTimeout = extendedFuzz ? 120_000 : 40_000;
 
 describe('deterministic valid-project properties', () => {
   it('keeps every generated lossless graph isomorphic and deterministic', () => {

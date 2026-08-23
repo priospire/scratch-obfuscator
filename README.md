@@ -29,7 +29,7 @@ An internal tarball is also installable through npm:
 
 ```sh
 npm pack
-npm install --global ./scratch-obfuscator-0.5.0.tgz
+npm install --global ./scratch-obfuscator-0.5.1.tgz
 ```
 
 Both installed forms expose the `scratch-obfuscator` executable. This release has
@@ -304,30 +304,38 @@ missing assets, and decompression bombs.
 npm run typecheck
 npm run lint
 npm run audit:runtime
+npm run audit:dependencies
+npm run audit:signatures
+npm run check:dependency-policy
+npm --prefix qa/gui ci --ignore-scripts
+npm --prefix qa/gui run audit
 npm test
 npm run test:coverage
 npm run build
 npm pack
 ```
 
-`npm run qa` runs the strict typecheck, lint, production-dependency audit,
-coverage suite, and build. Coverage thresholds are 98% for statements, 96% for
-branches, 100% for functions, and 99.5% for lines across all production source,
-including the CLI. The current 531-test suite reaches 98.56% statements,
-96.24% branches, 100% functions, and 99.72% lines without excluding production
-files. Remaining uncovered paths are defensive responses to impossible
-generated-graph states, corrupted bundled schemas, or dependency contract
-violations; manufacturing those states would weaken the evidence rather than
-improve it.
+`npm run qa` runs the strict typecheck, lint, complete root-tree advisory audit,
+root registry-signature verification, both-lock deprecation/integrity policy,
+coverage suite, and build. The isolated browser-QA tree has its own audit and
+signature gate, shown above. Registry artifacts must use HTTPS with SHA-512
+integrity, and deprecated packages fail the policy. Coverage thresholds are 98%
+for statements, 96% for branches, 100% for functions, and 99.5% for lines
+across all production source, including the CLI. The current 535-test suite
+reaches 98.56% statements, 96.24% branches, 100% functions, and 99.72% lines
+without excluding production files. Remaining uncovered paths are defensive
+responses to impossible generated-graph states, corrupted bundled schemas, or
+dependency contract violations; manufacturing those states would weaken the
+evidence rather than improve it.
 
 The test suite includes deterministic/property transforms, official VM
 load/serialize/reload and execution checks, per-step semantic traces, an
 adversarial normalizer, malformed ZIP/JSON/reference corpora, output fault and
 recovery injection, packed executable installation, Unicode paths, and archive
 golden hashes. The hosted workflow runs Node 22 and 24 on Windows, Ubuntu, and
-macOS, compares all six SHA-256 manifests, and runs a headless Scratch GUI
-load/save/reload smoke test. Extended malformed/property fuzzing is available
-through the manual workflow input.
+macOS, compares all six SHA-256 manifests, and runs an independent
+Scratch-compatible browser-runtime load/save/reload smoke test. Extended
+malformed/property fuzzing is available through the manual workflow input.
 
 The checkout also includes a deterministic structural-recovery evaluator:
 

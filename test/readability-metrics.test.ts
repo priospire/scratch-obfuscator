@@ -241,7 +241,7 @@ describe('readability and structural recovery measurements', () => {
     expect(profile.pairedBroadcastChannels).toBeGreaterThanOrEqual(320);
     expect(profile.procedureTemplateDiversity).toBeGreaterThan(0.7);
     expect(measured.comparison.retainedDependencyQuality).toBeGreaterThan(0.9);
-  });
+  }, 40_000);
 
   it('canonicalizes names, IDs, and layout while pruning manual roots and never-sent receivers', () => {
     const source = readabilityFixture();

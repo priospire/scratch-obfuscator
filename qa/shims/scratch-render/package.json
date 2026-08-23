@@ -1,0 +1,11 @@
+{
+  "name": "@scratch/scratch-render",
+  "version": "15.1.0",
+  "private": true,
+  "description": "Fail-closed renderer boundary for headless core-runtime QA",
+  "license": "UNLICENSED",
+  "main": "index.cjs",
+  "engines": {
+    "node": ">=22"
+  }
+}
