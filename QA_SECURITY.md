@@ -3,6 +3,16 @@
 The production CLI ships only `ajv`, `fflate`, and `yauzl`. The release gate
 `npm run audit:runtime` audits that production dependency set.
 
+For the 0.6 release review on 2026-08-23, the production tree, complete root
+development tree, and isolated browser-QA tree each report zero npm advisories.
+All 330 exact resolved versions across the reviewed lockfiles were also checked
+against live registry deprecation metadata and the OSV advisory database: no
+installed package is deprecated, vulnerable, or withdrawn. Registry signatures,
+provenance where published, and locked SHA-512 integrity values validate. The
+previously reported `inflight`, `read-package-json`, `glob@7`, registry
+`text-encoding`, `audio-context`, `hull.js`, and `uuid@8` installations are not
+present in either resolved package tree.
+
 The pinned compatibility harness installs the official
 `@scratch/scratch-vm@15.1.0` package and `scratch-parser@6.0.1` as
 development-only dependencies. The VM package still declares legacy renderer,

@@ -56,7 +56,7 @@ describe('aggressive dispatcher runtime regressions', () => {
         new DeterministicGenerator(new Uint8Array(32).fill(seedByte), 'dispatcher-runtime'),
         resultStats
       );
-      expect(resultStats.virtualizedBlocks).toBe(24);
+      expect(resultStats.virtualizedBlocks).toBe(20);
       for (const template of collectDispatcherTemplates(project)) dispatcherTemplates.add(template);
       expect(countIndirectTransitions(project)).toBeGreaterThan(resultStats.virtualizedBlocks);
 
@@ -77,9 +77,9 @@ describe('aggressive dispatcher runtime regressions', () => {
     expect(dispatcherTemplates).toEqual(new Set(['control_if', 'control_if_else']));
   }, 60_000);
 
-  for (const [tokenKind, seedByte] of [['label', 73], ['tag', 74]] as const) {
-    it(`rejects a single-character authenticated transition ${tokenKind} tamper`, async () => {
-      const project = makeIncrementProject(8);
+  for (const [tokenKind, seedByte] of [['state', 73], ['tag', 74]] as const) {
+    it(`rejects encrypted transition ${tokenKind} store tampering`, async () => {
+      const project = makeIncrementProject(5);
       const resultStats = stats(project);
       applyAggressiveTransforms(
         project,
@@ -88,12 +88,12 @@ describe('aggressive dispatcher runtime regressions', () => {
         resultStats
       );
 
-      expect(resultStats.virtualizedBlocks).toBe(8);
+      expect(resultStats.virtualizedBlocks).toBe(5);
       expect(countAuthenticatedRoutes(project)).toBeGreaterThan(resultStats.virtualizedBlocks);
       const tamper = corruptTransitionToken(project, tokenKind);
       expect(tamper).toBeDefined();
       if (!tamper) throw new Error(`transition ${tokenKind} is unavailable`);
-      expect(countCharacterDifferences(tamper.before, tamper.after)).toBe(1);
+      expect(tamper.after - tamper.before).toBe(1);
 
       const vm = new ScratchVm();
       vm.attachStorage(new ScratchStorage());
@@ -138,6 +138,38 @@ describe('aggressive dispatcher runtime regressions', () => {
       expect(stage?.variables['results-id']?.value).toEqual([6]);
     } finally {
       vm.quit();
+    }
+  }, 60_000);
+
+  it('preserves fixed-list item and replacement semantics after heap permutation', async () => {
+    for (const mode of ['lossy', 'no-preserve'] as const) {
+      const project = makeFixedListHeapProject();
+      const spriteProject = project.targets.find(target => !target.isStage);
+      if (!spriteProject) throw new Error('fixture sprite is unavailable');
+      const resultStats = stats(project, mode);
+      applyAggressiveTransforms(
+        project,
+        mode,
+        new DeterministicGenerator(new Uint8Array(32).fill(37), `fixed-list-${mode}`),
+        resultStats
+      );
+      expect(resultStats.listsVirtualized).toBe(2);
+      expect(spriteProject.lists['fixed-a']).toBeUndefined();
+      expect(spriteProject.lists['fixed-b']).toBeUndefined();
+
+      const vm = new ScratchVm();
+      vm.attachStorage(new ScratchStorage());
+      try {
+        await vm.loadProject(createFixtureArchive(project));
+        vm.start();
+        vm.greenFlag();
+        for (let step = 0; step < 500 && vm.runtime.threads.length > 0; step += 1) vm.runtime._step();
+        expect(vm.runtime.threads, `${mode} fixed-list program did not terminate`).toHaveLength(0);
+        const stage = vm.runtime.targets.find(target => target.isStage);
+        expect(stage?.variables['results-id']?.value).toEqual(['changed', 'a1']);
+      } finally {
+        vm.quit();
+      }
     }
   }, 60_000);
 
@@ -318,18 +350,14 @@ function collectDispatcherTemplates(project: ScratchProject): Set<string> {
 function countIndirectTransitions(project: ScratchProject): number {
   let count = 0;
   for (const target of project.targets) {
-    const transitionListIds = new Set(Object.entries(target.lists)
-      .filter(([, declaration]) => Array.isArray(declaration[1]) && declaration[1].some(item => typeof item === 'string' && item.startsWith('r_')))
-      .map(([id]) => id));
     for (const value of Object.values(target.blocks)) {
       if (!isScratchBlock(value) || value.opcode !== 'data_setvariableto') continue;
       const reporterId = value.inputs['VALUE']?.[1];
       const reporter = typeof reporterId === 'string' ? target.blocks[reporterId] : undefined;
-      const listId = reporter && isScratchBlock(reporter) ? reporter.fields['LIST']?.[1] : undefined;
-      if (
-        reporter && isScratchBlock(reporter) && reporter.opcode === 'data_itemoflist'
-        && typeof listId === 'string' && transitionListIds.has(listId)
-      ) count += 1;
+      const indexId = reporter && isScratchBlock(reporter) ? reporter.inputs['INDEX']?.[1] : undefined;
+      const index = typeof indexId === 'string' ? target.blocks[indexId] : undefined;
+      if (reporter && isScratchBlock(reporter) && reporter.opcode === 'data_itemoflist'
+        && index && isScratchBlock(index) && index.opcode === 'operator_mod') count += 1;
     }
   }
   return count;
@@ -359,44 +387,50 @@ function countAuthenticatedRoutes(project: ScratchProject): number {
 
 function corruptTransitionToken(
   project: ScratchProject,
-  kind: 'label' | 'tag'
-): {readonly before: string; readonly after: string} | undefined {
+  kind: 'state' | 'tag'
+): {readonly before: number; readonly after: number} | undefined {
   for (const target of project.targets) {
-    for (const declaration of Object.values(target.lists)) {
-      const values = declaration[1];
+    const railIds = new Set<string>();
+    for (const value of Object.values(target.blocks)) {
+      if (!isScratchBlock(value) || value.opcode !== 'operator_equals') continue;
+      const reporterId = value.inputs['OPERAND1']?.[1];
+      const expectedId = value.inputs['OPERAND2']?.[1];
+      const reporter = typeof reporterId === 'string' ? target.blocks[reporterId] : undefined;
+      const expected = typeof expectedId === 'string' ? target.blocks[expectedId] : undefined;
+      const expectedOpcode = kind === 'state' ? 'operator_add' : 'operator_subtract';
+      const variableId = reporter && isScratchBlock(reporter) && reporter.opcode === 'data_variable'
+        ? reporter.fields['VARIABLE']?.[1]
+        : undefined;
+      if (typeof variableId === 'string' && expected && isScratchBlock(expected) && expected.opcode === expectedOpcode) {
+        railIds.add(variableId);
+      }
+    }
+    const storeIds = new Set<string>();
+    for (const value of Object.values(target.blocks)) {
+      if (!isScratchBlock(value) || value.opcode !== 'data_setvariableto') continue;
+      const variableId = value.fields['VARIABLE']?.[1];
+      if (typeof variableId !== 'string' || !railIds.has(variableId)) continue;
+      const reporterId = value.inputs['VALUE']?.[1];
+      const reporter = typeof reporterId === 'string' ? target.blocks[reporterId] : undefined;
+      const listId = reporter && isScratchBlock(reporter) && reporter.opcode === 'data_itemoflist'
+        ? reporter.fields['LIST']?.[1]
+        : undefined;
+      if (typeof listId === 'string') storeIds.add(listId);
+    }
+    for (const storeId of storeIds) {
+      const values = target.lists[storeId]?.[1];
       if (!Array.isArray(values)) continue;
-      const marker: unknown = values[0];
-      const width: unknown = values[1];
-      if (typeof marker !== 'string' || !marker.startsWith('r_') || typeof width !== 'number') continue;
-      const labelIndex = 2 + width;
-      const tagIndex = labelIndex + 1;
-      const label: unknown = values[labelIndex];
-      const tag: unknown = values[tagIndex];
-      if (
-        typeof label !== 'string'
-        || !label.startsWith('!')
-        || typeof tag !== 'string'
-        || !tag.startsWith('?')
-      ) continue;
-      const tokenIndex = kind === 'label' ? labelIndex : tagIndex;
-      const before = kind === 'label' ? label : tag;
-      const finalCharacter = before.at(-1);
-      if (!finalCharacter) throw new Error(`transition ${kind} is empty`);
-      const after = `${before.slice(0, -1)}${finalCharacter === '0' ? '1' : '0'}`;
-      values[tokenIndex] = after;
-      return {before, after};
+      let changed: {readonly before: number; readonly after: number} | undefined;
+      for (const [index, value] of values.entries()) {
+        if (typeof value !== 'number') continue;
+        const after = value + 1;
+        values[index] = after;
+        changed ??= {before: value, after};
+      }
+      if (changed) return changed;
     }
   }
   return undefined;
-}
-
-function countCharacterDifferences(left: string, right: string): number {
-  if (left.length !== right.length) return Number.POSITIVE_INFINITY;
-  let differences = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    if (left[index] !== right[index]) differences += 1;
-  }
-  return differences;
 }
 
 function makeNumericEquationProject(): ScratchProject {
@@ -472,6 +506,71 @@ function makeStringPoolProject(value: string): ScratchProject {
     sliderMax: 100,
     isDiscrete: true
   }];
+  project.extensions = [];
+  return project;
+}
+
+function makeFixedListHeapProject(): ScratchProject {
+  const project = createFixtureProject();
+  const stage = project.targets.find(target => target.isStage);
+  const sprite = project.targets.find(target => !target.isStage);
+  if (!stage || !sprite) throw new Error('fixture targets are unavailable');
+  stage.variables = {};
+  stage.lists = {'results-id': ['results', []]};
+  stage.broadcasts = {};
+  stage.blocks = {};
+  stage.comments = {};
+  sprite.variables = {};
+  sprite.lists = {
+    'fixed-a': ['fixed a', ['a0', 'a1']],
+    'fixed-b': ['fixed b', [17, 'b1', 'b2']]
+  };
+  sprite.broadcasts = {};
+  sprite.comments = {};
+  sprite.blocks = {
+    hat: block('event_whenflagclicked', 'replace', null, true),
+    replace: block(
+      'data_replaceitemoflist',
+      'record-b',
+      'hat',
+      false,
+      {INDEX: [1, [4, '2']], ITEM: [1, [10, 'changed']]},
+      {LIST: ['fixed b', 'fixed-b']}
+    ),
+    'record-b': block(
+      'data_addtolist',
+      'record-a',
+      'replace',
+      false,
+      {ITEM: [2, 'read-b']},
+      {LIST: ['results', 'results-id']}
+    ),
+    'read-b': block(
+      'data_itemoflist',
+      null,
+      'record-b',
+      false,
+      {INDEX: [1, [10, '2']]},
+      {LIST: ['fixed b', 'fixed-b']}
+    ),
+    'record-a': block(
+      'data_addtolist',
+      null,
+      'record-b',
+      false,
+      {ITEM: [2, 'read-a']},
+      {LIST: ['results', 'results-id']}
+    ),
+    'read-a': block(
+      'data_itemoflist',
+      null,
+      'record-a',
+      false,
+      {INDEX: [1, [10, 'last']]},
+      {LIST: ['fixed a', 'fixed-a']}
+    )
+  };
+  project.monitors = [];
   project.extensions = [];
   return project;
 }

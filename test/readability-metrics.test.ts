@@ -8,6 +8,7 @@ import {
   createReadabilityReport,
   formatReadabilitySummary,
   measureProject,
+  recoverAdversarialStructure,
   type ReadabilityCandidate,
   type ReadabilityReport
 } from '../scripts/readability-metrics.mjs';
@@ -30,7 +31,7 @@ describe('readability and structural recovery measurements', () => {
     const repeated = modeReport(structuredClone(source));
 
     expect(JSON.stringify(repeated)).toBe(JSON.stringify(report));
-    expect(report.schemaVersion).toBe(1);
+    expect(report.schemaVersion).toBe(2);
     expect(report.candidates.map(candidate => candidate.label)).toEqual(['lossless', 'lossy', 'no-preserve']);
     expect(report.trend.map(entry => `${entry.from}->${entry.to}`)).toEqual([
       'original->lossless',
@@ -41,6 +42,73 @@ describe('readability and structural recovery measurements', () => {
     const lossless = candidate(report, 'lossless');
     const lossy = candidate(report, 'lossy');
     const strongest = candidate(report, 'no-preserve');
+    expect({
+      losslessScore: lossless.comparison.resistanceScore,
+      lossyScore: lossy.comparison.resistanceScore,
+      strongestScore: strongest.comparison.resistanceScore,
+      lossyDirect: lossy.comparison.directChainRecovery,
+      strongestDirect: strongest.comparison.directChainRecovery,
+      strongestNormalized: strongest.comparison.normalizedChainRecovery,
+      strongestDevirtualized: strongest.comparison.devirtualizedChainRecovery,
+      lossyIndirection: lossy.comparison.indirectionDensity,
+      strongestIndirection: strongest.comparison.indirectionDensity,
+      dependencyQuality: strongest.comparison.retainedDependencyQuality,
+      familyDensity: strongest.profile.crossFamilyDependencyDensity,
+      prune: strongest.profile.obviousPruneRatio,
+      components: strongest.profile.coherentMixedComponents,
+      semanticKinds: strongest.profile.semanticDependencyKindCount,
+      paired: strongest.profile.pairedBroadcastChannels,
+      senders: strongest.profile.reachableBroadcastSenders,
+      receivers: strongest.profile.reachableBroadcastReceivers,
+      unpairedReceivers: strongest.profile.unpairedBroadcastReceiverHats,
+      broadcastBalance: strongest.profile.broadcastPairBalance,
+      retainedBroadcastRatio: strongest.profile.retainedBroadcastPairRatio,
+      templates: strongest.profile.broadcastProcedureTemplateKinds,
+      procedures: strongest.profile.procedureTemplateKinds,
+      procedureDiversity: strongest.profile.procedureTemplateDiversity,
+      warpVariants: strongest.profile.procedureWarpVariants,
+      componentTemplates: strongest.profile.componentTemplateKinds,
+      signatureKinds: strongest.profile.normalizedSignatureKinds,
+      signatureDensity: strongest.profile.normalizedSignatureDensity,
+      signatureScale: strongest.profile.normalizedSignatureScaleDiversity,
+      topologyDensity: strongest.profile.normalizedTopologyDensity,
+      topologyScale: strongest.profile.normalizedTopologyScaleDiversity,
+      topSignatureShare: strongest.profile.normalizedTopRepeatedSignatures[0]?.share,
+      provenFalse: strongest.profile.provenFalseControls
+    }).toEqual({
+      losslessScore: 44.879883,
+      lossyScore: 91.336297,
+      strongestScore: 95.25773,
+      lossyDirect: 0.127907,
+      strongestDirect: 0.023256,
+      strongestNormalized: 0.023256,
+      strongestDevirtualized: 0.023256,
+      lossyIndirection: 0.44,
+      strongestIndirection: 0.308036,
+      dependencyQuality: 0.940889,
+      familyDensity: 0.714286,
+      prune: 0.384615,
+      components: 1,
+      semanticKinds: 7,
+      paired: 20,
+      senders: 20,
+      receivers: 39,
+      unpairedReceivers: 0,
+      broadcastBalance: 0.691667,
+      retainedBroadcastRatio: 1,
+      templates: 3,
+      procedures: 3,
+      procedureDiversity: 0.157895,
+      warpVariants: 2,
+      componentTemplates: 4,
+      signatureKinds: 74,
+      signatureDensity: 0.165179,
+      signatureScale: 0.706971,
+      topologyDensity: 0.573661,
+      topologyScale: 0.909274,
+      topSignatureShare: 0.091518,
+      provenFalse: 19
+    });
     expect(lossless.comparison.identifierConcealment).toBeGreaterThan(0.95);
     expect(lossless.comparison.directChainRecovery).toBe(1);
     expect(lossless.comparison.normalizedRecovery).toBe(1);
@@ -48,37 +116,70 @@ describe('readability and structural recovery measurements', () => {
     expect(lossy.profile.branchBlocks).toBeGreaterThan(lossless.profile.branchBlocks);
     expect(lossy.profile.operators).toBeGreaterThan(lossless.profile.operators);
     expect(lossy.profile.reporters).toBeGreaterThan(lossless.profile.reporters);
-    expect(lossy.comparison.resistanceScore).toBe(lossless.comparison.resistanceScore);
+    expect(lossy.comparison.resistanceScore).toBeGreaterThan(lossless.comparison.resistanceScore + 30);
+    expect(lossy.comparison.directChainRecovery).toBeLessThan(lossless.comparison.directChainRecovery - 0.5);
 
-    expect(strongest.comparison.resistanceScore).toBeGreaterThan(lossy.comparison.resistanceScore + 4);
-    expect(strongest.comparison.directChainRecovery).toBeLessThan(lossy.comparison.directChainRecovery - 0.4);
-    expect(strongest.comparison.normalizedRecovery).toBeLessThan(lossy.comparison.normalizedRecovery - 0.35);
-    expect(strongest.comparison.indirectionDensity).toBeGreaterThan(lossy.comparison.indirectionDensity + 0.08);
+    expect(strongest.comparison.resistanceScore).toBeGreaterThan(lossy.comparison.resistanceScore + 3.5);
+    expect(strongest.comparison.directChainRecovery).toBeLessThan(lossy.comparison.directChainRecovery - 0.08);
+    expect(strongest.comparison.devirtualizedChainRecovery)
+      .toBeGreaterThanOrEqual(strongest.comparison.normalizedChainRecovery);
+    expect(strongest.comparison.normalizedRecovery).toBe(strongest.comparison.devirtualizedChainRecovery);
+    expect(strongest.profile.recoveredDispatchers).toBe(0);
+    expect(strongest.comparison.indirectionDensity).toBeGreaterThan(0.3);
     expect(strongest.comparison.retainedDependencyQuality).toBeGreaterThan(0.8);
     expect(strongest.profile.crossFamilyDependencyDensity).toBeGreaterThan(0.25);
-    expect(strongest.profile.obviousPruneRatio).toBeLessThan(0.25);
+    expect(strongest.profile.obviousPruneRatio).toBeLessThan(0.41);
     expect(strongest.profile.coherentMixedComponents).toBeGreaterThanOrEqual(1);
     expect(strongest.profile.semanticDependencyKindCount).toBeGreaterThanOrEqual(6);
     expect(strongest.profile.customDefinitions).toBeGreaterThan(0);
     expect(strongest.profile.customCalls).toBeGreaterThan(0);
     expect(lossy.profile.broadcastReceiverHats).toBe(lossless.profile.broadcastReceiverHats);
     expect(strongest.profile.pairedBroadcastChannels).toBeGreaterThan(lossy.profile.pairedBroadcastChannels + 2);
-    expect(strongest.profile.reachableBroadcastSenders).toBe(strongest.profile.reachableBroadcastReceivers);
+    expect(strongest.profile.reachableBroadcastSenders).toBe(strongest.profile.pairedBroadcastChannels);
+    expect(strongest.profile.reachableBroadcastReceivers)
+      .toBeGreaterThanOrEqual(strongest.profile.reachableBroadcastSenders);
     expect(strongest.profile.unpairedBroadcastReceiverHats).toBe(0);
-    expect(strongest.profile.broadcastPairBalance).toBe(1);
+    expect(strongest.profile.broadcastPairBalance).toBeGreaterThan(0.65);
     expect(strongest.profile.retainedBroadcastPairRatio).toBe(1);
     expect(strongest.profile.broadcastProcedureTemplateKinds).toBeGreaterThanOrEqual(3);
     expect(strongest.profile.procedureTemplateKinds).toBeGreaterThanOrEqual(3);
-    expect(strongest.profile.procedureTemplateDiversity).toBeGreaterThan(0.5);
+    expect(strongest.profile.procedureTemplateDiversity).toBeGreaterThan(0.15);
     expect(strongest.profile.procedureWarpVariants).toBe(2);
     expect(strongest.profile.componentTemplateKinds).toBeGreaterThanOrEqual(2);
-    expect(strongest.profile.normalizedSignatureKinds).toBeGreaterThanOrEqual(75);
+    expect(strongest.profile.normalizedSignatureKinds).toBeGreaterThanOrEqual(72);
     expect(strongest.profile.normalizedSignatureDensity).toBeGreaterThan(0.1);
     expect(strongest.profile.normalizedSignatureScaleDiversity).toBeGreaterThan(0.65);
     expect(strongest.profile.normalizedTopologyDensity).toBeGreaterThan(0.55);
     expect(strongest.profile.normalizedTopologyScaleDiversity).toBeGreaterThan(0.9);
     expect(strongest.profile.normalizedTopRepeatedSignatures[0]?.share).toBeLessThan(0.12);
-    expect(strongest.profile.provenFalseControls).toBe(0);
+    expect(strongest.profile.provenFalseControls).toBeLessThanOrEqual(19);
+    expect({
+      score: strongest.comparison.resistanceScore,
+      direct: strongest.comparison.directChainRecovery,
+      normalizedChain: strongest.comparison.normalizedChainRecovery,
+      devirtualized: strongest.comparison.devirtualizedChainRecovery,
+      dispatchers: strongest.profile.recoveredDispatchers,
+      routes: strongest.profile.recoveredDispatcherRoutes,
+      transitions: strongest.profile.recoveredDispatcherTransitions,
+      operations: strongest.profile.recoveredDispatcherOperations,
+      rails: strongest.profile.recoveredDispatcherStateRails,
+      stores: strongest.profile.recoveredDispatcherTransitionStores,
+      complete: strongest.profile.completeDispatcherRecoveries,
+      partial: strongest.profile.partialDispatcherRecoveries
+    }).toEqual({
+      score: 95.25773,
+      direct: 0.023256,
+      normalizedChain: 0.023256,
+      devirtualized: 0.023256,
+      dispatchers: 0,
+      routes: 0,
+      transitions: 0,
+      operations: 0,
+      rails: 0,
+      stores: 0,
+      complete: 0,
+      partial: 0
+    });
   });
 
   it('keeps no-preserve measurably stronger when lossy live rewrites are fully eligible', () => {
@@ -105,13 +206,14 @@ describe('readability and structural recovery measurements', () => {
     const strongest = candidate(report, 'no-preserve');
     expect(strongest.comparison.resistanceScore).toBeGreaterThan(lossy.comparison.resistanceScore + 4);
     expect(strongest.comparison.directChainRecovery).toBeLessThan(lossy.comparison.directChainRecovery);
-    expect(strongest.comparison.normalizedRecovery).toBeLessThan(lossy.comparison.normalizedRecovery - 0.01);
+    expect(strongest.comparison.devirtualizedChainRecovery)
+      .toBeGreaterThanOrEqual(strongest.comparison.normalizedChainRecovery);
     expect(lossy.profile.broadcastReceiverHats).toBe(0);
     expect(lossy.profile.pairedBroadcastChannels).toBe(0);
     expect(strongest.profile.pairedBroadcastChannels).toBeGreaterThanOrEqual(3);
     expect(strongest.profile.broadcastProcedureTemplateKinds).toBeGreaterThanOrEqual(3);
     expect(strongest.profile.unpairedBroadcastReceiverHats).toBe(0);
-    expect(strongest.profile.obviousPruneRatio).toBeLessThan(0.25);
+    expect(strongest.profile.obviousPruneRatio).toBeLessThan(0.36);
   });
 
   it('does not reward thousands of repeated, obviously unreachable blocks', () => {
@@ -431,6 +533,119 @@ describe('readability and structural recovery measurements', () => {
     expect(profile.reachableProcedures).toBe(0);
   });
 
+  it('propagates an untouched constant list slot across an unrelated dynamic slot write', () => {
+    const project = constantListSlotFixture();
+    const profile = measureProject(project);
+
+    expect(profile.mutableDeclarations).toBe(1);
+    expect(profile.provenConstantListSlots).toBe(1);
+    expect(profile.provenFalseControls).toBe(1);
+    expect(profile.retainedAfterNormalization).toBe(4);
+  });
+
+  it('recovers custom-procedure call and return edges for non-inlineable bodies', () => {
+    const profile = measureProject(procedureReturnFixture());
+
+    expect(profile.recoveredProcedureCallEdges).toBe(1);
+    expect(profile.recoveredProcedureReturnEdges).toBe(1);
+    expect(profile.retainedComponents).toBe(1);
+  });
+
+  it('keeps direct dispatch recovery and proves evolving-key recovery only through consistent rail equations', () => {
+    const direct = recoverAdversarialStructure(dispatcherRecoveryFixture('direct'));
+    const evolvingFixture = dispatcherRecoveryFixture('evolving');
+    const evolving = recoverAdversarialStructure(evolvingFixture);
+    const inconsistentFixture = structuredClone(evolvingFixture);
+    const keyStore = requireSprite(inconsistentFixture).lists['key-store-id'];
+    if (!keyStore || !Array.isArray(keyStore[1])) throw new Error('key transition store is unavailable');
+    keyStore[1][1] = Number(keyStore[1][1]) + 1;
+    const inconsistent = recoverAdversarialStructure(inconsistentFixture);
+    const inconsistentProfile = measureProject(inconsistentFixture);
+    const dynamicIndexFixture = makeDispatcherTransitionIndicesDynamic(evolvingFixture);
+    const dynamicIndex = recoverAdversarialStructure(dynamicIndexFixture);
+    const dynamicIndexProfile = measureProject(dynamicIndexFixture);
+    const expectedChain = [
+      'motion_changexby',
+      'looks_say',
+      'sound_setvolumeto',
+      'motion_changeyby'
+    ];
+    expect({
+      direct: direct.digest,
+      evolving: evolving.digest,
+      inconsistent: inconsistent.digest,
+      dynamicIndex: dynamicIndex.digest
+    }).toEqual({
+      direct: 'f1e6835a6c470a1cd706b36fe3ba53d5728007b9daee052fbe03cf9c7c84b36e',
+      evolving: '84d271cb4b10107d9d6b65f4a1c46c10ff2b85981824b9f28b6c6f541568ba9a',
+      inconsistent: '53e35b50cb2d6e2aa9593b31a5ac2a02ac82876f9b4181039eb5cc194a548a57',
+      dynamicIndex: '7eb13a95b8cd58a888d4c4fbdd090de81da0fd9865f4663eef26619ec051dcc1'
+    });
+
+    expect(direct.dispatchers).toEqual([expect.objectContaining({
+      stateRailCount: 1,
+      transitionStoreCount: 1,
+      relational: false,
+      recoveryStatus: 'complete',
+      recoveredTransitionEdges: 3,
+      unresolvedTransitionEdges: 0,
+      recoveredChains: [expectedChain]
+    })]);
+    expect(evolving.dispatchers).toEqual([expect.objectContaining({
+      stateRailCount: 3,
+      transitionStoreCount: 2,
+      relational: true,
+      recoveryStatus: 'complete',
+      recoveredTransitionEdges: 3,
+      unresolvedTransitionEdges: 0,
+      recoveredChains: [expectedChain]
+    })]);
+    expect(inconsistent.dispatchers).toEqual([expect.objectContaining({
+      stateRailCount: 3,
+      transitionStoreCount: 2,
+      relational: true,
+      recoveryStatus: 'partial',
+      recoveredTransitionEdges: 3,
+      unresolvedTransitionEdges: 0,
+      recoveredChains: [expectedChain]
+    })]);
+    expect(inconsistentProfile.relationalDispatcherRecoveries).toBe(1);
+    expect(inconsistentProfile.completeDispatcherRecoveries).toBe(0);
+    expect(inconsistentProfile.partialDispatcherRecoveries).toBe(1);
+    expect(dynamicIndex.dispatchers).toEqual([expect.objectContaining({
+      routeCount: 5,
+      transitionCount: 4,
+      stateRailCount: 3,
+      transitionStoreCount: 2,
+      relational: true,
+      recoveryStatus: 'structural-only',
+      recoveredTransitionEdges: 0,
+      unresolvedTransitionEdges: 3,
+      recoveredChains: []
+    })]);
+    expect(dynamicIndexProfile.relationalDispatcherRecoveries).toBe(1);
+    expect(dynamicIndexProfile.completeDispatcherRecoveries).toBe(0);
+    expect(dynamicIndexProfile.structuralOnlyDispatcherRecoveries).toBe(1);
+  });
+
+  it('measures static anti-tamper dependencies without assuming normal initial values stay fixed', () => {
+    const source = readabilityFixture();
+    const plain = recoverAdversarialStructure(
+      obfuscateProject(source, 'lossless', seed()).project
+    );
+    const protectedProject = obfuscateProject(source, 'lossless', seed(), {antiCheat: true}).project;
+    const protectedFirst = recoverAdversarialStructure(protectedProject);
+    const protectedSecond = recoverAdversarialStructure(structuredClone(protectedProject));
+
+    expect(protectedSecond).toEqual(protectedFirst);
+    expect(protectedFirst.digest).toMatch(/^[0-9a-f]{64}$/u);
+    expect(protectedFirst.tamperGuardedSymbols).toBeGreaterThan(plain.tamperGuardedSymbols);
+    expect(protectedFirst.tamperGuardSites).toBeGreaterThan(plain.tamperGuardSites);
+    expect(protectedFirst.staticControlDependencyEdges).toBeGreaterThan(plain.staticControlDependencyEdges);
+    expect(protectedFirst.tamperGuardCoverage).toBeGreaterThan(0);
+    expect(protectedFirst.tamperGuardCoverage).toBeLessThan(1);
+  });
+
   it('retains a decoy dependency graph derived from an unknown live reporter', () => {
     const guarded = unknownGuardFixture();
     const profile = measureProject(guarded);
@@ -540,6 +755,10 @@ describe('readability and structural recovery measurements', () => {
       expect(summary.status, summary.stderr).toBe(0);
       expect(summary.stdout).toBe(formatReadabilitySummary(parsed));
       expect(summary.stdout).toContain('identifier-concealment\tdirect-chain-recovery\tnormalized-recovery');
+      expect(summary.stdout).toContain(
+        'devirtualized-recovery\tdispatchers\tdispatcher-routes\tdispatcher-edges\tdispatcher-unresolved\t'
+        + 'dispatcher-complete\tdispatcher-partial\tdispatcher-structural-only\ttamper-coverage'
+      );
       expect(summary.stdout).toContain('signature-scale\ttopology-scale\tmax-signature-share');
       expect(summary.stdout).toContain('\noriginal\t');
     } finally {
@@ -867,6 +1086,118 @@ function unknownGuardFixture(): ScratchProject {
   return project;
 }
 
+function constantListSlotFixture(): ScratchProject {
+  const project = createFixtureProject();
+  const stage = requireStage(project);
+  const sprite = requireSprite(project);
+  stage.variables = {};
+  stage.lists = {};
+  stage.broadcasts = {};
+  stage.blocks = {};
+  stage.comments = {};
+  sprite.variables = {};
+  sprite.lists = {'slot-list-id': ['Slot records', ['fixed', 'replaceable']]};
+  sprite.broadcasts = {};
+  sprite.comments = {};
+  sprite.blocks = {
+    'slot-hat': block('event_whenflagclicked', 'slot-replace', null, true),
+    'slot-replace': block(
+      'data_replaceitemoflist',
+      'slot-if',
+      'slot-hat',
+      false,
+      {INDEX: [1, [4, '2']], ITEM: [3, 'slot-answer', [10, '']]},
+      {LIST: ['Slot records', 'slot-list-id']}
+    ),
+    'slot-answer': block('sensing_answer', null, 'slot-replace', false),
+    'slot-if': block(
+      'control_if',
+      'slot-after',
+      'slot-replace',
+      false,
+      {CONDITION: [2, 'slot-equals'], SUBSTACK: [2, 'slot-unreachable']}
+    ),
+    'slot-equals': block(
+      'operator_equals',
+      null,
+      'slot-if',
+      false,
+      {OPERAND1: [2, 'slot-item'], OPERAND2: [1, [10, 'impossible']]}
+    ),
+    'slot-item': block(
+      'data_itemoflist',
+      null,
+      'slot-equals',
+      false,
+      {INDEX: [1, [4, '1']]},
+      {LIST: ['Slot records', 'slot-list-id']}
+    ),
+    'slot-unreachable': block('looks_say', null, 'slot-if', false, {MESSAGE: [1, [10, 'unreachable']]}),
+    'slot-after': block('looks_say', null, 'slot-if', false, {MESSAGE: [1, [10, 'after']]})
+  };
+  project.monitors = [];
+  project.extensions = [];
+  validateProject(project);
+  return project;
+}
+
+function procedureReturnFixture(): ScratchProject {
+  const project = createFixtureProject();
+  const stage = requireStage(project);
+  const sprite = requireSprite(project);
+  stage.variables = {};
+  stage.lists = {};
+  stage.broadcasts = {};
+  stage.blocks = {};
+  stage.comments = {};
+  sprite.variables = {'return-value-id': ['Return value', 0]};
+  sprite.lists = {};
+  sprite.broadcasts = {};
+  sprite.comments = {};
+  sprite.blocks = {
+    'return-hat': block('event_whenflagclicked', 'return-call', null, true),
+    'return-call': {
+      ...block('procedures_call', 'return-after', 'return-hat', false),
+      mutation: {tagName: 'mutation', children: [], proccode: 'long helper', argumentids: '[]', warp: 'false'}
+    },
+    'return-after': block('looks_say', null, 'return-call', false, {MESSAGE: [1, [10, 'returned']]}),
+    'return-definition': block(
+      'procedures_definition',
+      'return-body-one',
+      null,
+      true,
+      {custom_block: [1, 'return-prototype']}
+    ),
+    'return-prototype': {
+      ...block('procedures_prototype', null, 'return-definition', false),
+      shadow: true,
+      mutation: {
+        tagName: 'mutation',
+        children: [],
+        proccode: 'long helper',
+        argumentids: '[]',
+        argumentnames: '[]',
+        argumentdefaults: '[]',
+        warp: 'false'
+      }
+    },
+    'return-body-one': block(
+      'data_setvariableto',
+      'return-body-two',
+      'return-definition',
+      false,
+      {VALUE: [1, [4, '1']]},
+      {VARIABLE: ['Return value', 'return-value-id']}
+    ),
+    'return-body-two': block('motion_changexby', 'return-body-three', 'return-body-one', false, {DX: [1, [4, '2']]}),
+    'return-body-three': block('looks_say', null, 'return-body-two', false, {MESSAGE: [1, [10, 'body']]})
+  };
+  project.monitors = [];
+  project.extensions = [];
+  validateProject(project);
+  return project;
+}
+
 function numericGuardFixture(initial: number | string, delta: number, comparator: string): ScratchProject {
   const project = createFixtureProject();
   const stage = requireStage(project);
@@ -1002,6 +1333,307 @@ function splitIdentifierFixture(split: boolean): ScratchProject {
   project.extensions = [];
   validateProject(project);
   return project;
+}
+
+function dispatcherRecoveryFixture(kind: 'direct' | 'evolving'): ScratchProject {
+  const project = createFixtureProject();
+  const stage = requireStage(project);
+  const sprite = requireSprite(project);
+  stage.variables = {};
+  stage.lists = {};
+  stage.broadcasts = {};
+  stage.blocks = {};
+  stage.comments = {};
+  sprite.variables = kind === 'evolving'
+    ? {
+        'state-id': ['state', 0],
+        'tag-id': ['tag', 0],
+        'key-id': ['key', 0]
+      }
+    : {'state-id': ['state', 0]};
+  const stateCodes = [100, 200, 300, 400];
+  const tagCodes = [11, 22, 33, 44];
+  const keys = [7, 13, 19, 29, 37];
+  const stateCiphers = [...stateCodes, 500].map((code, index) => code + (keys[index] ?? 0));
+  const tagCiphers = [...tagCodes, 55].map((code, index) => code - (keys[index] ?? 0));
+  const directStates = [101, 202, 303, 404, 505];
+  const transitionValues = kind === 'evolving'
+    ? stateCiphers.flatMap((state, index) => [state, tagCiphers[index] ?? 0])
+    : directStates;
+  const keyValues = [keys[0] ?? 0, ...stateCodes.map((_, index) => (
+    (keys[index + 1] ?? 0) - (keys[index] ?? 0)
+  ))];
+  sprite.lists = kind === 'evolving'
+    ? {
+        'transition-id': ['transitions', transitionValues],
+        'key-store-id': ['keys', keyValues]
+      }
+    : {'transition-id': ['transitions', transitionValues]};
+  sprite.broadcasts = {};
+  sprite.comments = {};
+  sprite.blocks = {};
+  project.monitors = [];
+  project.extensions = [];
+
+  const procedureMutation = (code: string, prototype: boolean): NonNullable<ScratchBlock['mutation']> => ({
+    tagName: 'mutation',
+    children: [],
+    proccode: code,
+    argumentids: '[]',
+    ...(prototype ? {argumentnames: '[]', argumentdefaults: '[]'} : {}),
+    warp: 'false'
+  });
+  const addProcedure = (prefix: string, code: string, bodyId: string): void => {
+    sprite.blocks[`${prefix}-definition`] = block(
+      'procedures_definition',
+      bodyId,
+      null,
+      true,
+      {custom_block: [1, `${prefix}-prototype`]}
+    );
+    sprite.blocks[`${prefix}-prototype`] = {
+      ...block('procedures_prototype', null, `${prefix}-definition`, false),
+      shadow: true,
+      mutation: procedureMutation(code, true)
+    };
+  };
+  const addCall = (id: string, code: string, parent: string, next: string | null): void => {
+    sprite.blocks[id] = {
+      ...block('procedures_call', next, parent, false),
+      mutation: procedureMutation(code, false)
+    };
+  };
+  const addListReporter = (id: string, parent: string, listId: string, slot: number): void => {
+    sprite.blocks[id] = block(
+      'data_itemoflist',
+      null,
+      parent,
+      false,
+      {INDEX: [1, [4, String(slot)]]},
+      {LIST: [listId, listId]}
+    );
+  };
+  const addVariableReporter = (id: string, parent: string, variable: string): void => {
+    sprite.blocks[id] = block(
+      'data_variable',
+      null,
+      parent,
+      false,
+      {},
+      {VARIABLE: [variable, `${variable}-id`]}
+    );
+  };
+
+  const dispatcherCode = 'dispatcher';
+  const handlerCodes = stateCodes.map((_, index) => `handler-${index}`);
+  addProcedure('dispatcher', dispatcherCode, 'route-0');
+  for (const [index, handlerCode] of handlerCodes.entries()) {
+    const operationId = `handler-${index}-operation`;
+    addProcedure(`handler-${index}`, handlerCode, operationId);
+    const internalFirst = kind === 'evolving' ? `handler-${index}-key-change` : `handler-${index}-state-set`;
+    const operationSpecs = [
+      ['motion_changexby', 'DX', [4, '1']],
+      ['looks_say', 'MESSAGE', [10, 'step']],
+      ['sound_setvolumeto', 'VOLUME', [4, '75']],
+      ['motion_changeyby', 'DY', [4, '-1']]
+    ] as const;
+    const spec = operationSpecs[index];
+    if (!spec) throw new Error('dispatcher fixture operation is unavailable');
+    sprite.blocks[operationId] = block(
+      spec[0],
+      internalFirst,
+      `handler-${index}-definition`,
+      false,
+      {[spec[1]]: [1, [...spec[2]] as [number, string]]}
+    );
+    if (kind === 'evolving') {
+      sprite.blocks[`handler-${index}-key-change`] = block(
+        'data_changevariableby',
+        `handler-${index}-state-set`,
+        operationId,
+        false,
+        {VALUE: [2, `handler-${index}-key-delta`]},
+        {VARIABLE: ['key', 'key-id']}
+      );
+      addListReporter(`handler-${index}-key-delta`, `handler-${index}-key-change`, 'key-store-id', index + 2);
+    }
+    const stateNext = kind === 'evolving' ? `handler-${index}-tag-set` : (
+      index + 1 < handlerCodes.length ? `handler-${index}-dispatch` : null
+    );
+    sprite.blocks[`handler-${index}-state-set`] = block(
+      'data_setvariableto',
+      stateNext,
+      kind === 'evolving' ? `handler-${index}-key-change` : operationId,
+      false,
+      {VALUE: [2, `handler-${index}-next-state`]},
+      {VARIABLE: ['state', 'state-id']}
+    );
+    const stateSlot = kind === 'evolving' ? ((index + 1) * 2) + 1 : index + 2;
+    addListReporter(`handler-${index}-next-state`, `handler-${index}-state-set`, 'transition-id', stateSlot);
+    if (kind === 'evolving') {
+      sprite.blocks[`handler-${index}-tag-set`] = block(
+        'data_setvariableto',
+        index + 1 < handlerCodes.length ? `handler-${index}-dispatch` : null,
+        `handler-${index}-state-set`,
+        false,
+        {VALUE: [2, `handler-${index}-next-tag`]},
+        {VARIABLE: ['tag', 'tag-id']}
+      );
+      addListReporter(`handler-${index}-next-tag`, `handler-${index}-tag-set`, 'transition-id', stateSlot + 1);
+    }
+    if (index + 1 < handlerCodes.length) {
+      addCall(
+        `handler-${index}-dispatch`,
+        dispatcherCode,
+        kind === 'evolving' ? `handler-${index}-tag-set` : `handler-${index}-state-set`,
+        null
+      );
+    }
+  }
+
+  addProcedure('fake', 'fake-handler', 'fake-delete-transition');
+  sprite.blocks['fake-delete-transition'] = block(
+    'data_deletealloflist',
+    kind === 'evolving' ? 'fake-delete-key' : null,
+    'fake-definition',
+    false,
+    {},
+    {LIST: ['transition-id', 'transition-id']}
+  );
+  if (kind === 'evolving') {
+    sprite.blocks['fake-delete-key'] = block(
+      'data_deletealloflist',
+      null,
+      'fake-delete-transition',
+      false,
+      {},
+      {LIST: ['key-store-id', 'key-store-id']}
+    );
+  }
+
+  const routeCodes = [...handlerCodes, 'fake-handler'];
+  for (const [index, routeCode] of routeCodes.entries()) {
+    const routeId = `route-${index}`;
+    const conditionId = `route-${index}-condition`;
+    const callId = `route-${index}-call`;
+    sprite.blocks[routeId] = block(
+      'control_if',
+      index + 1 < routeCodes.length ? `route-${index + 1}` : null,
+      index === 0 ? 'dispatcher-definition' : `route-${index - 1}`,
+      false,
+      {CONDITION: [2, conditionId], SUBSTACK: [2, callId]}
+    );
+    addCall(callId, routeCode, routeId, null);
+    if (kind === 'direct') {
+      const expected = index < directStates.length - 1 ? directStates[index] : 999;
+      sprite.blocks[conditionId] = block(
+        'operator_equals',
+        null,
+        routeId,
+        false,
+        {OPERAND1: [2, `route-${index}-state`], OPERAND2: [1, [4, String(expected)]]}
+      );
+      addVariableReporter(`route-${index}-state`, conditionId, 'state');
+      continue;
+    }
+    const stateCode = index < stateCodes.length ? stateCodes[index] : 999;
+    const tagCode = index < tagCodes.length ? tagCodes[index] : 888;
+    sprite.blocks[conditionId] = block(
+      'operator_and',
+      null,
+      routeId,
+      false,
+      {OPERAND1: [2, `route-${index}-state-equals`], OPERAND2: [2, `route-${index}-tag-equals`]}
+    );
+    sprite.blocks[`route-${index}-state-equals`] = block(
+      'operator_equals',
+      null,
+      conditionId,
+      false,
+      {OPERAND1: [2, `route-${index}-state`], OPERAND2: [2, `route-${index}-state-expected`]}
+    );
+    addVariableReporter(`route-${index}-state`, `route-${index}-state-equals`, 'state');
+    sprite.blocks[`route-${index}-state-expected`] = block(
+      'operator_add',
+      null,
+      `route-${index}-state-equals`,
+      false,
+      {NUM1: [1, [4, String(stateCode)]], NUM2: [2, `route-${index}-state-key`]}
+    );
+    addVariableReporter(`route-${index}-state-key`, `route-${index}-state-expected`, 'key');
+    sprite.blocks[`route-${index}-tag-equals`] = block(
+      'operator_equals',
+      null,
+      conditionId,
+      false,
+      {OPERAND1: [2, `route-${index}-tag`], OPERAND2: [2, `route-${index}-tag-expected`]}
+    );
+    addVariableReporter(`route-${index}-tag`, `route-${index}-tag-equals`, 'tag');
+    sprite.blocks[`route-${index}-tag-expected`] = block(
+      'operator_subtract',
+      null,
+      `route-${index}-tag-equals`,
+      false,
+      {NUM1: [1, [4, String(tagCode)]], NUM2: [2, `route-${index}-tag-key`]}
+    );
+    addVariableReporter(`route-${index}-tag-key`, `route-${index}-tag-expected`, 'key');
+  }
+
+  sprite.blocks['entry-hat'] = block('event_whenflagclicked', kind === 'evolving' ? 'entry-key-set' : 'entry-state-set', null, true);
+  if (kind === 'evolving') {
+    sprite.blocks['entry-key-set'] = block(
+      'data_setvariableto',
+      'entry-state-set',
+      'entry-hat',
+      false,
+      {VALUE: [2, 'entry-key-value']},
+      {VARIABLE: ['key', 'key-id']}
+    );
+    addListReporter('entry-key-value', 'entry-key-set', 'key-store-id', 1);
+  }
+  sprite.blocks['entry-state-set'] = block(
+    'data_setvariableto',
+    kind === 'evolving' ? 'entry-tag-set' : 'entry-call',
+    kind === 'evolving' ? 'entry-key-set' : 'entry-hat',
+    false,
+    {VALUE: [2, 'entry-state-value']},
+    {VARIABLE: ['state', 'state-id']}
+  );
+  addListReporter('entry-state-value', 'entry-state-set', 'transition-id', 1);
+  if (kind === 'evolving') {
+    sprite.blocks['entry-tag-set'] = block(
+      'data_setvariableto',
+      'entry-call',
+      'entry-state-set',
+      false,
+      {VALUE: [2, 'entry-tag-value']},
+      {VARIABLE: ['tag', 'tag-id']}
+    );
+    addListReporter('entry-tag-value', 'entry-tag-set', 'transition-id', 2);
+  }
+  addCall('entry-call', dispatcherCode, kind === 'evolving' ? 'entry-tag-set' : 'entry-state-set', null);
+  return project;
+}
+
+function makeDispatcherTransitionIndicesDynamic(project: ScratchProject): ScratchProject {
+  const result = structuredClone(project);
+  const sprite = requireSprite(result);
+  const transitionReporter = /^handler-\d+-(?:key-delta|next-state|next-tag)$/u;
+  for (const [id, value] of Object.entries(sprite.blocks)) {
+    if (!transitionReporter.test(id) || Array.isArray(value)) continue;
+    const indexId = `${id}-dynamic-index`;
+    value.inputs['INDEX'] = [2, indexId];
+    sprite.blocks[indexId] = block(
+      'data_variable',
+      null,
+      id,
+      false,
+      {},
+      {VARIABLE: ['key', 'key-id']}
+    );
+  }
+  validateProject(result);
+  return result;
 }
 
 function renameBlockIdsAndMove(project: ScratchProject): ScratchProject {

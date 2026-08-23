@@ -1,4 +1,5 @@
 import {describe, expect, it} from 'vitest';
+import {recoverAdversarialStructure} from '../scripts/readability-metrics.mjs';
 import {isPrimitive, isScratchBlock} from '../src/model/blocks.js';
 import {obfuscateProject} from '../src/obfuscation/index.js';
 import type {ScratchBlock, ScratchBlockValue, ScratchInput, ScratchProject, ScratchTarget} from '../src/types.js';
@@ -41,12 +42,24 @@ describe('aggressive adversarial normalization', () => {
     const transformedJson = JSON.stringify(transformed);
     for (const identifier of originalIdentifiers) expect(transformedJson).not.toContain(identifier);
 
+    const recovered = recoverAdversarialStructure(transformed);
+    expect(recovered.dispatchers).toHaveLength(1);
+    expect(recovered.dispatchers[0]?.stateRailCount).toBe(3);
+    expect(recovered.dispatchers[0]?.transitionStoreCount).toBe(3);
+    expect(recovered.dispatchers[0]?.transitionCount).toBe(5);
+    expect(recovered.dispatchers[0]?.recoveredTransitionEdges).toBe(0);
+    expect(recovered.dispatchers[0]?.unresolvedTransitionEdges).toBe(4);
+    expect(recovered.dispatchers[0]?.relational).toBe(true);
+    expect(recovered.dispatchers[0]?.recoveryStatus).toBe('structural-only');
+    expect(recovered.recoveredDispatcherChains).toEqual([]);
+    expect(recovered.digest).toBe('d0060e83c7207799438435ea699fd5b2e518e90f488e567a2203aff597082b60');
+
     const normalized = adversarialNormalize(transformed);
     const normalizedJson = JSON.stringify(normalized);
     for (const identifier of originalIdentifiers) expect(normalizedJson).not.toContain(identifier);
     expect(normalized.foldedLiterals).toBeGreaterThan(0);
-    expect(normalized.inlinedProcedures).toBeGreaterThan(0);
-    expect(normalized.prunedBlocks).toBeGreaterThan(0);
+    expect(normalized.inlinedProcedures).toBe(0);
+    expect(normalized.prunedBlocks).toBe(0);
 
     const dispatcherBranches = normalized.nodes.filter(node => node.opcode === 'control_if_else' || node.opcode === 'control_if');
     expect(dispatcherBranches.length).toBeGreaterThanOrEqual(7);
@@ -54,11 +67,10 @@ describe('aggressive adversarial normalization', () => {
     expect(normalized.nodes.filter(node => node.opcode === 'data_itemoflist').length).toBeGreaterThanOrEqual(7);
     expect(normalized.nodes.some(node => node.opcode === 'procedures_call')).toBe(true);
 
-    const definitionIds = new Set(normalized.nodes.filter(node => node.opcode === 'procedures_definition').map(node => node.id));
     const operationalIds = new Set(normalized.nodes
-      .filter(node => node.opcode === 'data_replaceitemoflist' && node.parent !== null && definitionIds.has(node.parent))
+      .filter(node => node.opcode === 'data_replaceitemoflist')
       .map(node => node.id));
-    expect(operationalIds.size).toBeGreaterThan(1);
+    expect(operationalIds.size).toBeGreaterThanOrEqual(6);
     for (const node of normalized.nodes.filter(candidate => operationalIds.has(candidate.id))) {
       expect(node.next === null || !operationalIds.has(node.next)).toBe(true);
     }

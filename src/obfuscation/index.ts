@@ -11,7 +11,15 @@ import type {
 } from '../types.js';
 import {validateProject} from '../validation/index.js';
 import {applyAggressiveTransforms} from './aggressive.js';
-import {applyAntiCheatTransform, applyWatermarkTransform} from './anticheat.js';
+import {collectVariableCandidates} from './analysis.js';
+import {
+  applyAntiCheatTransform,
+  applyGameplayStateProtection,
+  applyWatermarkTransform,
+  releaseGameplayStateCandidates,
+  reserveGameplayStateCandidates,
+  selectReservedGameplayStateCandidates
+} from './anticheat.js';
 import {applyCommonTransforms} from './common.js';
 import {applySafeOptimizations} from './optimizer.js';
 
@@ -48,6 +56,7 @@ export function obfuscateProject(
     decoysAdded: 0,
     virtualizedBlocks: 0,
     variablesVirtualized: 0,
+    listsVirtualized: 0,
     constantsFolded: 0,
     inactiveFallbacksRemoved: 0,
     antiCheatDecoys: 0,
@@ -55,7 +64,7 @@ export function obfuscateProject(
   };
   const generator = new DeterministicGenerator(
     seed,
-    options.antiCheat === true ? `obfuscation:${mode}\u0000anti-cheat:v1` : `obfuscation:${mode}`
+    options.antiCheat === true ? `obfuscation:${mode}\u0000anti-cheat:v2` : `obfuscation:${mode}`
   );
   const optimized = applySafeOptimizations(output, {foldConstants: mode !== 'lossless'});
   stats.constantsFolded = optimized.reporterTreesFolded;
@@ -68,12 +77,31 @@ export function obfuscateProject(
     );
   }
   applyCommonTransforms(output, generator.fork('common'), stats);
+  const gameplayReservation = options.antiCheat === true
+    ? reserveGameplayStateCandidates(
+        output,
+        collectVariableCandidates(output),
+        generator.fork('gameplay-reservation')
+      )
+    : undefined;
   if (mode !== 'lossless') applyAggressiveTransforms(output, mode, generator.fork('aggressive'), stats);
+  if (gameplayReservation) releaseGameplayStateCandidates(output, gameplayReservation);
   const cleaned = applySafeOptimizations(output, {foldConstants: false});
   stats.inactiveFallbacksRemoved += cleaned.inactiveFallbacksRemoved;
   stats.commentsRemoved += cleaned.commentsRemoved;
   if (options.antiCheat === true) {
-    const antiCheat = applyAntiCheatTransform(output, generator.fork('anti-cheat'));
+    const gameplayState = applyGameplayStateProtection(
+      output,
+      generator.fork('gameplay-state'),
+      gameplayReservation
+        ? selectReservedGameplayStateCandidates(collectVariableCandidates(output), gameplayReservation)
+        : []
+    );
+    const antiCheat = applyAntiCheatTransform(
+      output,
+      generator.fork('anti-cheat'),
+      {gameplayState}
+    );
     stats.decoysAdded += antiCheat.decoyVariableIds.length;
     stats.antiCheatDecoys = antiCheat.decoyVariableIds.length;
   } else {

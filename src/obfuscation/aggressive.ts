@@ -1,6 +1,7 @@
-import {isScratchBlock} from '../model/blocks.js';
+import {isPrimitive, isScratchBlock} from '../model/blocks.js';
 import type {DeterministicGenerator} from '../deterministic.js';
 import type {
+  JsonValue,
   ObfuscationMode,
   ObfuscationStats,
   ScratchBlock,
@@ -10,21 +11,25 @@ import type {
 } from '../types.js';
 import {
   blockAt,
-  collectLinearRuns,
+  certifyRegionsEffects,
+  collectCertifiedNestedLinearRuns,
   collectNumericLiteralSites,
   collectStringLiteralSites,
   collectVariableCandidates,
   countBlockEquivalents,
   countObjectBlocks,
   hardenInactiveShadows,
-  isLossyLiveTransformSafe,
   isVirtualizableStackBlock,
+  type LinearRunEntryConnector,
   type LinearRun,
   type NumericLiteralSite,
+  type RegionEffectRequest,
+  type StringLiteralSite,
   type VariableCandidate
 } from './analysis.js';
 
 export type AggressiveMode = Extract<ObfuscationMode, 'lossy' | 'no-preserve'>;
+type ConnectableLinearRun = LinearRun & {readonly connector?: LinearRunEntryConnector};
 
 interface PrivateState {
   readonly variableId: string;
@@ -62,6 +67,29 @@ interface SelectedVariable {
   readonly slot: number;
 }
 
+interface FixedListUsage {
+  readonly targetIndex: number;
+  readonly blockId: string;
+  readonly originalIndex: number | null;
+}
+
+interface FixedListCandidate {
+  readonly targetIndex: number;
+  readonly id: string;
+  readonly name: string;
+  readonly values: readonly JsonValue[];
+  readonly usages: readonly FixedListUsage[];
+}
+
+interface MutableFixedListCandidate {
+  readonly targetIndex: number;
+  readonly id: string;
+  readonly name: string;
+  readonly values: readonly JsonValue[];
+  readonly usages: FixedListUsage[];
+  safe: boolean;
+}
+
 type DispatcherTemplate = 'nested-if-else' | 'sequential-if';
 
 type DecoyOpcode =
@@ -77,15 +105,35 @@ interface DecoyVocabulary {
   readonly byCost: Readonly<Record<1 | 2 | 3, readonly DecoyOpcode[]>>;
 }
 
-interface TransitionTable {
+interface IndexedStore {
   readonly values: Array<string | number>;
-  readonly labelSlots: readonly number[];
-  readonly tagSlots: readonly number[];
+  readonly modulus: number;
 }
 
-const DISPATCH_TOKEN_ALPHABET = Object.freeze(Array.from('0123456789-._~'));
-const DISPATCH_LABEL_PREFIX = '!';
-const DISPATCH_TAG_PREFIX = '?';
+interface DispatcherHandler {
+  readonly originalId: string;
+  readonly changeKeyId: string;
+  readonly keyDeltaReporterId: string;
+  readonly keyDeltaIndexId: string;
+  readonly setStateId: string;
+  readonly transitionReporterId: string;
+  readonly transitionIndexId: string;
+  readonly setTagId: string;
+  readonly tagReporterId: string;
+  readonly tagIndexId: string;
+  readonly dispatchCallId: string | null;
+  readonly stateCode: number;
+  readonly tagCode: number;
+  readonly tagFirst: boolean;
+}
+
+interface DispatcherHandlerBucket {
+  readonly definitionId: string;
+  readonly prototypeId: string;
+  readonly proccode: string;
+  readonly handlers: readonly DispatcherHandler[];
+}
+
 
 interface StringPoolState {
   readonly listId: string;
@@ -226,6 +274,7 @@ export function applyAggressiveTransforms(
   const budget = new GrowthBudget(cap - initialEquivalents, mode);
   const factory = new UniqueFactory(project, rng.fork('aggressive-ids'));
   const decoyVocabulary = collectDecoyVocabulary(project);
+  const originalListCandidates = collectFixedListCandidates(project);
   const stringPools = new Map<number, StringPoolState>();
   const privateStates = new Map<number, PrivateState>();
   const decoyStates = new Map<number, PrivateState>();
@@ -258,20 +307,26 @@ export function applyAggressiveTransforms(
 
   const poisonRng = rng.fork('inactive-shadows');
   hardenInactiveShadows(project, primitive => poisonPrimitive(primitive, poisonRng));
-  const allowLiveLossyChanges = mode === 'no-preserve' || isLossyLiveTransformSafe(project);
-  const conditionSites = allowLiveLossyChanges
-    ? rng.fork('condition-order').shuffle(collectConditionSites(project))
-    : [];
-  const dualRailEdges = allowLiveLossyChanges
-    ? rng.fork('dual-rail-order').shuffle(collectInsertionEdges(project))
-    : [];
+  const originalVariableCandidates = collectVariableCandidates(project);
+  const originalNumericSites = collectNumericLiteralSites(project);
+  const originalStringSites = collectStringLiteralSites(project);
+  const originalConditionSites = collectConditionSites(project);
+  const eligibleVariableCandidates = mode === 'lossy'
+    ? filterCertifiedVariableCandidates(project, originalVariableCandidates)
+    : originalVariableCandidates;
+  const eligibleNumericSites = mode === 'lossy'
+    ? filterCertifiedInputSites(project, originalNumericSites)
+    : originalNumericSites;
+  const eligibleStringSites = mode === 'lossy'
+    ? filterCertifiedInputSites(project, originalStringSites)
+    : originalStringSites;
+  const eligibleConditionSites = filterCertifiedConditionSites(project, originalConditionSites, mode);
+  const certifiedRuns = collectCertifiedNestedLinearRuns(project, mode, {
+    includeProcedureBodies: mode === 'no-preserve'
+  }).filter(candidate => candidate.certificate.eligible);
 
-  const originalVariableCandidates = mode === 'no-preserve' || allowLiveLossyChanges
-    ? collectVariableCandidates(project)
-    : [];
-
-  if (mode === 'lossy' && allowLiveLossyChanges) {
-    const runs = rng.fork('outline-order').shuffle(collectLinearRuns(project));
+  if (mode === 'lossy') {
+    const runs = rng.fork('outline-order').shuffle(certifiedRuns.map(candidate => candidate.run));
     for (const run of runs) {
       if (!budget.trySpend(3, 0)) continue;
       outlineRun(project, run, factory);
@@ -279,17 +334,29 @@ export function applyAggressiveTransforms(
   }
 
   if (mode === 'no-preserve') {
-    const runs = rng.fork('run-order').shuffle(collectLinearRuns(project).flatMap(run => boundDispatcherRuns(project, run)));
+    const runs = rng.fork('run-order').shuffle(
+      certifiedRuns.flatMap(candidate => boundDispatcherRuns(project, candidate.run))
+    );
     for (const [index, run] of runs.entries()) {
       const growth = estimateDispatcherGrowth(run.blockIds.length);
       if (!budget.trySpend(growth, 0)) continue;
-      fragmentRun(project, run, getState(run.targetIndex), factory, rng.fork(`run-${index}`));
+      fragmentRun(project, run, getDecoyState(run.targetIndex), factory, rng.fork(`run-${index}`));
       stats.virtualizedBlocks += run.blockIds.length;
     }
   }
 
-  if (originalVariableCandidates.length > 0) {
-    const variables = rng.fork('variable-order').shuffle(originalVariableCandidates);
+  if (originalListCandidates.length > 0) {
+    const packed = packFixedLists(
+      project,
+      rng.fork('fixed-list-order').shuffle(originalListCandidates),
+      getState,
+      rng.fork('fixed-list-heap')
+    );
+    stats.listsVirtualized = (stats.listsVirtualized ?? 0) + packed;
+  }
+
+  if (eligibleVariableCandidates.length > 0) {
+    const variables = rng.fork('variable-order').shuffle(eligibleVariableCandidates);
     const selected: SelectedVariable[] = [];
     for (const [index, candidate] of variables.entries()) {
       if (candidate.estimatedGrowth > (mode === 'lossy' ? 64 : 256)) continue;
@@ -311,19 +378,13 @@ export function applyAggressiveTransforms(
     }
   }
 
-  const numericSites = allowLiveLossyChanges
-    ? rng.fork('numeric-order').shuffle(collectNumericLiteralSites(project))
-    : [];
+  const numericSites = rng.fork('numeric-order').shuffle(eligibleNumericSites);
   for (const [index, site] of numericSites.entries()) {
     if (!budget.trySpend(site.growth, 1)) continue;
     encodeNumericLiteral(project, site, factory, rng.fork(`numeric-${index}`), poisonRng);
   }
 
-  const stringSites = allowLiveLossyChanges
-    ? rng.fork('literal-order').shuffle(
-        collectStringLiteralSites(project).filter(site => !isDispatcherToken(site.value))
-      )
-    : [];
+  const stringSites = rng.fork('literal-order').shuffle(eligibleStringSites);
   for (const [index, site] of stringSites.entries()) {
     const target = requireTarget(project, site.targetIndex);
     const owner = requireBlock(target, site.ownerId);
@@ -345,13 +406,17 @@ export function applyAggressiveTransforms(
     splitStringLiteral(target, site.ownerId, owner, site.inputName, site.value, factory, literalRng, poisonRng);
   }
 
-  for (const [index, site] of conditionSites.entries()) {
+  for (const [index, site] of rng.fork('condition-order').shuffle(eligibleConditionSites).entries()) {
     if (!budget.trySpend(site.growth, 2)) continue;
     invertCondition(project, site, factory, `condition-${index}`);
   }
 
 
-  for (const [index, edge] of dualRailEdges.entries()) {
+  const dualRailCandidates = collectInsertionEdges(project);
+  const dualRailEdges = mode === 'no-preserve'
+    ? dualRailCandidates
+    : filterCertifiedEdges(project, dualRailCandidates, mode);
+  for (const [index, edge] of rng.fork('dual-rail-order').shuffle(dualRailEdges).entries()) {
     const target = requireTarget(project, edge.targetIndex);
     const predecessor = blockAt(target, edge.predecessorId);
     if (!predecessor || predecessor.next !== edge.successorId || !blockAt(target, edge.successorId)) continue;
@@ -359,7 +424,7 @@ export function applyAggressiveTransforms(
     insertDualRail(
       target,
       edge,
-      getState(edge.targetIndex),
+      getDecoyState(edge.targetIndex),
       factory,
       rng.fork(`dual-rail-${index}`),
       `dual-rail-${index}`
@@ -367,18 +432,22 @@ export function applyAggressiveTransforms(
   }
 
   const guards: GuardSite[] = [];
-  const edges = allowLiveLossyChanges
-    ? rng.fork('guard-order').shuffle(
-        mode === 'no-preserve' ? collectTopLevelSequentialEdges(project) : collectInsertionEdges(project)
-      )
-    : [];
+  const guardCandidates = mode === 'no-preserve'
+    ? collectTopLevelSequentialEdges(project)
+    : collectInsertionEdges(project);
+  const guardEdges = mode === 'no-preserve'
+    ? guardCandidates
+    : filterCertifiedEdges(project, guardCandidates, mode);
+  const edges = rng.fork('guard-order').shuffle(guardEdges);
   for (const [index, edge] of edges.entries()) {
+    const target = requireTarget(project, edge.targetIndex);
+    const predecessor = blockAt(target, edge.predecessorId);
+    if (!predecessor || predecessor.next !== edge.successorId || !blockAt(target, edge.successorId)) continue;
     const livePlan = mode === 'no-preserve'
       ? makeLiveGuardPlan(rng.fork(`guard-live-plan-${index}`))
       : undefined;
     const growth = livePlan?.growth ?? ENCODED_OPAQUE_GUARD_GROWTH;
     if (!budget.trySpend(growth, 2)) continue;
-    const target = requireTarget(project, edge.targetIndex);
     const state = getDecoyState(edge.targetIndex);
     const guard = livePlan
       ? insertLiveRailGuard(target, edge, state, factory, `edge-${index}`, livePlan)
@@ -432,6 +501,90 @@ export function applyAggressiveTransforms(
   if (finalEquivalents > cap) {
     throw new Error(`aggressive transform exceeded its block-equivalent cap (${finalEquivalents} > ${cap})`);
   }
+}
+
+function filterCertifiedVariableCandidates(
+  project: ScratchProject,
+  candidates: readonly VariableCandidate[]
+): VariableCandidate[] {
+  const indexedRequests: Array<{readonly candidateIndex: number; readonly request: RegionEffectRequest}> = [];
+  for (const [candidateIndex, candidate] of candidates.entries()) {
+    for (const usage of candidate.usages) {
+      indexedRequests.push({
+        candidateIndex,
+        request: evaluationRegionRequest(project, usage.targetIndex, usage.blockId)
+      });
+    }
+  }
+  const certificates = certifyRegionsEffects(
+    project,
+    indexedRequests.map(item => item.request),
+    'lossy'
+  );
+  const rejected = new Set<number>();
+  for (const [index, certificate] of certificates.entries()) {
+    if (!certificate?.eligible) {
+      const candidateIndex = indexedRequests[index]?.candidateIndex;
+      if (candidateIndex !== undefined) rejected.add(candidateIndex);
+    }
+  }
+  return candidates.filter((_, index) => !rejected.has(index));
+}
+
+function filterCertifiedInputSites<T extends NumericLiteralSite | StringLiteralSite>(
+  project: ScratchProject,
+  sites: readonly T[]
+): T[] {
+  const requests = sites.map(site => evaluationRegionRequest(project, site.targetIndex, site.ownerId));
+  const certificates = certifyRegionsEffects(project, requests, 'lossy');
+  return sites.filter((_, index) => certificates[index]?.eligible === true);
+}
+
+function filterCertifiedConditionSites(
+  project: ScratchProject,
+  sites: readonly ConditionSite[],
+  mode: AggressiveMode
+): ConditionSite[] {
+  const requests: RegionEffectRequest[] = sites.map(site => ({
+    targetIndex: site.targetIndex,
+    blockIds: [site.blockId]
+  }));
+  const certificates = certifyRegionsEffects(project, requests, mode);
+  return sites.filter((_, index) => certificates[index]?.eligible === true);
+}
+
+function filterCertifiedEdges(
+  project: ScratchProject,
+  edges: readonly InsertionEdge[],
+  mode: AggressiveMode
+): InsertionEdge[] {
+  const requests: RegionEffectRequest[] = edges.map(edge => ({
+    targetIndex: edge.targetIndex,
+    blockIds: [edge.predecessorId, edge.successorId]
+  }));
+  const certificates = certifyRegionsEffects(project, requests, mode);
+  return edges.filter((_, index) => certificates[index]?.eligible === true);
+}
+
+function evaluationRegionRequest(
+  project: ScratchProject,
+  targetIndex: number,
+  ownerId: string
+): RegionEffectRequest {
+  const target = requireTarget(project, targetIndex);
+  let currentId = ownerId;
+  const visited = new Set<string>();
+  while (!visited.has(currentId)) {
+    visited.add(currentId);
+    const current = blockAt(target, currentId);
+    if (!current || current.parent === null) break;
+    const parent = blockAt(target, current.parent);
+    if (!parent || parent.next === currentId) break;
+    const containingInput = Object.entries(parent.inputs).find(([, input]) => input[1] === currentId);
+    if (!containingInput || containingInput[0] === 'SUBSTACK' || containingInput[0] === 'SUBSTACK2') break;
+    currentId = current.parent;
+  }
+  return {targetIndex, blockIds: [currentId]};
 }
 
 export function makeInvisibleDisplayName(rng: DeterministicGenerator, ordinal: number): string {
@@ -498,9 +651,196 @@ function createPrivateVariableState(
   return {...store, variableId, variableName, token, mismatch};
 }
 
+function collectFixedListCandidates(project: ScratchProject): FixedListCandidate[] {
+  const stageIndex = project.targets.findIndex(target => target.isStage);
+  const mutable: MutableFixedListCandidate[] = [];
+  const byTarget = project.targets.map(() => new Map<string, MutableFixedListCandidate>());
+
+  for (const [targetIndex, target] of project.targets.entries()) {
+    for (const [id, declaration] of Object.entries(target.lists)) {
+      const name = declaration[0];
+      const values = declaration[1];
+      if (typeof name !== 'string' || !Array.isArray(values)) continue;
+      const candidate: MutableFixedListCandidate = {
+        targetIndex,
+        id,
+        name,
+        values,
+        usages: [],
+        safe: !isMonitoredList(project, id)
+      };
+      mutable.push(candidate);
+      byTarget[targetIndex]?.set(id, candidate);
+    }
+  }
+
+  const resolve = (
+    usageTargetIndex: number,
+    id: unknown,
+    name: unknown
+  ): MutableFixedListCandidate[] => {
+    if (typeof id === 'string' && id.length > 0) {
+      const local = byTarget[usageTargetIndex]?.get(id);
+      if (local) return [local];
+      const global = stageIndex < 0 ? undefined : byTarget[stageIndex]?.get(id);
+      return global ? [global] : [];
+    }
+    if (typeof name !== 'string') return [];
+    const possible = mutable.filter(candidate => (
+      candidate.name === name
+      && (candidate.targetIndex === usageTargetIndex || candidate.targetIndex === stageIndex)
+    ));
+    return possible;
+  };
+
+  const rejectPrimitiveReference = (usageTargetIndex: number, value: unknown): void => {
+    if (!isPrimitive(value) || value[0] !== 13) return;
+    for (const candidate of resolve(usageTargetIndex, value[2], value[1])) candidate.safe = false;
+  };
+
+  for (const [usageTargetIndex, target] of project.targets.entries()) {
+    for (const [blockId, value] of Object.entries(target.blocks)) {
+      if (!isScratchBlock(value)) {
+        rejectPrimitiveReference(usageTargetIndex, value);
+        continue;
+      }
+      for (const input of Object.values(value.inputs)) {
+        rejectPrimitiveReference(usageTargetIndex, input[1]);
+        rejectPrimitiveReference(usageTargetIndex, input[2]);
+      }
+
+      const field = value.fields['LIST'];
+      if (!field) continue;
+      const possible = resolve(usageTargetIndex, field[1], field[0]);
+      if (possible.length !== 1) {
+        for (const candidate of possible) candidate.safe = false;
+        continue;
+      }
+      const candidate = requireItem(possible, 0, 'fixed list candidate');
+      if (!hasExactFixedListBlockShape(value)) {
+        candidate.safe = false;
+        continue;
+      }
+      const index = staticListIndex(value.inputs['INDEX'], candidate.values.length);
+      if (index === undefined) {
+        candidate.safe = false;
+        continue;
+      }
+      candidate.usages.push({targetIndex: usageTargetIndex, blockId, originalIndex: index});
+    }
+  }
+
+  return mutable.flatMap(candidate => candidate.safe && candidate.usages.length > 0 ? [{
+    targetIndex: candidate.targetIndex,
+    id: candidate.id,
+    name: candidate.name,
+    values: candidate.values,
+    usages: candidate.usages
+  }] : []);
+}
+
+function isMonitoredList(project: ScratchProject, id: string): boolean {
+  for (const monitor of project.monitors) {
+    if (monitor['opcode'] !== 'data_listcontents' && monitor['mode'] !== 'list') continue;
+    if (monitor['id'] === id) return true;
+    const params = monitor['params'];
+    if (params && typeof params === 'object' && !Array.isArray(params) && params['LIST'] === id) return true;
+  }
+  return false;
+}
+
+function hasExactFixedListBlockShape(block: ScratchBlock): boolean {
+  if (block.shadow || Object.keys(block.fields).length !== 1 || block.fields['LIST'] === undefined) return false;
+  const inputs = Object.keys(block.inputs).sort();
+  if (block.opcode === 'data_itemoflist') {
+    return block.next === null && inputs.length === 1 && inputs[0] === 'INDEX';
+  }
+  return block.opcode === 'data_replaceitemoflist'
+    && inputs.length === 2
+    && inputs[0] === 'INDEX'
+    && inputs[1] === 'ITEM';
+}
+
+/** Match the official Cast.toListIndex behavior without consuming its random source. */
+function staticListIndex(input: ScratchInput | undefined, length: number): number | null | undefined {
+  const active = input?.[1];
+  if (!isPrimitive(active)) return undefined;
+  const primitiveCode = active[0];
+  if (typeof primitiveCode !== 'number' || ![4, 5, 6, 7, 8, 10].includes(primitiveCode)) return undefined;
+  const raw = active[1];
+  if (raw === 'random' || raw === 'any') return undefined;
+  if (raw === 'last') return length > 0 ? length : null;
+  if (raw === 'all') return null;
+  if (typeof raw !== 'string' && typeof raw !== 'number' && typeof raw !== 'boolean' && raw !== null) {
+    return undefined;
+  }
+  const numeric = Number(raw);
+  if (Number.isNaN(numeric)) return null;
+  const index = Math.floor(numeric);
+  return index >= 1 && index <= length ? index : null;
+}
+
+function packFixedLists(
+  project: ScratchProject,
+  candidates: readonly FixedListCandidate[],
+  getState: (targetIndex: number) => PrivateState,
+  rng: DeterministicGenerator
+): number {
+  const byTarget = new Map<number, FixedListCandidate[]>();
+  for (const candidate of candidates) {
+    const list = byTarget.get(candidate.targetIndex) ?? [];
+    list.push(candidate);
+    byTarget.set(candidate.targetIndex, list);
+  }
+
+  let packed = 0;
+  for (const [targetIndex, targetCandidates] of byTarget) {
+    const target = requireTarget(project, targetIndex);
+    const state = getState(targetIndex);
+    const declaration = target.lists[state.listId];
+    const heap = declaration?.[1];
+    if (!Array.isArray(heap)) throw new Error('private list heap has an invalid declaration');
+
+    const records = targetCandidates.flatMap(candidate => candidate.values.map((value, offset) => ({
+      key: `${candidate.id}\u0000${offset + 1}`,
+      value
+    })));
+    const junkCount = Math.min(4096, Math.max(targetCandidates.length, Math.ceil(records.length / 3)));
+    const junk = Array.from({length: junkCount}, (_, index) => ({
+      key: null,
+      value: makeFixedListJunk(rng.fork(`target-${targetIndex}-junk-${index}`), index)
+    }));
+    const slots = new Map<string, number>();
+    for (const record of rng.fork(`target-${targetIndex}-layout`).shuffle([...records, ...junk])) {
+      heap.push(record.value);
+      if (record.key !== null) slots.set(record.key, heap.length);
+    }
+
+    for (const candidate of targetCandidates) {
+      for (const usage of candidate.usages) {
+        const usageTarget = requireTarget(project, usage.targetIndex);
+        const block = requireBlock(usageTarget, usage.blockId);
+        const slot = usage.originalIndex === null
+          ? 0
+          : slots.get(`${candidate.id}\u0000${usage.originalIndex}`);
+        if (slot === undefined) throw new Error('fixed list heap is missing an element slot');
+        block.fields = {LIST: [state.listName, state.listId]};
+        block.inputs['INDEX'] = numericInput(slot);
+      }
+      delete target.lists[candidate.id];
+      packed += 1;
+    }
+  }
+  return packed;
+}
+
+function makeFixedListJunk(rng: DeterministicGenerator, ordinal: number): string | number {
+  return ordinal % 2 === 0 ? `j_${rng.id('h_', 16)}` : rng.integer(0x4000_0000);
+}
+
 function fragmentRun(
   project: ScratchProject,
-  run: LinearRun,
+  run: ConnectableLinearRun,
   railState: PrivateState,
   factory: UniqueFactory,
   rng: DeterministicGenerator
@@ -513,30 +853,59 @@ function fragmentRun(
   const stateName = factory.name('no-preserve', `dispatcher-state-${run.targetIndex}-${firstId}`);
   const tagId = factory.symbol('v_', `dispatcher-tag-${run.targetIndex}-${firstId}`);
   const tagName = factory.name('no-preserve', `dispatcher-tag-${run.targetIndex}-${firstId}`);
+  const keyId = factory.symbol('v_', `dispatcher-key-${run.targetIndex}-${firstId}`);
+  const keyName = factory.name('no-preserve', `dispatcher-key-${run.targetIndex}-${firstId}`);
   const transitionListId = factory.symbol('l_', `dispatcher-transitions-${run.targetIndex}-${firstId}`);
   const transitionListName = factory.name('no-preserve', `dispatcher-transitions-${run.targetIndex}-${firstId}`);
-  const labels = uniqueDispatcherTokens(
+  const tagListId = factory.symbol('l_', `dispatcher-tags-${run.targetIndex}-${firstId}`);
+  const tagListName = factory.name('no-preserve', `dispatcher-tags-${run.targetIndex}-${firstId}`);
+  const keyListId = factory.symbol('l_', `dispatcher-keys-${run.targetIndex}-${firstId}`);
+  const keyListName = factory.name('no-preserve', `dispatcher-keys-${run.targetIndex}-${firstId}`);
+  const stateCodes = uniqueDispatcherNumbers(run.blockIds.length + 2, rng.fork('state-codes'));
+  const tagCodes = uniqueDispatcherTagNumbers(stateCodes, rng.fork('tag-codes'));
+  const storeModuli = rng.fork('store-moduli').shuffle([17, 19, 23] as const);
+  const stateModulus = requireItem(storeModuli, 0, 'dispatcher state modulus');
+  const tagModulus = requireItem(storeModuli, 1, 'dispatcher tag modulus');
+  const keyModulus = requireItem(storeModuli, 2, 'dispatcher key modulus');
+  const keys = uniqueDispatcherKeys(
     run.blockIds.length + 2,
-    rng.fork('labels'),
-    DISPATCH_LABEL_PREFIX
+    [stateModulus, tagModulus, keyModulus],
+    rng.fork('path-keys')
   );
-  const tags = uniqueDispatcherTokens(
-    run.blockIds.length + 2,
-    rng.fork('tags'),
-    DISPATCH_TAG_PREFIX
+  const stateCiphers = stateCodes.map((code, index) => code + requireItem(keys, index, 'dispatcher state key'));
+  const tagCiphers = tagCodes.map((code, index) => code - requireItem(keys, index, 'dispatcher tag key'));
+  const exitState = requireItem(stateCiphers, run.blockIds.length, 'dispatcher exit state');
+  const exitTag = requireItem(tagCiphers, run.blockIds.length, 'dispatcher exit tag');
+  const exitKey = requireItem(keys, run.blockIds.length, 'dispatcher exit key');
+  const fakeStateCode = requireItem(stateCodes, run.blockIds.length + 1, 'dispatcher fake state');
+  const fakeTagCode = requireItem(tagCodes, run.blockIds.length + 1, 'dispatcher fake tag');
+  const stateStore = makeIndexedStore(
+    keys.slice(0, run.blockIds.length + 1),
+    stateCiphers.slice(0, run.blockIds.length + 1),
+    stateModulus,
+    rng.fork('state-store')
   );
-  const exitLabel = requireItem(labels, run.blockIds.length, 'dispatcher exit label');
-  const fakeLabel = requireItem(labels, run.blockIds.length + 1, 'dispatcher fake label');
-  const exitTag = requireItem(tags, run.blockIds.length, 'dispatcher exit tag');
-  const fakeTag = requireItem(tags, run.blockIds.length + 1, 'dispatcher fake tag');
-  const transitionTable = makeTransitionTable(
-    labels.slice(0, run.blockIds.length + 1),
-    tags.slice(0, run.blockIds.length + 1),
-    rng.fork('transition-table')
+  const tagStore = makeIndexedStore(
+    keys.slice(0, run.blockIds.length + 1),
+    tagCiphers.slice(0, run.blockIds.length + 1),
+    tagModulus,
+    rng.fork('tag-store')
   );
-  target.variables[stateId] = [stateName, exitLabel];
+  const deltas = run.blockIds.map((_, index) => (
+    requireItem(keys, index + 1, 'dispatcher next key') - requireItem(keys, index, 'dispatcher current key')
+  ));
+  const keyStore = makeIndexedStore(
+    [exitKey, ...keys.slice(0, run.blockIds.length)],
+    [requireItem(keys, 0, 'dispatcher entry key'), ...deltas],
+    keyModulus,
+    rng.fork('key-store')
+  );
+  target.variables[stateId] = [stateName, exitState];
   target.variables[tagId] = [tagName, exitTag];
-  target.lists[transitionListId] = [transitionListName, transitionTable.values];
+  target.variables[keyId] = [keyName, exitKey];
+  target.lists[transitionListId] = [transitionListName, stateStore.values];
+  target.lists[tagListId] = [tagListName, tagStore.values];
+  target.lists[keyListId] = [keyListName, keyStore.values];
 
   const allocateCode = (domain: string, ordinal: number): string => {
     let code = makeInvisibleDisplayName(rng.fork(domain), ordinal);
@@ -551,119 +920,202 @@ function fragmentRun(
   const fakeDefinitionId = factory.block(`fake-def-${run.targetIndex}-${firstId}`);
   const fakePrototypeId = factory.block(`fake-proto-${run.targetIndex}-${firstId}`);
   const fakeBodyId = factory.block(`fake-body-${run.targetIndex}-${firstId}`);
-  const handlers = run.blockIds.map((originalId, index) => {
-    const definitionId = factory.block(`handler-def-${run.targetIndex}-${originalId}`);
-    const prototypeId = factory.block(`handler-proto-${run.targetIndex}-${originalId}`);
+  const fakeTagBodyId = factory.block(`fake-tag-body-${run.targetIndex}-${firstId}`);
+  const fakeKeyBodyId = factory.block(`fake-key-body-${run.targetIndex}-${firstId}`);
+  const handlers: DispatcherHandler[] = run.blockIds.map((originalId, index) => {
+    const changeKeyId = factory.block(`handler-key-${run.targetIndex}-${originalId}`);
+    const keyDeltaReporterId = factory.block(`handler-key-delta-${run.targetIndex}-${originalId}`);
+    const keyDeltaIndexId = factory.block(`handler-key-index-${run.targetIndex}-${originalId}`);
     const setStateId = factory.block(`handler-state-${run.targetIndex}-${originalId}`);
     const transitionReporterId = factory.block(`handler-transition-${run.targetIndex}-${originalId}`);
+    const transitionIndexId = factory.block(`handler-transition-index-${run.targetIndex}-${originalId}`);
     const setTagId = factory.block(`handler-tag-${run.targetIndex}-${originalId}`);
     const tagReporterId = factory.block(`handler-transition-tag-${run.targetIndex}-${originalId}`);
+    const tagIndexId = factory.block(`handler-tag-index-${run.targetIndex}-${originalId}`);
     const dispatchCallId = index + 1 < run.blockIds.length
       ? factory.block(`handler-dispatch-${run.targetIndex}-${originalId}`)
       : null;
     return {
       originalId,
-      definitionId,
-      prototypeId,
+      changeKeyId,
+      keyDeltaReporterId,
+      keyDeltaIndexId,
       setStateId,
       transitionReporterId,
+      transitionIndexId,
       setTagId,
       tagReporterId,
+      tagIndexId,
       dispatchCallId,
-      label: requireItem(labels, index, 'dispatcher label'),
-      tag: requireItem(tags, index, 'dispatcher tag'),
-      transitionSlot: requireItem(transitionTable.labelSlots, index + 1, 'dispatcher transition slot'),
-      transitionTagSlot: requireItem(transitionTable.tagSlots, index + 1, 'dispatcher transition tag slot'),
-      proccode: allocateCode(`handler-code-${index}`, index)
+      stateCode: requireItem(stateCodes, index, 'dispatcher state code'),
+      tagCode: requireItem(tagCodes, index, 'dispatcher tag code'),
+      tagFirst: rng.fork(`handler-rail-order-${index}`).integer(2) === 0
     };
   });
+  const handlerBuckets = makeDispatcherHandlerBuckets(
+    handlers,
+    run.targetIndex,
+    firstId,
+    factory,
+    rng.fork('handler-buckets'),
+    allocateCode
+  );
+  const handlerCodeByOriginal = new Map<string, string>();
+  for (const bucket of handlerBuckets) {
+    for (const handler of bucket.handlers) handlerCodeByOriginal.set(handler.originalId, bucket.proccode);
+  }
+  const entryKeySetId = factory.block(`dispatcher-entry-key-${run.targetIndex}-${firstId}`);
+  const entryKeyReporterId = factory.block(`dispatcher-entry-key-value-${run.targetIndex}-${firstId}`);
+  const entryKeyIndexId = factory.block(`dispatcher-entry-key-index-${run.targetIndex}-${firstId}`);
   const entrySetId = factory.block(`dispatcher-entry-state-${run.targetIndex}-${firstId}`);
   const entryReporterId = factory.block(`dispatcher-entry-transition-${run.targetIndex}-${firstId}`);
+  const entryIndexId = factory.block(`dispatcher-entry-transition-index-${run.targetIndex}-${firstId}`);
   const entryTagSetId = factory.block(`dispatcher-entry-tag-${run.targetIndex}-${firstId}`);
   const entryTagReporterId = factory.block(`dispatcher-entry-transition-tag-${run.targetIndex}-${firstId}`);
+  const entryTagIndexId = factory.block(`dispatcher-entry-tag-index-${run.targetIndex}-${firstId}`);
   const entryCallId = factory.block(`dispatcher-entry-call-${run.targetIndex}-${firstId}`);
+  const entryTagFirst = rng.fork('entry-rail-order').integer(2) === 0;
 
   for (const handler of handlers) {
     const original = requireBlock(target, handler.originalId);
     original.topLevel = false;
     delete original.x;
     delete original.y;
-    original.parent = handler.definitionId;
-    original.next = handler.setStateId;
-    target.blocks[handler.setStateId] = makeSetStateFromListBlock(
+    original.next = handler.changeKeyId;
+    const firstRailId = handler.tagFirst ? handler.setTagId : handler.setStateId;
+    const secondRailId = handler.tagFirst ? handler.setStateId : handler.setTagId;
+    target.blocks[handler.changeKeyId] = makeChangeStateFromListBlock(
       handler.originalId,
-      handler.setTagId,
+      firstRailId,
+      keyName,
+      keyId,
+      handler.keyDeltaReporterId
+    );
+    addKeyIndexedListReporter(
+      target,
+      handler.keyDeltaReporterId,
+      handler.keyDeltaIndexId,
+      handler.changeKeyId,
+      keyListName,
+      keyListId,
+      keyName,
+      keyId,
+      keyStore.modulus
+    );
+    target.blocks[handler.setStateId] = makeSetStateFromListBlock(
+      handler.tagFirst ? handler.setTagId : handler.changeKeyId,
+      handler.tagFirst ? handler.dispatchCallId : handler.setTagId,
       stateName,
       stateId,
       handler.transitionReporterId,
       false
     );
-    target.blocks[handler.transitionReporterId] = makeNamedListItemReporter(
+    addKeyIndexedListReporter(
+      target,
+      handler.transitionReporterId,
+      handler.transitionIndexId,
       handler.setStateId,
       transitionListName,
       transitionListId,
-      handler.transitionSlot
+      keyName,
+      keyId,
+      stateStore.modulus
     );
     target.blocks[handler.setTagId] = makeSetStateFromListBlock(
-      handler.setStateId,
-      handler.dispatchCallId,
+      handler.tagFirst ? handler.changeKeyId : handler.setStateId,
+      handler.tagFirst ? handler.setStateId : handler.dispatchCallId,
       tagName,
       tagId,
       handler.tagReporterId,
       false
     );
-    target.blocks[handler.tagReporterId] = makeNamedListItemReporter(
+    addKeyIndexedListReporter(
+      target,
+      handler.tagReporterId,
+      handler.tagIndexId,
       handler.setTagId,
-      transitionListName,
-      transitionListId,
-      handler.transitionTagSlot
+      tagListName,
+      tagListId,
+      keyName,
+      keyId,
+      tagStore.modulus
     );
     if (handler.dispatchCallId) {
-      target.blocks[handler.dispatchCallId] = makeProcedureCall(dispatcherCode, handler.setTagId, null, false);
+      target.blocks[handler.dispatchCallId] = makeProcedureCall(dispatcherCode, secondRailId, null, false);
     }
   }
 
-  const entryParent = run.predecessorId;
-  target.blocks[entrySetId] = makeSetStateFromListBlock(
+  const entryParent = run.connector?.kind === 'top-level'
+    ? null
+    : (run.connector?.ownerId ?? run.predecessorId);
+  const entryFirstRailId = entryTagFirst ? entryTagSetId : entrySetId;
+  const entrySecondRailId = entryTagFirst ? entrySetId : entryTagSetId;
+  target.blocks[entryKeySetId] = makeSetStateFromListBlock(
     entryParent,
-    entryTagSetId,
-    stateName,
-    stateId,
-    entryReporterId,
+    entryFirstRailId,
+    keyName,
+    keyId,
+    entryKeyReporterId,
     run.wasTopLevel,
     run.x,
     run.y
   );
-  target.blocks[entryReporterId] = makeNamedListItemReporter(
+  addKeyIndexedListReporter(
+    target,
+    entryKeyReporterId,
+    entryKeyIndexId,
+    entryKeySetId,
+    keyListName,
+    keyListId,
+    keyName,
+    keyId,
+    keyStore.modulus
+  );
+  target.blocks[entrySetId] = makeSetStateFromListBlock(
+    entryTagFirst ? entryTagSetId : entryKeySetId,
+    entryTagFirst ? entryCallId : entryTagSetId,
+    stateName,
+    stateId,
+    entryReporterId,
+    false
+  );
+  addKeyIndexedListReporter(
+    target,
+    entryReporterId,
+    entryIndexId,
     entrySetId,
     transitionListName,
     transitionListId,
-    requireItem(transitionTable.labelSlots, 0, 'dispatcher entry slot')
+    keyName,
+    keyId,
+    stateStore.modulus
   );
   target.blocks[entryTagSetId] = makeSetStateFromListBlock(
-    entrySetId,
-    entryCallId,
+    entryTagFirst ? entryKeySetId : entrySetId,
+    entryTagFirst ? entrySetId : entryCallId,
     tagName,
     tagId,
     entryTagReporterId,
     false
   );
-  target.blocks[entryTagReporterId] = makeNamedListItemReporter(
+  addKeyIndexedListReporter(
+    target,
+    entryTagReporterId,
+    entryTagIndexId,
     entryTagSetId,
-    transitionListName,
-    transitionListId,
-    requireItem(transitionTable.tagSlots, 0, 'dispatcher entry tag slot')
+    tagListName,
+    tagListId,
+    keyName,
+    keyId,
+    tagStore.modulus
   );
-  target.blocks[entryCallId] = makeProcedureCall(dispatcherCode, entryTagSetId, run.successorId, false);
-  if (entryParent) {
-    const predecessor = requireBlock(target, entryParent);
-    predecessor.next = entrySetId;
-  }
+  target.blocks[entryCallId] = makeProcedureCall(dispatcherCode, entrySecondRailId, run.successorId, false);
+  replaceRunEntry(target, run, entryKeySetId);
   const successor = run.successorId ? blockAt(target, run.successorId) : undefined;
   if (successor) successor.parent = entryCallId;
   insertDualRail(
     target,
-    {targetIndex: run.targetIndex, predecessorId: entryTagSetId, successorId: entryCallId},
+    {targetIndex: run.targetIndex, predecessorId: entrySecondRailId, successorId: entryCallId},
     railState,
     factory,
     rng.fork('entry-dual-rail'),
@@ -671,27 +1123,35 @@ function fragmentRun(
   );
 
   const routeRecords = handlers.map((handler, index) => ({
-    label: handler.label,
-    tag: handler.tag,
-    proccode: handler.proccode,
+    stateCode: handler.stateCode,
+    tagCode: handler.tagCode,
+    proccode: requireMapItem(handlerCodeByOriginal, handler.originalId, 'dispatcher handler code'),
     ifId: factory.block(`dispatcher-if-${run.targetIndex}-${firstId}-${index}`),
     andId: factory.block(`dispatcher-and-${run.targetIndex}-${firstId}-${index}`),
     equalsId: factory.block(`dispatcher-equals-${run.targetIndex}-${firstId}-${index}`),
     reporterId: factory.block(`dispatcher-variable-${run.targetIndex}-${firstId}-${index}`),
+    stateExpectedId: factory.block(`dispatcher-state-expected-${run.targetIndex}-${firstId}-${index}`),
+    stateKeyReporterId: factory.block(`dispatcher-state-key-${run.targetIndex}-${firstId}-${index}`),
     tagEqualsId: factory.block(`dispatcher-tag-equals-${run.targetIndex}-${firstId}-${index}`),
     tagReporterId: factory.block(`dispatcher-tag-variable-${run.targetIndex}-${firstId}-${index}`),
+    tagExpectedId: factory.block(`dispatcher-tag-expected-${run.targetIndex}-${firstId}-${index}`),
+    tagKeyReporterId: factory.block(`dispatcher-tag-key-${run.targetIndex}-${firstId}-${index}`),
     callId: factory.block(`dispatcher-route-${run.targetIndex}-${firstId}-${index}`)
   }));
   routeRecords.push({
-    label: fakeLabel,
-    tag: fakeTag,
+    stateCode: fakeStateCode,
+    tagCode: fakeTagCode,
     proccode: fakeCode,
     ifId: factory.block(`dispatcher-if-${run.targetIndex}-${firstId}-fake`),
     andId: factory.block(`dispatcher-and-${run.targetIndex}-${firstId}-fake`),
     equalsId: factory.block(`dispatcher-equals-${run.targetIndex}-${firstId}-fake`),
     reporterId: factory.block(`dispatcher-variable-${run.targetIndex}-${firstId}-fake`),
+    stateExpectedId: factory.block(`dispatcher-state-expected-${run.targetIndex}-${firstId}-fake`),
+    stateKeyReporterId: factory.block(`dispatcher-state-key-${run.targetIndex}-${firstId}-fake`),
     tagEqualsId: factory.block(`dispatcher-tag-equals-${run.targetIndex}-${firstId}-fake`),
     tagReporterId: factory.block(`dispatcher-tag-variable-${run.targetIndex}-${firstId}-fake`),
+    tagExpectedId: factory.block(`dispatcher-tag-expected-${run.targetIndex}-${firstId}-fake`),
+    tagKeyReporterId: factory.block(`dispatcher-tag-key-${run.targetIndex}-${firstId}-fake`),
     callId: factory.block(`dispatcher-route-${run.targetIndex}-${firstId}-fake`)
   });
   const dispatchOrder = rng.fork('dispatch-order').shuffle(routeRecords);
@@ -710,12 +1170,32 @@ function fragmentRun(
       template
     );
     target.blocks[route.andId] = makeDispatcherConjunction(route.ifId, route.equalsId, route.tagEqualsId);
-    target.blocks[route.equalsId] = makeStringEquality(route.andId, route.reporterId, route.label);
+    target.blocks[route.equalsId] = makeReporterEquality(route.andId, route.reporterId, route.stateExpectedId);
     target.blocks[route.reporterId] = makeVariableReporter(route.equalsId, {variableId: stateId, variableName: stateName});
-    target.blocks[route.tagEqualsId] = makeStringEquality(route.andId, route.tagReporterId, route.tag);
+    target.blocks[route.stateExpectedId] = makeKeyedRouteExpression(
+      route.equalsId,
+      route.stateKeyReporterId,
+      route.stateCode,
+      'operator_add'
+    );
+    target.blocks[route.stateKeyReporterId] = makeVariableReporter(
+      route.stateExpectedId,
+      {variableId: keyId, variableName: keyName}
+    );
+    target.blocks[route.tagEqualsId] = makeReporterEquality(route.andId, route.tagReporterId, route.tagExpectedId);
     target.blocks[route.tagReporterId] = makeVariableReporter(
       route.tagEqualsId,
       {variableId: tagId, variableName: tagName}
+    );
+    target.blocks[route.tagExpectedId] = makeKeyedRouteExpression(
+      route.tagEqualsId,
+      route.tagKeyReporterId,
+      route.tagCode,
+      'operator_subtract'
+    );
+    target.blocks[route.tagKeyReporterId] = makeVariableReporter(
+      route.tagExpectedId,
+      {variableId: keyId, variableName: keyName}
     );
     target.blocks[route.callId] = makeProcedureCall(route.proccode, route.ifId, null, false);
     branchParentId = route.ifId;
@@ -728,46 +1208,73 @@ function fragmentRun(
   target.blocks[fakePrototypeId] = makeProcedurePrototype(fakeDefinitionId, fakeCode);
   target.blocks[fakeBodyId] = {
     opcode: 'data_deletealloflist',
-    next: null,
+    next: fakeTagBodyId,
     parent: fakeDefinitionId,
     inputs: {},
     fields: {LIST: [transitionListName, transitionListId]},
     shadow: false,
     topLevel: false
   };
-  for (const handler of rng.fork('definition-order').shuffle(handlers)) {
-    target.blocks[handler.definitionId] = makeProcedureDefinition(handler.prototypeId, handler.originalId);
-    target.blocks[handler.prototypeId] = makeProcedurePrototype(handler.definitionId, handler.proccode);
+  target.blocks[fakeTagBodyId] = {
+    opcode: 'data_deletealloflist',
+    next: fakeKeyBodyId,
+    parent: fakeBodyId,
+    inputs: {},
+    fields: {LIST: [tagListName, tagListId]},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[fakeKeyBodyId] = {
+    opcode: 'data_deletealloflist',
+    next: null,
+    parent: fakeTagBodyId,
+    inputs: {},
+    fields: {LIST: [keyListName, keyListId]},
+    shadow: false,
+    topLevel: false
+  };
+  for (const [bucketIndex, bucket] of rng.fork('definition-order').shuffle(handlerBuckets).entries()) {
+    buildDispatcherHandlerBucket(
+      target,
+      bucket,
+      stateName,
+      stateId,
+      tagName,
+      tagId,
+      factory,
+      `${run.targetIndex}-${firstId}-${bucketIndex}`
+    );
   }
 }
 
-function makeTransitionTable(
-  labels: readonly string[],
-  tags: readonly string[],
+function makeIndexedStore(
+  keys: readonly number[],
+  source: readonly number[],
+  modulus: number,
   rng: DeterministicGenerator
-): TransitionTable {
-  if (labels.length !== tags.length) throw new Error('dispatcher transition labels and tags are inconsistent');
-  const values: Array<string | number> = [];
-  const labelSlots: number[] = [];
-  const tagSlots: number[] = [];
-  const widthOffset = rng.integer(4);
-  for (const [index, label] of labels.entries()) {
-    const width = 1 + ((widthOffset + index) % 4);
-    values.push(`r_${rng.id('r_', 8)}`, width);
-    for (let junk = 0; junk < width; junk += 1) {
-      values.push(junk % 2 === 0 ? `j_${rng.id('j_', 8)}` : rng.integer(0x3fff_ffff));
-    }
-    labelSlots.push(values.length + 1);
-    values.push(label);
-    tagSlots.push(values.length + 1);
-    values.push(requireItem(tags, index, 'dispatcher transition tag'));
+): IndexedStore {
+  if (keys.length !== source.length) throw new Error('dispatcher indexed store inputs are inconsistent');
+  const values: Array<string | number> = Array.from({length: modulus - 1}, (_, index) => (
+    index % 2 === 0 ? rng.integer(0x3fff_ffff) : `j_${rng.id('q_', 10)}`
+  ));
+  const occupied = new Set<number>();
+  for (const [index, key] of keys.entries()) {
+    const slot = scratchPositiveRemainder(key, modulus);
+    if (slot === 0 || occupied.has(slot)) throw new Error('dispatcher indexed store key collision');
+    occupied.add(slot);
+    values[slot - 1] = requireItem(source, index, 'dispatcher indexed store value');
   }
-  return {values, labelSlots, tagSlots};
+  return {values, modulus};
+}
+
+function scratchPositiveRemainder(value: number, modulus: number): number {
+  const remainder = value % modulus;
+  return remainder < 0 ? remainder + modulus : remainder;
 }
 
 function outlineRun(
   project: ScratchProject,
-  run: LinearRun,
+  run: ConnectableLinearRun,
   factory: UniqueFactory
 ): void {
   const target = requireTarget(project, run.targetIndex);
@@ -790,29 +1297,50 @@ function outlineRun(
   target.blocks[prototypeId] = makeProcedurePrototype(definitionId, proccode, false);
   target.blocks[callId] = makeProcedureCall(
     proccode,
-    run.predecessorId,
+    run.connector?.kind === 'top-level' ? null : (run.connector?.ownerId ?? run.predecessorId),
     run.successorId,
     run.wasTopLevel,
     false,
     run.x,
     run.y
   );
-  if (run.predecessorId) requireBlock(target, run.predecessorId).next = callId;
+  replaceRunEntry(target, run, callId);
   if (run.successorId) {
     const successor = requireBlock(target, run.successorId);
     successor.parent = callId;
   }
 }
 
-function estimateDispatcherGrowth(length: number): number {
-  return (18 * length) + 30;
+function replaceRunEntry(target: ScratchTarget, run: ConnectableLinearRun, replacementId: string): void {
+  const connector = run.connector;
+  if (connector?.kind === 'input') {
+    const owner = requireBlock(target, connector.ownerId);
+    const input = owner.inputs[connector.inputName];
+    if (!input || input[1] !== connector.blockId) throw new Error('nested run input connector changed before splicing');
+    const replacement = [...input];
+    replacement[1] = replacementId;
+    owner.inputs[connector.inputName] = replacement;
+    return;
+  }
+  if (connector?.kind === 'next') {
+    const owner = requireBlock(target, connector.ownerId);
+    if (owner.next !== connector.blockId) throw new Error('nested run next connector changed before splicing');
+    owner.next = replacementId;
+    return;
+  }
+  if (connector?.kind === 'top-level') return;
+  if (run.predecessorId) requireBlock(target, run.predecessorId).next = replacementId;
 }
 
-function boundDispatcherRuns(project: ScratchProject, run: LinearRun): LinearRun[] {
-  const maximumLength = 12;
+function estimateDispatcherGrowth(length: number): number {
+  return (40 * length) + 44;
+}
+
+function boundDispatcherRuns(project: ScratchProject, run: ConnectableLinearRun): ConnectableLinearRun[] {
+  const maximumLength = 5;
   const target = requireTarget(project, run.targetIndex);
   if (run.blockIds.length <= maximumLength) return [run];
-  const bounded: LinearRun[] = [];
+  const bounded: ConnectableLinearRun[] = [];
   let cursor = 0;
   while (run.blockIds.length - cursor >= 4) {
     const remaining = run.blockIds.length - cursor;
@@ -821,12 +1349,20 @@ function boundDispatcherRuns(project: ScratchProject, run: LinearRun): LinearRun
       : Math.min(maximumLength, remaining);
     const blockIds = run.blockIds.slice(cursor, cursor + length);
     requireBlock(target, requireItem(blockIds, 0, 'bounded dispatcher run'));
+    const predecessorId = cursor === 0
+      ? run.predecessorId
+      : requireItem(run.blockIds, cursor - 1, 'dispatcher separator');
     bounded.push({
       targetIndex: run.targetIndex,
       blockIds,
-      predecessorId: cursor === 0 ? run.predecessorId : requireItem(run.blockIds, cursor - 1, 'dispatcher separator'),
+      predecessorId,
       successorId: run.blockIds[cursor + length] ?? run.successorId,
       wasTopLevel: cursor === 0 && run.wasTopLevel,
+      ...(cursor === 0 && run.connector !== undefined
+        ? {connector: run.connector}
+        : predecessorId === null
+          ? {}
+          : {connector: {kind: 'next' as const, ownerId: predecessorId, blockId: requireItem(blockIds, 0, 'dispatcher entry')}}),
       ...(cursor === 0 && run.x !== undefined ? {x: run.x} : {}),
       ...(cursor === 0 && run.y !== undefined ? {y: run.y} : {})
     });
@@ -836,28 +1372,147 @@ function boundDispatcherRuns(project: ScratchProject, run: LinearRun): LinearRun
   return bounded;
 }
 
-function uniqueDispatcherTokens(
-  count: number,
-  rng: DeterministicGenerator,
-  prefix: typeof DISPATCH_LABEL_PREFIX | typeof DISPATCH_TAG_PREFIX
-): string[] {
-  const tokens = new Set<string>();
-  while (tokens.size < count) {
-    let candidate = prefix;
-    for (let index = 0; index < 24; index += 1) {
-      candidate += requireItem(
-        DISPATCH_TOKEN_ALPHABET,
-        rng.integer(DISPATCH_TOKEN_ALPHABET.length),
-        'dispatcher token alphabet'
-      );
-    }
-    tokens.add(candidate);
+function uniqueDispatcherNumbers(count: number, rng: DeterministicGenerator): number[] {
+  const values = new Set<number>();
+  while (values.size < count) {
+    values.add(0x1_0000 + rng.integer(0x1fff_0000));
   }
-  return [...tokens];
+  return [...values];
 }
 
-function isDispatcherToken(value: string): boolean {
-  return /^[!?][0-9._~-]{24}$/u.test(value);
+function uniqueDispatcherKeys(
+  count: number,
+  moduli: readonly number[],
+  rng: DeterministicGenerator
+): number[] {
+  const values: number[] = [];
+  const occupied = moduli.map(() => new Set<number>());
+  while (values.length < count) {
+    const candidate = 0x1_0000 + rng.integer(0x1fff_0000);
+    const residues = moduli.map(modulus => scratchPositiveRemainder(candidate, modulus));
+    if (residues.some((residue, index) => residue === 0 || occupied[index]?.has(residue) === true)) continue;
+    values.push(candidate);
+    for (const [index, residue] of residues.entries()) occupied[index]?.add(residue);
+  }
+  return values;
+}
+
+function uniqueDispatcherTagNumbers(
+  stateCodes: readonly number[],
+  rng: DeterministicGenerator
+): number[] {
+  const values = new Set<number>();
+  const sums = new Set<number>();
+  const result: number[] = [];
+  for (const stateCode of stateCodes) {
+    for (;;) {
+      const candidate = 0x1_0000 + rng.integer(0x1fff_0000);
+      const sum = stateCode + candidate;
+      if (values.has(candidate) || sums.has(sum)) continue;
+      values.add(candidate);
+      sums.add(sum);
+      result.push(candidate);
+      break;
+    }
+  }
+  return result;
+}
+
+function makeDispatcherHandlerBuckets(
+  handlers: readonly DispatcherHandler[],
+  targetIndex: number,
+  firstId: string,
+  factory: UniqueFactory,
+  rng: DeterministicGenerator,
+  allocateCode: (domain: string, ordinal: number) => string
+): DispatcherHandlerBucket[] {
+  const order = rng.fork('membership').shuffle(handlers);
+  const bucketCount = 1;
+  const buckets: DispatcherHandlerBucket[] = [];
+  let cursor = 0;
+  for (let bucketIndex = 0; bucketIndex < bucketCount; bucketIndex += 1) {
+    const remaining = order.length - cursor;
+    const remainingBuckets = bucketCount - bucketIndex;
+    const size = Math.ceil(remaining / remainingBuckets);
+    const members = order.slice(cursor, cursor + size);
+    cursor += size;
+    buckets.push({
+      definitionId: factory.block(`handler-bucket-def-${targetIndex}-${firstId}-${bucketIndex}`),
+      prototypeId: factory.block(`handler-bucket-proto-${targetIndex}-${firstId}-${bucketIndex}`),
+      proccode: allocateCode(`handler-bucket-code-${bucketIndex}`, bucketIndex),
+      handlers: members
+    });
+  }
+  return buckets;
+}
+
+function buildDispatcherHandlerBucket(
+  target: ScratchTarget,
+  bucket: DispatcherHandlerBucket,
+  stateName: string,
+  stateId: string,
+  tagName: string,
+  tagId: string,
+  factory: UniqueFactory,
+  domain: string
+): void {
+  const buildSelection = (index: number, parentId: string): string => {
+    const handler = requireItem(bucket.handlers, index, 'dispatcher bucket handler');
+    const next = bucket.handlers[index + 1];
+    if (!next) {
+      requireBlock(target, handler.originalId).parent = parentId;
+      return handler.originalId;
+    }
+
+    const branchId = factory.block(`handler-bucket-branch-${domain}-${index}`);
+    const equalsId = factory.block(`handler-bucket-equals-${domain}-${index}`);
+    const sumId = factory.block(`handler-bucket-sum-${domain}-${index}`);
+    const stateReporterId = factory.block(`handler-bucket-state-${domain}-${index}`);
+    const tagReporterId = factory.block(`handler-bucket-tag-${domain}-${index}`);
+    const alternateId = buildSelection(index + 1, branchId);
+    requireBlock(target, handler.originalId).parent = branchId;
+    target.blocks[branchId] = {
+      opcode: 'control_if_else',
+      next: null,
+      parent: parentId,
+      inputs: {
+        CONDITION: [2, equalsId],
+        SUBSTACK: [2, handler.originalId],
+        SUBSTACK2: [2, alternateId]
+      },
+      fields: {},
+      shadow: false,
+      topLevel: false
+    };
+    target.blocks[equalsId] = {
+      opcode: 'operator_equals',
+      next: null,
+      parent: branchId,
+      inputs: {
+        OPERAND1: [2, sumId],
+        OPERAND2: numericInput(handler.stateCode + handler.tagCode)
+      },
+      fields: {},
+      shadow: false,
+      topLevel: false
+    };
+    target.blocks[sumId] = {
+      opcode: 'operator_add',
+      next: null,
+      parent: equalsId,
+      inputs: {NUM1: [2, stateReporterId], NUM2: [2, tagReporterId]},
+      fields: {},
+      shadow: false,
+      topLevel: false
+    };
+    target.blocks[stateReporterId] = makeVariableReporter(sumId, {variableId: stateId, variableName: stateName});
+    target.blocks[tagReporterId] = makeVariableReporter(sumId, {variableId: tagId, variableName: tagName});
+    return branchId;
+  };
+
+  const entryId = buildSelection(0, bucket.definitionId);
+  target.blocks[bucket.definitionId] = makeProcedureDefinition(bucket.prototypeId, entryId);
+  target.blocks[bucket.prototypeId] = makeProcedurePrototype(bucket.definitionId, bucket.proccode);
 }
 
 function makeProcedureDefinition(prototypeId: string, bodyId: string): ScratchBlock {
@@ -947,6 +1602,24 @@ function makeSetStateFromListBlock(
   };
 }
 
+function makeChangeStateFromListBlock(
+  parent: string,
+  next: string,
+  variableName: string,
+  variableId: string,
+  reporterId: string
+): ScratchBlock {
+  return {
+    opcode: 'data_changevariableby',
+    next,
+    parent,
+    inputs: {VALUE: [2, reporterId]},
+    fields: {VARIABLE: [variableName, variableId]},
+    shadow: false,
+    topLevel: false
+  };
+}
+
 function makeDispatcherBranch(
   parentId: string,
   conditionId: string,
@@ -995,12 +1668,29 @@ function makeDispatcherConjunction(parentId: string, stateEqualsId: string, tagE
   };
 }
 
-function makeStringEquality(parentId: string, reporterId: string, expected: string): ScratchBlock {
+function makeReporterEquality(parentId: string, reporterId: string, expectedReporterId: string): ScratchBlock {
   return {
     opcode: 'operator_equals',
     next: null,
     parent: parentId,
-    inputs: {OPERAND1: [2, reporterId], OPERAND2: textInput(expected)},
+    inputs: {OPERAND1: [2, reporterId], OPERAND2: [2, expectedReporterId]},
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+}
+
+function makeKeyedRouteExpression(
+  parentId: string,
+  keyReporterId: string,
+  code: number,
+  opcode: 'operator_add' | 'operator_subtract'
+): ScratchBlock {
+  return {
+    opcode,
+    next: null,
+    parent: parentId,
+    inputs: {NUM1: numericInput(code), NUM2: [2, keyReporterId]},
     fields: {},
     shadow: false,
     topLevel: false
@@ -1106,6 +1796,40 @@ function makeNamedListItemReporter(
     parent,
     inputs: {INDEX: numericInput(slot)},
     fields: {LIST: [listName, listId]},
+    shadow: false,
+    topLevel: false
+  };
+}
+
+function addKeyIndexedListReporter(
+  target: ScratchTarget,
+  reporterId: string,
+  indexId: string,
+  parent: string,
+  listName: string,
+  listId: string,
+  keyName: string,
+  keyId: string,
+  modulus: number
+): void {
+  target.blocks[reporterId] = {
+    opcode: 'data_itemoflist',
+    next: null,
+    parent,
+    inputs: {INDEX: [2, indexId]},
+    fields: {LIST: [listName, listId]},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[indexId] = {
+    opcode: 'operator_mod',
+    next: null,
+    parent: reporterId,
+    inputs: {
+      NUM1: [1, [12, keyName, keyId]],
+      NUM2: numericInput(modulus)
+    },
+    fields: {},
     shadow: false,
     topLevel: false
   };
@@ -2439,5 +3163,11 @@ function requireBlock(target: ScratchTarget, id: string): ScratchBlock {
 function requireItem<T>(values: readonly T[], index: number, description: string): T {
   const value = values[index];
   if (value === undefined) throw new Error(`${description} is incomplete`);
+  return value;
+}
+
+function requireMapItem<K, V>(values: ReadonlyMap<K, V>, key: K, description: string): V {
+  const value = values.get(key);
+  if (value === undefined) throw new Error(`${description} is unavailable`);
   return value;
 }

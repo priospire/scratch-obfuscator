@@ -1,7 +1,7 @@
 import {createRequire} from 'node:module';
 import {afterEach, describe, expect, it} from 'vitest';
 import {DeterministicGenerator} from '../src/deterministic.js';
-import {isScratchBlock} from '../src/model/blocks.js';
+import {isPrimitive, isScratchBlock} from '../src/model/blocks.js';
 import {
   ANTI_CHEAT_DECOY_COUNT,
   ANTI_CHEAT_WATERMARK_NAME,
@@ -274,7 +274,7 @@ describe('anti-cheat transform', () => {
     expect(generatedNames).not.toContain(monitorProperty);
   });
 
-  it('reuses an existing Stage watermark without changing its value', () => {
+  it('reuses and protects an existing Stage watermark without changing its value', () => {
     const project = createFixtureProject();
     const stage = stageOf(project);
     stage.variables['existing-watermark'] = [ANTI_CHEAT_WATERMARK_NAME, 'project-owned-value'];
@@ -284,9 +284,76 @@ describe('anti-cheat transform', () => {
     expect(result.watermarkCreated).toBe(false);
     expect(result.watermarkVariableId).toBe('existing-watermark');
     expect(stage.variables['existing-watermark']).toEqual([ANTI_CHEAT_WATERMARK_NAME, 'project-owned-value']);
-    expect(result.generatedBlockCount).toBe(98);
+    expect(Object.values(stage.variables).filter(value => value[0] === ANTI_CHEAT_WATERMARK_NAME)).toHaveLength(1);
+    expect(result.generatedBlockCount).toBe(110);
+
+    let protectedReadCount = 0;
+    for (const target of project.targets) {
+      for (const value of Object.values(target.blocks)) {
+        if (!isScratchBlock(value) || value.opcode !== 'operator_equals') continue;
+        const reporter = value.inputs['OPERAND1']?.[1];
+        if (!isPrimitive(reporter) || reporter[0] !== 12 || reporter[2] !== 'existing-watermark') continue;
+        protectedReadCount += 1;
+        const encodedId = value.inputs['OPERAND2']?.[1];
+        const encoded = typeof encodedId === 'string' ? target.blocks[encodedId] : undefined;
+        expect(isScratchBlock(encoded) && encoded.opcode === 'operator_join').toBe(true);
+        if (!isScratchBlock(encoded)) continue;
+        const left = encoded.inputs['STRING1']?.[1];
+        const right = encoded.inputs['STRING2']?.[1];
+        expect(isPrimitive(left) && left[0] === 10 && typeof left[1] === 'string'
+          && isPrimitive(right) && right[0] === 10 && typeof right[1] === 'string'
+          ? left[1] + right[1]
+          : undefined).toBe('project-owned-value');
+      }
+    }
+    expect(protectedReadCount).toBe(3);
     validateProject(project);
   });
+
+  it('protects a reused watermark with every schema-valid scalar value', async () => {
+    const cases: ReadonlyArray<readonly [boolean | number | string, boolean | number | string]> = [
+      ['', '!'],
+      ['x', 'x!'],
+      ['project-owned-value', 'project-owned-value!'],
+      [0, 1],
+      [72.5, 73.5],
+      [true, false],
+      [false, true]
+    ];
+
+    for (const [index, [initialValue, tamperedValue]] of cases.entries()) {
+      const project = createFixtureProject();
+      const stage = stageOf(project);
+      stage.variables['existing-watermark'] = [ANTI_CHEAT_WATERMARK_NAME, initialValue];
+      const effectId = installKeyEffect(project, `watermark-reuse-${index}`);
+      const result = applyAntiCheatTransform(project, generator());
+
+      expect(stage.variables['existing-watermark']).toEqual([ANTI_CHEAT_WATERMARK_NAME, initialValue]);
+      expect(Object.values(stage.variables).filter(value => value[0] === ANTI_CHEAT_WATERMARK_NAME)).toHaveLength(1);
+
+      const vm = createVm();
+      await vm.loadProject(createFixtureArchive(project));
+      vm.start();
+      const runtime = runtimeStage(vm);
+      const watermark = runtime.variables['existing-watermark'];
+      const latch = runtime.variables[result.latchVariableId];
+      const effect = runtime.variables[effectId];
+      if (!watermark || !latch || !effect) throw new Error('runtime watermark guard variables are unavailable');
+      const safeLatchValue = latch.value;
+
+      vm.runtime.startHats('event_whenkeypressed', {KEY_OPTION: 'space'});
+      stepUntilStopped(vm);
+      expect(effect.value).toBe(1);
+      expect(latch.value).toBe(safeLatchValue);
+
+      watermark.value = tamperedValue;
+      vm.runtime.startHats('event_whenkeypressed', {KEY_OPTION: 'space'});
+      stepUntilStopped(vm);
+      expect(effect.value).toBe(1);
+      expect(latch.value).not.toBe(safeLatchValue);
+      expect(vm.runtime.threads).toHaveLength(0);
+    }
+  }, 30_000);
 
   it('guards a bundled extension hat without changing its top-level position', () => {
     const project = createFixtureProject();

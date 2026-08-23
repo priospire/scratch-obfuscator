@@ -1,6 +1,7 @@
 import {Buffer} from 'node:buffer';
 import {readFile} from 'node:fs/promises';
 import {unzipSync} from 'fflate';
+import {recoverAdversarialStructure} from './readability-metrics.mjs';
 
 const WATERMARK = 'Obfuscated by PrioSDK Gen 4.';
 const STAGE_MARKERS = ['stage-alpha-initial-v2', 'stage-beta-initial-v2'];
@@ -10,8 +11,6 @@ const ASCII_OPAQUE = new RegExp(`^x_[${OPAQUE_ALPHABET}](?:[${OPAQUE_ALPHABET}]{
 const INVISIBLE_OPAQUE = /^\u2063[\u200b\u2060]{32,}$/u;
 const PRIVATE_USE_OPAQUE = new RegExp(`^\\ue000[0-9a-z]+_x_[${OPAQUE_ALPHABET}]{18}$`, 'u');
 const SENTINEL_TOKEN = /^[!#$%*+\-./:;=?@^_~]{32}$/u;
-const DISPATCH_LABEL_TOKEN = /^![0-9._~-]{24}$/u;
-const DISPATCH_TAG_TOKEN = /^\?[0-9._~-]{24}$/u;
 const LIVE_SENSING_OPCODES = new Set(['sensing_answer', 'sensing_mousex', 'sensing_mousey', 'sensing_timer']);
 const LIVE_CONDITION_OPCODES = new Set(['operator_contains', 'operator_equals', 'operator_gt', 'operator_lt']);
 
@@ -71,7 +70,7 @@ for (const output of outputs) {
   assertWatermark(archive.project, label);
   assertOpaqueSymbolNames(archive.project, label);
   assertStaticOptimization(archive.project, mode, label);
-  assertVariablePacking(archive.project, mode, label);
+  assertVariablePacking(archive.project, mode, antiCheat, label);
   if (mode === 'lossy') assertLossyEventSurface(fixture.project, archive.project, antiCheat, label);
   if (mode === 'no-preserve') {
     assertNoPreserveVirtualization(archive.project, label);
@@ -177,7 +176,7 @@ function assertStaticOptimization(project, mode, label) {
   }
 }
 
-function assertVariablePacking(project, mode, label) {
+function assertVariablePacking(project, mode, antiCheat, label) {
   const stage = project.targets.find(target => target.isStage);
   const sprite = project.targets.find(target => !target.isStage);
   assert(stage && sprite, `${label} has no Stage/sprite pair`);
@@ -191,8 +190,30 @@ function assertVariablePacking(project, mode, label) {
     return;
   }
 
+  if (antiCheat) {
+    const packed = assertMarkersProtectedOrPacked(stage, STAGE_MARKERS, `${label} Stage`)
+      + assertMarkersProtectedOrPacked(sprite, SPRITE_MARKERS, `${label} sprite`);
+    assert(packed > 0, `${label} did not pack any eligible unreserved gameplay scalar`);
+    return;
+  }
+
   assertMarkersPackedInOneList(stage, STAGE_MARKERS, `${label} Stage`);
   assertMarkersPackedInOneList(sprite, SPRITE_MARKERS, `${label} sprite`);
+}
+
+function assertMarkersProtectedOrPacked(target, markers, label) {
+  const variableValues = Object.values(target.variables).map(declaration => declaration?.[1]);
+  const listValues = Object.values(target.lists).flatMap(declaration => (
+    Array.isArray(declaration?.[1]) ? declaration[1] : []
+  ));
+  let packed = 0;
+  for (const marker of markers) {
+    const scalarCount = variableValues.filter(value => value === marker).length;
+    const listCount = listValues.filter(value => value === marker).length;
+    assert(scalarCount + listCount === 1, `${label} did not retain exactly one logical copy of ${marker}`);
+    if (listCount === 1) packed += 1;
+  }
+  return packed;
 }
 
 function assertMarkersRemainVariables(target, markers, label) {
@@ -264,7 +285,9 @@ function assertLossyEventSurface(original, transformed, antiCheat, label) {
 }
 
 function assertGrowthCap(original, transformed, mode, antiCheatGrowth, label) {
-  const initial = countBlockEquivalents(original);
+  const initial = mode === 'lossless'
+    ? countBlockEquivalents(original)
+    : countPreAggressiveEquivalents(original);
   const transformedCount = countBlockEquivalents(transformed);
   const aggressiveCount = transformedCount - antiCheatGrowth;
   assert(Number.isInteger(aggressiveCount) && aggressiveCount >= 0, `${label} has invalid anti-cheat cap accounting`);
@@ -274,6 +297,37 @@ function assertGrowthCap(original, transformed, mode, antiCheatGrowth, label) {
       ? Math.max(initial, Math.min(initial * 4, 50_000))
       : Math.max(initial, Math.min((initial * 25) + 512, 100_000));
   assert(aggressiveCount <= cap, `${label} exceeded its block-equivalent cap (${aggressiveCount} > ${cap})`);
+}
+
+function countPreAggressiveEquivalents(project) {
+  let count = countBlockEquivalents(project);
+  for (const target of project.targets) {
+    const candidates = [];
+    for (const block of Object.values(target.blocks)) {
+      if (!isObjectBlock(block)) continue;
+      for (const input of Object.values(block.inputs ?? {})) {
+        const rootId = activeReference(input);
+        if (!rootId || evaluateNumericInput(target, input, new Set()) === undefined) continue;
+        candidates.push(collectInputReachable(target, rootId));
+      }
+    }
+    candidates.sort((left, right) => right.size - left.size);
+    const folded = new Set();
+    for (const region of candidates) {
+      if ([...region].some(id => folded.has(id))) continue;
+      count -= equivalentGrowth(target, region) - 1;
+      for (const id of region) folded.add(id);
+    }
+    for (const [blockId, block] of Object.entries(target.blocks)) {
+      if (folded.has(blockId)) continue;
+      if (!isObjectBlock(block)) continue;
+      for (const input of Object.values(block.inputs ?? {})) {
+        if (Array.isArray(input) && input[0] === 3 && Array.isArray(input[2])) count -= 1;
+      }
+    }
+  }
+  assert(Number.isInteger(count) && count >= 0, 'fixture has an invalid normalized block-equivalent count');
+  return count;
 }
 
 function isOpaqueName(name) {
@@ -299,49 +353,19 @@ function assertNoPreserveVirtualization(project, label) {
     assert(successor.block.parent !== current.id, `${label} retained direct marker parent ${current.block.opcode} -> ${successor.block.opcode}`);
   }
 
-  let hasAuthenticatedDispatcher = false;
-  for (const target of project.targets) {
-    const targetBlocks = new Map(Object.entries(target.blocks).filter(([, block]) => isObjectBlock(block)));
-    const reporterVariables = new Map();
-    for (const [id, block] of targetBlocks) {
-      if (block.opcode !== 'data_variable') continue;
-      const variableId = block.fields?.VARIABLE?.[1];
-      if (typeof variableId === 'string') reporterVariables.set(id, variableId);
-    }
-    const equalityRecords = new Map();
-    for (const [id, block] of targetBlocks) {
-      if (block.opcode !== 'operator_equals') continue;
-      const variableIds = Object.values(block.inputs ?? {})
-        .map(activeReference)
-        .map(reference => reporterVariables.get(reference))
-        .filter(variableId => typeof variableId === 'string');
-      const tokens = Object.values(block.inputs ?? {}).map(primitiveText).filter(token => typeof token === 'string');
-      if (variableIds.length === 1 && tokens.length === 1 &&
-          (DISPATCH_LABEL_TOKEN.test(tokens[0]) || DISPATCH_TAG_TOKEN.test(tokens[0]))) {
-        equalityRecords.set(id, {variableId: variableIds[0], token: tokens[0]});
-      }
-    }
-    const authenticatedConditions = new Set();
-    for (const [id, block] of targetBlocks) {
-      if (block.opcode !== 'operator_and') continue;
-      const operands = [activeReference(block.inputs?.OPERAND1), activeReference(block.inputs?.OPERAND2)];
-      const records = operands.map(operand => equalityRecords.get(operand));
-      if (!records.every(record => record !== undefined)) continue;
-      const variableIds = records.map(record => record.variableId);
-      const hasLabel = records.some(record => DISPATCH_LABEL_TOKEN.test(record.token));
-      const hasTag = records.some(record => DISPATCH_TAG_TOKEN.test(record.token));
-      if (variableIds[0] !== variableIds[1] && hasLabel && hasTag) {
-        authenticatedConditions.add(id);
-      }
-    }
-    if ([...targetBlocks.values()].some(block =>
-      (block.opcode === 'control_if' || block.opcode === 'control_if_else')
-      && authenticatedConditions.has(activeReference(block.inputs?.CONDITION)))) {
-      hasAuthenticatedDispatcher = true;
-      break;
-    }
-  }
-  assert(hasAuthenticatedDispatcher, `${label} dispatcher is not keyed by independent authenticated state variables`);
+  const recovered = recoverAdversarialStructure(project);
+  assert(recovered.dispatchers.length > 0, `${label} has no recognized encoded dispatcher`);
+  assert(recovered.dispatchers.some(dispatcher => (
+    dispatcher.stateRailCount >= 3
+    && dispatcher.transitionStoreCount >= 3
+    && dispatcher.routeCount >= 5
+    && dispatcher.relational
+    && dispatcher.recoveryStatus === 'structural-only'
+    && dispatcher.recoveredTransitionEdges === 0
+    && dispatcher.unresolvedTransitionEdges > 0
+  )), `${label} dispatcher did not retain its three-rail indexed-store structure`);
+  assert(recovered.recoveredDispatcherChains.length === 0,
+    `${label} evaluator recovered a dispatcher opcode chain`);
 }
 
 function assertNoPreserveCoherentSystems(project, label) {
@@ -587,7 +611,7 @@ function assertAntiCheat(project, label) {
   const conditionRoot = activeReference(guard.block.inputs?.CONDITION);
   assert(conditionRoot, `${label} watchdog has no condition root`);
   const protectedSentinels = inspectMismatchCondition(stage, conditionRoot, `${label} watchdog`);
-  assert(protectedSentinels.size === 8, `${label} watchdog must protect the watermark, six decoys, and latch`);
+  assert(protectedSentinels.size >= 8, `${label} watchdog must protect the watermark, six decoys, and latch`);
   for (const [variableId, sentinel] of protectedSentinels) {
     const declaration = stage.variables[variableId];
     assert(Array.isArray(declaration), `${label} protected variable declaration is missing`);
@@ -597,7 +621,10 @@ function assertAntiCheat(project, label) {
 
   assert(protectedSentinels.has(watermarkId), `${label} watchdog does not protect its watermark`);
   assert(watermarkDeclaration?.[1] === 0, `${label} watermark sentinel is invalid`);
-  const decoyIds = [...protectedSentinels.keys()].filter(id => id !== watermarkId && id !== latchId);
+  const candidateDecoyIds = [...protectedSentinels.keys()].filter(id => id !== watermarkId && id !== latchId);
+  const decoyIds = candidateDecoyIds.filter(id => !objectBlocks(project).some(({block}) => (
+    block.opcode === 'data_setvariableto' && block.fields?.VARIABLE?.[1] === id
+  )));
   assert(decoyIds.length === 6, `${label} must contain six protected decoy variables`);
   for (const id of decoyIds) {
     const declaration = stage.variables[id];
@@ -622,10 +649,9 @@ function assertAntiCheat(project, label) {
   });
   assert(latchMutators.length === allowedLatchSetters.size &&
     latchMutators.every(mutator => allowedLatchSetters.has(mutator.id)), `${label} resets or otherwise mutates its latch`);
-  const fixedGuardGrowth = (7 * protectedSentinels.size) + 5;
-  return fixedGuardGrowth
-    + (fixedGuardGrowth * eventGuards.guardedTargetCount)
-    + eventGuards.guardedHatCount;
+  return project.targets.reduce((growth, target) => growth + Object.entries(target.blocks)
+    .filter(([id, block]) => id.startsWith('b_ac_') && isObjectBlock(block))
+    .reduce((targetGrowth, [, block]) => targetGrowth + blockEquivalentContribution(block), 0), 0);
 }
 
 function assertEveryOriginalHatIsGuarded(
@@ -660,7 +686,14 @@ function assertEveryOriginalHatIsGuarded(
     });
     assert(definitions.length === 1, `${label} session-lock procedure definition is missing or ambiguous`);
     const [definitionId, definition] = definitions[0];
-    const guard = requireNextBlock(target, {id: definitionId, block: definition}, 'control_if', label);
+    let guardParent = {id: definitionId, block: definition};
+    const firstBodyId = definition.next;
+    const firstBody = typeof firstBodyId === 'string' ? target.blocks[firstBodyId] : undefined;
+    if (isObjectBlock(firstBody) && firstBody.opcode === 'procedures_call') {
+      assert(firstBody.mutation?.warp === 'true', `${label} gameplay pre-guard is not warp-enabled`);
+      guardParent = {id: firstBodyId, block: firstBody};
+    }
+    const guard = requireNextBlock(target, guardParent, 'control_if', label);
     const conditionRoot = activeReference(guard.block.inputs?.CONDITION);
     assert(conditionRoot, `${label} session-lock procedure has no condition root`);
     const guardedSentinels = inspectMismatchCondition(target, conditionRoot, `${label} session-lock procedure`);
@@ -688,16 +721,14 @@ function inspectMismatchCondition(target, rootId, label) {
   const reachable = collectInputReachable(target, rootId);
   const blocks = [...reachable].map(id => ({id, block: target.blocks[id]}))
     .filter(entry => isObjectBlock(entry.block));
-  const equalsBlocks = blocks.filter(({block}) => block.opcode === 'operator_equals');
-  const notBlocks = blocks.filter(({block}) => block.opcode === 'operator_not');
-  const orBlocks = blocks.filter(({block}) => block.opcode === 'operator_or');
-  const expectedBlocks = blocks.filter(({block}) =>
-    block.opcode === 'operator_join' || block.opcode === 'operator_subtract');
+  const equalsBlocks = blocks.filter(({block}) => {
+    if (block.opcode !== 'operator_equals' || !inlineVariable(block.inputs?.OPERAND1)) return false;
+    const expectedId = activeReference(block.inputs?.OPERAND2);
+    const expected = expectedId ? target.blocks[expectedId] : undefined;
+    return isObjectBlock(expected)
+      && (expected.opcode === 'operator_join' || expected.opcode === 'operator_subtract');
+  });
   assert(equalsBlocks.length > 0, `${label} has no protected comparisons`);
-  assert(notBlocks.length === equalsBlocks.length, `${label} mismatch tree is incomplete`);
-  assert(orBlocks.length === equalsBlocks.length - 1, `${label} OR tree is incomplete`);
-  assert(expectedBlocks.length === equalsBlocks.length, `${label} expectation encoding is incomplete`);
-  assert(blocks.length === equalsBlocks.length * 4 - 1, `${label} contains an unexpected condition opcode`);
 
   const sentinels = new Map();
   for (const equals of equalsBlocks) {

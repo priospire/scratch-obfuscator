@@ -18,7 +18,7 @@ import {validateProject} from './validation/index.js';
 import {compareUtf8} from './deterministic.js';
 import {DEFAULT_LIMITS, type ArchiveEntry, type ObfuscationMode, type ObfuscationStats} from './types.js';
 
-const VERSION = '0.5.1';
+const VERSION = '0.6.0';
 
 const HELP = `Usage: scratch-obfuscator <input.sb3> [options]
 
@@ -131,6 +131,7 @@ export async function runCli(
       ` blocks=${stats.blocksBefore}->${stats.blocksAfter}, renamed=${stats.identifiersRenamed + stats.symbolsRenamed},` +
       ` packed=${stats.variablesVirtualized ?? 0}, folded=${stats.constantsFolded ?? 0},` +
       ` fallbacks=${stats.inactiveFallbacksRemoved ?? 0}, comments=${stats.commentsRemoved},` +
+      ` packed-lists=${stats.listsVirtualized ?? 0},` +
       ` decoys=${stats.decoysAdded}, virtualized=${stats.virtualizedBlocks}, warnings=${stats.warnings.length})\n`
     );
     for (const warning of stats.warnings) {

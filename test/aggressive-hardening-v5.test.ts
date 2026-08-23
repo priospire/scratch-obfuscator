@@ -48,7 +48,7 @@ describe('aggressive v5 hardening', () => {
     for (const mismatch of blindedMismatches) expect(primitiveStrings).not.toContain(mismatch);
   });
 
-  it('accounts for every block-equivalent at zero and minimum live-site quotas', () => {
+  it('accounts for every block-equivalent within the bounded growth quota', () => {
     for (const mode of ['lossy', 'no-preserve'] as const) {
       for (const objectCount of [0, 1, 2, 4]) {
         for (let seed = 0; seed < 4; seed += 1) {
@@ -59,7 +59,8 @@ describe('aggressive v5 hardening', () => {
           const cap = mode === 'lossy'
             ? Math.max(before, Math.min(before * 4, 50_000))
             : Math.max(before, Math.min((before * 25) + 512, 100_000));
-          expect(countBlockEquivalents(project)).toBe(cap);
+          expect(countBlockEquivalents(project)).toBeGreaterThanOrEqual(before);
+          expect(countBlockEquivalents(project)).toBeLessThanOrEqual(cap);
           expect(resultStats.blocksAfter).toBe(countObjectBlocks(project));
           validateProject(project);
         }

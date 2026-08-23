@@ -3,7 +3,7 @@
 `scratch-obfuscator` is a CLI transformer for `.sb3` projects. It renames identifiers, obscures editor metadata and,
 in the stronger modes, adds bounded data/control-flow indirection. Every output
 is graph-validated before publication and every non-`project.json` archive
-member is preserved (BFB Byte For Byte). Scratch Obfuscator is part of PrioSDK Gen 4.
+member is preserved byte-for-byte. Scratch Obfuscator is part of PrioSDK Gen 4.
 
 The package is private and is not published to the public npm registry. It
 requires Node.js 22 or newer and supports Windows, macOS, and Linux.
@@ -29,7 +29,7 @@ An internal tarball is also installable through npm:
 
 ```sh
 npm pack
-npm install --global ./scratch-obfuscator-0.5.1.tgz
+npm install --global ./scratch-obfuscator-0.6.0.tgz
 ```
 
 Both installed forms expose the `scratch-obfuscator` executable. This release has
@@ -113,21 +113,24 @@ not a meaningful guarantee.
 
 ### `-lossy`
 
-Lossy mode permits bounded CPU and archive-size overhead. A conservative static
-eligibility gate admits live rewrites only for a single-threaded core-block
-surface with no timer, randomness, live-input, asynchronous, clone, broadcast,
-extension, procedure, or yield hazard. Eligible regions receive custom-block
-outlining of maximal non-yielding top-level runs, portable exact-domain constant
+Lossy mode permits bounded CPU and archive-size overhead. A per-region effect
+and temporal-influence analysis admits live rewrites only where it can prove
+that the region and its reachable continuation cannot move or duplicate a yield,
+runtime-random call, live-input sample, timer read, asynchronous operation, or
+observable concurrent effect. Unrelated hazardous scripts no longer force a
+whole-project fallback. Eligible regions receive custom-block outlining of
+maximal non-yielding runs, portable exact-domain constant
 folding (including exact trigonometric, logarithmic, and exponential domains),
 interior string splitting, contextual finite numeric equations,
 condition inversion, opaque predicates, dual-rail private branches, bounded
-guarded data/list decoys, and scalar packing. Lossy mode adds no event hats;
+guarded data/list decoys, scalar packing, and fixed-list heap permutation for
+the narrow statically indexed subset. Lossy mode adds no event hats;
 its generated data paths remain behind statically false private guards. Packing
 uses one backing list for eligible Stage globals and one per sprite for
 eligible locals so clone-local state remains local. Cloud, monitored,
 dynamically addressed, unsupported,
 malformed, and over-budget variables remain native. Hazardous projects fall
-back to the common lossless transforms plus inert decoys.
+back per region to the common lossless transforms plus inert decoys.
 
 The live passes add no deliberate yield point and preserve original random and
 input sampling sites. The gate is intentionally conservative; it is not a
@@ -140,18 +143,25 @@ and targets the same sequential final effects, while explicitly waiving timer
 and live-input sampling time, responsiveness, redraw cadence, thread
 interleaving, race outcomes, and manual stack-click behavior.
 
-Eligible top-level straight-line runs are split into dispatcher regions of 4–12
-supported core commands and routed through encoded program counters. Native hats, C-blocks,
-yield/async anchors, unknown regions, warp/procedure bodies, recursion, and
-uncertain re-entrant ownership remain native. Dispatchers use shuffled handler
-procedures, permuted labels, authenticated label/tag state on independent
-rails, letter-free nonnumeric token domains, indirect transition lists with
-variable-width junk, two branch templates,
-trampolines, and fake states. A changed transition label or tag no longer selects
-a handler. Additional passes pool and
+Eligible straight-line runs inside top-level scripts and native C-block
+substacks are split into bounded dispatcher regions of four or five supported
+core commands and routed through encoded program counters. Procedure bodies on
+ordinary event-driven targets currently remain native because their ownership
+check conservatively treats competing runnable hats as a re-entry risk.
+Native hats, C-block and yield/async anchors, unknown regions, unsafe warp or
+recursive bodies, and uncertain re-entrant ownership remain native. Each
+dispatcher uses three evolving scalar rails and three independently shuffled
+stores for encoded state, authentication tags, and key deltas. Store indexes are
+computed at runtime from the evolving key using independently permuted moduli;
+handlers share a fused custom-procedure bucket with a second rail-coupled
+selector, and original internal `next` chains are removed. Trampolines, fake
+states, unrelated numeric/string junk records, and varied route ordering add
+camouflage around that live structure. A changed state, tag, key, or transition
+store entry no longer selects the intended handler. Additional passes pool and
 split eligible strings, precompute portable static reporter trees, encode exact
 numeric domains, pack eligible Stage and sprite scalars into shuffled per-scope
-list slots, add opaque branches and fake data/procedures, and select decoys from
+list slots, permute proven fixed lists into the same private heap, add opaque
+branches and fake data/procedures, and select decoys from
 the project's supported data/list opcode vocabulary. Bounded coherent fake
 subsystems connect paired opaque broadcasts, multiple receiver hats, shared
 custom procedures, private state/list predicates, nested reporters, and finite
@@ -171,11 +181,20 @@ rewritten. This selective fallback is part of the contract.
 
 Anti-cheat is an opt-in modifier, not a fourth obfuscation mode. The watermark
 is present even without this flag. The modifier adds exactly six opaque Stage
-sentinels and a private session latch. Changing any sentinel trips the latch at
-the next watchdog check, stops all running scripts, and prevents the project's
-pre-existing green-flag, key, broadcast, click, clone, and supported extension
-hats from continuing during that loaded session. One shared hidden guard
-procedure per affected target keeps the entry checks bounded.
+sentinels, a private session latch, and authenticated protection for up to 16
+eligible real gameplay scalars. Each protected value has an independent hidden
+tag derived from its current Scratch string value. Statically understood reads
+and writes pass through shared warp guards, legal writes refresh the tag, and
+declaration-name probes make stale name/ID substitutions trip the same session
+latch. Cloud, monitored, dynamically addressed, multi-owner, clone-unsafe, and
+otherwise ambiguous state falls back without speculative protection.
+
+Changing a decoy, a protected value without its matching tag, a tag, the
+watermark value, or the latch trips at the next applicable guard/watchdog check,
+stops all running scripts, and prevents the project's pre-existing green-flag,
+key, broadcast, click, clone, and supported extension hats from continuing
+during that loaded session. Shared hidden guard procedures keep repeated checks
+bounded.
 
 Sentinel reads use typed inline variable primitives instead of ordinary visible
 reporter blocks. String expectations are deterministically split and rejoined,
@@ -212,12 +231,12 @@ unused capacity rolls forward. Each eligible pass is considered once in a
 deterministic hashed order.
 
 The anti-cheat layer is an explicit additive exception applied after the mode
-cap. Let `T` be the number of targets with protected event hats and `H` the
-number of protected hats. Each target guard checks the full protected sentinel
-set before latching and stopping. The layer adds `36 + 36T + H` object blocks
-when it creates the mandatory watermark, or `32 + 32T + H` when reusing one.
-Including inline literal primitives, the corresponding normalized additions
-are `61 + 61T + H` or `54 + 54T + H`.
+cap. Its six decoys and watchdog remain fixed-size. Gameplay authentication is
+bounded to 16 eligible scalars, creates one tag per accepted scalar, one shared
+guard/trip procedure per affected target, one guard call per distinct protected
+statement, and one three-block tag refresh after each accepted write. The QA
+suite measures this additive growth and verifies that ineligible or ambiguous
+state does not receive a partial rewrite.
 
 ## Runtime compatibility
 
@@ -319,14 +338,11 @@ npm pack
 root registry-signature verification, both-lock deprecation/integrity policy,
 coverage suite, and build. The isolated browser-QA tree has its own audit and
 signature gate, shown above. Registry artifacts must use HTTPS with SHA-512
-integrity, and deprecated packages fail the policy. Coverage thresholds are 98%
-for statements, 96% for branches, 100% for functions, and 99.5% for lines
-across all production source, including the CLI. The current 535-test suite
-reaches 98.56% statements, 96.24% branches, 100% functions, and 99.72% lines
-without excluding production files. Remaining uncovered paths are defensive
-responses to impossible generated-graph states, corrupted bundled schemas, or
-dependency contract violations; manufacturing those states would weaken the
-evidence rather than improve it.
+integrity, and deprecated packages fail the policy. Coverage thresholds are 97%
+for statements, 93% for branches, 100% for functions, and 99% for lines
+across all production source, including the CLI. The release suite enforces
+these thresholds without excluding production files. Its exact test and
+coverage totals are recorded by the release run rather than hard-coded here.
 
 The test suite includes deterministic/property transforms, official VM
 load/serialize/reload and execution checks, per-step semantic traces, an
@@ -350,10 +366,13 @@ node scripts/readability-metrics.mjs \
 
 It reports identifier exposure, direct-chain and normalized-chain recovery,
 normalization-resistant component quality, indirection, dependency kinds,
-paired event surfaces, repeated local signatures, and depth-2 topology
-diversity. Its state-aware normalizer follows event/procedure reachability,
-propagates finite declaration domains, mirrors Scratch numeric/string
-comparison coercion, and prunes provably false graphs. The gates prove that
+paired event surfaces, repeated local signatures, depth-2 topology diversity,
+dispatcher rails/stores/routes, recovered transitions, unresolved transitions,
+and complete/partial/structural-only recovery status. Its state-aware normalizer
+follows event/procedure reachability and returns, propagates finite declaration
+and constant-list-slot domains, mirrors Scratch numeric/string comparison
+coercion, detects legacy and evolving dispatchers, and prunes provably false
+graphs. The gates prove that
 adding 2,000 repeated unreachable blocks cannot improve the score and that a
 10,444-block stress output retains at least 8,000 blocks with bounded repeated
 signatures and more than 1,800 normalized topology kinds.
@@ -361,14 +380,16 @@ signatures and more than 1,800 normalized topology kinds.
 This evaluator is an offline checkout QA utility for trusted local fixtures;
 untrusted archives must go through the resource-limited production CLI.
 
-On the fixed release fixture the current resistance scores are 15.143
-(original), 33.699 (lossless), 84.759 (lossy), and 95.584 (no-preserve).
-No-preserve direct and normalized chain recovery are both 0.047. Dedicated
-fully eligible regressions additionally require no original 3- or 4-block
-chain to survive normalization. These are same-fixture structural heuristics,
-not absolute security or subjective-readability guarantees.
+The dedicated five-command dispatcher regression requires three independent
+rails, three indexed stores, zero recovered transition edges, four unresolved
+live edges, no recovered original opcode chain, and `structural-only` recovery
+after normalization. A path-sensitive interpreter can still execute the finite
+embedded stores and recover the route; this is a regression gate against known
+normalizers, not an absolute security or subjective-readability guarantee.
 
-Pinned compatibility tools have a separate security boundary; see
+The implemented techniques, evaluator model, rejected ideas, and remaining
+attack paths are documented in [`HARDENING.md`](HARDENING.md). Pinned
+compatibility tools have a separate security boundary; see
 [`QA_SECURITY.md`](QA_SECURITY.md). Third-party schema licensing and trademark
 notices are in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 

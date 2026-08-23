@@ -8,7 +8,7 @@ import {fileURLToPath} from 'node:url';
 import {TextDecoder} from 'node:util';
 import {strFromU8, unzipSync} from 'fflate';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const WATERMARK_NAME = 'Obfuscated by PrioSDK Gen 4.';
 const REPORTER_PREFIXES = ['operator_', 'sensing_', 'argument_reporter_'];
 const REPORTER_OPCODES = new Set([
@@ -94,9 +94,44 @@ export function measureProject(project) {
   return publicProfile(analyzeProject(project));
 }
 
+export function recoverAdversarialStructure(project) {
+  assertProject(project, 'project');
+  const normalization = analyzeProject(project).normalization;
+  const dispatchers = normalization.dispatcherRecovery.machines.map(machine => ({
+    targetIndex: machine.targetIndex,
+    routeCount: machine.routeCount,
+    transitionCount: machine.transitionCount,
+    recoveredTransitionEdges: machine.recoveredTransitionEdges,
+    unresolvedTransitionEdges: machine.unresolvedTransitionEdges,
+    stateRailCount: machine.stateRailCount,
+    transitionStoreCount: machine.transitionStoreCount,
+    relational: machine.relational,
+    recoveryStatus: machine.recoveryStatus,
+    recoveredChains: machine.chains
+  }));
+  const structure = {
+    provenConstantListSlots: normalization.provenConstantListSlots,
+    recoveredProcedureCallEdges: normalization.procedureFlow.callEdges,
+    recoveredProcedureReturnEdges: normalization.procedureFlow.returnEdges,
+    dispatchers,
+    recoveredDispatcherChains: normalization.dispatcherRecovery.chains,
+    staticDataDependencyEdges: normalization.staticDependencies.dataEdges,
+    staticControlDependencyEdges: normalization.staticDependencies.controlEdges,
+    tamperCriticalSymbols: normalization.staticDependencies.criticalSymbols,
+    tamperGuardedSymbols: normalization.staticDependencies.guardedSymbols,
+    tamperGuardSites: normalization.staticDependencies.guardSites,
+    tamperRedundantGuardedSymbols: normalization.staticDependencies.redundantlyGuardedSymbols,
+    tamperGuardCoverage: rounded(normalization.staticDependencies.guardCoverage)
+  };
+  return {
+    ...structure,
+    digest: createHash('sha256').update(JSON.stringify(structure)).digest('hex')
+  };
+}
+
 export function formatReadabilitySummary(report) {
   const lines = [
-    'iteration\tscore\tidentifier-concealment\tdirect-chain-recovery\tnormalized-recovery\tretained-quality\tindirection\tdependencies\tsignature-scale\ttopology-scale\tmax-signature-share\tpaired-channels\tbroadcast-templates\tprune-ratio\tobvious-never-sent-hats'
+    'iteration\tscore\tidentifier-concealment\tdirect-chain-recovery\tnormalized-recovery\tdevirtualized-recovery\tdispatchers\tdispatcher-routes\tdispatcher-edges\tdispatcher-unresolved\tdispatcher-complete\tdispatcher-partial\tdispatcher-structural-only\ttamper-coverage\tretained-quality\tindirection\tdependencies\tsignature-scale\ttopology-scale\tmax-signature-share\tpaired-channels\tbroadcast-templates\tprune-ratio\tobvious-never-sent-hats'
   ];
   for (const candidate of [report.baseline, ...report.candidates]) {
     const comparison = candidate.comparison;
@@ -107,6 +142,15 @@ export function formatReadabilitySummary(report) {
       comparison.identifierConcealment.toFixed(3),
       comparison.directChainRecovery.toFixed(3),
       comparison.normalizedRecovery.toFixed(3),
+      comparison.devirtualizedChainRecovery.toFixed(3),
+      String(profile.recoveredDispatchers),
+      String(profile.recoveredDispatcherRoutes),
+      String(profile.recoveredDispatcherTransitionEdges),
+      String(profile.unresolvedDispatcherTransitionEdges),
+      String(profile.completeDispatcherRecoveries),
+      String(profile.partialDispatcherRecoveries),
+      String(profile.structuralOnlyDispatcherRecoveries),
+      profile.tamperGuardCoverage.toFixed(3),
       comparison.retainedComponentQuality.toFixed(3),
       comparison.indirectionDensity.toFixed(3),
       String(profile.semanticDependencyKindCount),
@@ -191,6 +235,28 @@ function analyzeProject(project) {
       provenFalseControls: normalization.provenFalseControls,
       constantDeclarations: normalization.constantDeclarations,
       mutableDeclarations: normalization.mutableDeclarations,
+      provenConstantListSlots: normalization.provenConstantListSlots,
+      recoveredProcedureCallEdges: normalization.procedureFlow.callEdges,
+      recoveredProcedureReturnEdges: normalization.procedureFlow.returnEdges,
+      recoveredDispatchers: normalization.dispatcherRecovery.machines.length,
+      recoveredDispatcherRoutes: normalization.dispatcherRecovery.routeCount,
+      recoveredDispatcherTransitions: normalization.dispatcherRecovery.transitionCount,
+      recoveredDispatcherTransitionEdges: normalization.dispatcherRecovery.recoveredTransitionEdges,
+      unresolvedDispatcherTransitionEdges: normalization.dispatcherRecovery.unresolvedTransitionEdges,
+      recoveredDispatcherOperations: normalization.dispatcherRecovery.operationCount,
+      recoveredDispatcherStateRails: normalization.dispatcherRecovery.stateRailCount,
+      recoveredDispatcherTransitionStores: normalization.dispatcherRecovery.transitionStoreCount,
+      relationalDispatcherRecoveries: normalization.dispatcherRecovery.relationalCount,
+      completeDispatcherRecoveries: normalization.dispatcherRecovery.completeCount,
+      partialDispatcherRecoveries: normalization.dispatcherRecovery.partialCount,
+      structuralOnlyDispatcherRecoveries: normalization.dispatcherRecovery.structuralOnlyCount,
+      staticDataDependencyEdges: normalization.staticDependencies.dataEdges,
+      staticControlDependencyEdges: normalization.staticDependencies.controlEdges,
+      tamperCriticalSymbols: normalization.staticDependencies.criticalSymbols,
+      tamperGuardedSymbols: normalization.staticDependencies.guardedSymbols,
+      tamperGuardSites: normalization.staticDependencies.guardSites,
+      tamperRedundantGuardedSymbols: normalization.staticDependencies.redundantlyGuardedSymbols,
+      tamperGuardCoverage: normalization.staticDependencies.guardCoverage,
       normalizedOpcodeKinds: normalization.opcodeCounts.size,
       normalizedOpcodeEntropy: normalizedEntropy(normalization.opcodeCounts),
       normalizedSignatureDiversity: distributionDiversity(normalization.signatureCounts),
@@ -256,7 +322,8 @@ function publicProfile(analysis) {
     retainedBroadcastPairRatio: rounded(analysis.profile.retainedBroadcastPairRatio),
     procedureTemplateDiversity: rounded(analysis.profile.procedureTemplateDiversity),
     componentTemplateDiversity: rounded(analysis.profile.componentTemplateDiversity),
-    obviousPruneRatio: rounded(analysis.profile.obviousPruneRatio)
+    obviousPruneRatio: rounded(analysis.profile.obviousPruneRatio),
+    tamperGuardCoverage: rounded(analysis.profile.tamperGuardCoverage)
   };
 }
 
@@ -273,11 +340,19 @@ function compareAnalysis(baseline, candidate, baselineIdentifiers) {
     baseline.normalization.chains,
     candidate.normalization.chains
   );
+  const devirtualizedChainRecovery = ngramRecovery(
+    baseline.normalization.devirtualizedChains,
+    candidate.normalization.devirtualizedChains
+  );
+  const devirtualizedChainRecoveryByWidth = ngramRecoveryByWidth(
+    baseline.normalization.devirtualizedChains,
+    candidate.normalization.devirtualizedChains
+  );
   const normalizedOpcodeRecovery = multisetRecall(
     baseline.normalization.opcodeCounts,
     candidate.normalization.opcodeCounts
   );
-  const normalizedRecovery = normalizedChainRecovery;
+  const normalizedRecovery = Math.max(normalizedChainRecovery, devirtualizedChainRecovery);
   const retainedComponentQuality = candidate.profile.retainedComponentQuality;
   const structuralQuality = mean([
     candidate.profile.normalizedOpcodeEntropy,
@@ -322,6 +397,8 @@ function compareAnalysis(baseline, candidate, baselineIdentifiers) {
     directChainRecoveryByWidth: roundWidthRecovery(directChainRecoveryByWidth),
     normalizedChainRecovery: rounded(normalizedChainRecovery),
     normalizedChainRecoveryByWidth: roundWidthRecovery(normalizedChainRecoveryByWidth),
+    devirtualizedChainRecovery: rounded(devirtualizedChainRecovery),
+    devirtualizedChainRecoveryByWidth: roundWidthRecovery(devirtualizedChainRecoveryByWidth),
     normalizedOpcodeRecovery: rounded(normalizedOpcodeRecovery),
     normalizedRecovery: rounded(normalizedRecovery),
     retainedComponentQuality: rounded(retainedComponentQuality),
@@ -366,6 +443,19 @@ function normalizeProject(project) {
     provenFalseControls += targetAnalysis.provenFalseControls;
   }
   addBroadcastEdges(project, nodes, reachability);
+  const procedureFlow = recoverProcedureFlow(
+    project,
+    nodes,
+    proceduresByTarget,
+    reachability.reachableByTarget
+  );
+  const dispatcherRecovery = recoverDispatcherMachines(
+    project,
+    proceduresByTarget,
+    reachability.reachableByTarget,
+    reachability.symbolDomains
+  );
+  const staticDependencies = measureStaticDependencies(project, proceduresByTarget);
   const graphMetrics = measureNormalizedGraph(nodes, reachability.activeRoots.filter(key => nodes.has(key)));
   const opcodeCounts = countValues([...nodes.values()].map(node => node.opcode));
   const signatures = new Set([...nodes.values()].map(node => node.signature));
@@ -383,12 +473,14 @@ function normalizeProject(project) {
     folded,
     recoveredConstantStrings,
     chains,
+    devirtualizedChains: [...chains, ...dispatcherRecovery.chains],
     components: graphMetrics.components.sort(compareComponent),
     neverSentBroadcastHats: reachability.neverSentBroadcastHats,
     inlinedProcedureCalls,
     provenFalseControls,
     constantDeclarations: reachability.constantValues.size,
     mutableDeclarations: reachability.unknownSymbols.size,
+    provenConstantListSlots: reachability.constantListSlots.size,
     opcodeCounts,
     signatures,
     signatureCounts,
@@ -401,7 +493,10 @@ function normalizeProject(project) {
     reachable: new Set(targetAnalyses.flatMap(analysis => [...analysis.reachable])),
     simpleProcedures: new Map(targetAnalyses.flatMap(analysis => [...analysis.simpleProcedures])),
     broadcastMetrics,
-    procedureTemplates
+    procedureTemplates,
+    procedureFlow,
+    dispatcherRecovery,
+    staticDependencies
   };
 }
 
@@ -482,6 +577,952 @@ function normalizeTarget(project, target, targetIndex, procedures, simpleProcedu
   };
 }
 
+function recoverProcedureFlow(project, nodes, proceduresByTarget, reachableByTarget) {
+  const callEdges = new Set();
+  const returnEdges = new Set();
+  for (let targetIndex = 0; targetIndex < project.targets.length; targetIndex += 1) {
+    const target = project.targets[targetIndex];
+    const reachable = reachableByTarget[targetIndex] ?? new Set();
+    const procedures = proceduresByTarget[targetIndex] ?? new Map();
+    for (const id of [...reachable].sort(compareUtf8)) {
+      const block = target.blocks[id];
+      if (!isBlock(block) || block.opcode !== 'procedures_call') continue;
+      const procedure = procedures.get(procedureCode(block));
+      const callNode = nodes.get(blockKey(targetIndex, id));
+      if (!procedure || !callNode) continue;
+      const bodyNode = firstNormalizedStackNode(target, targetIndex, procedure.bodyId, nodes);
+      if (!bodyNode || !callNode.edges.includes(bodyNode.id)) continue;
+      callEdges.add(`${callNode.id}->${bodyNode.id}`);
+      if (typeof block.next !== 'string') continue;
+      const successor = firstNormalizedStackNode(target, targetIndex, block.next, nodes);
+      if (!successor) continue;
+      const exit = lastNormalizedMainStackNode(target, targetIndex, procedure.bodyId, nodes);
+      if (!exit || exit.edges.includes(successor.id)) continue;
+      exit.edges.push(successor.id);
+      exit.edges.sort(compareUtf8);
+      returnEdges.add(`${exit.id}->${successor.id}`);
+    }
+  }
+  return {callEdges: callEdges.size, returnEdges: returnEdges.size};
+}
+
+function firstNormalizedStackNode(target, targetIndex, startId, nodes) {
+  const visited = new Set();
+  let id = startId;
+  while (typeof id === 'string' && !visited.has(id)) {
+    visited.add(id);
+    const node = nodes.get(blockKey(targetIndex, id));
+    if (node) return node;
+    const block = target.blocks[id];
+    if (!isBlock(block)) return undefined;
+    id = block.next;
+  }
+  return undefined;
+}
+
+function lastNormalizedMainStackNode(target, targetIndex, startId, nodes) {
+  const visited = new Set();
+  let id = startId;
+  let last;
+  while (typeof id === 'string' && !visited.has(id)) {
+    visited.add(id);
+    const node = nodes.get(blockKey(targetIndex, id));
+    if (node) last = node;
+    const block = target.blocks[id];
+    if (!isBlock(block)) break;
+    id = block.next;
+  }
+  return last;
+}
+
+function recoverDispatcherMachines(project, proceduresByTarget, reachableByTarget, symbolDomains) {
+  const machines = [];
+  for (let targetIndex = 0; targetIndex < project.targets.length; targetIndex += 1) {
+    const target = project.targets[targetIndex];
+    const procedures = proceduresByTarget[targetIndex] ?? new Map();
+    const reachable = reachableByTarget[targetIndex] ?? new Set();
+    const orderedProcedures = [...procedures.entries()].sort(([left], [right]) => compareUtf8(left, right));
+    for (const [dispatcherCode, procedure] of orderedProcedures) {
+      if (!reachable.has(procedure.bodyId)) continue;
+      const parsedRoutes = collectDispatcherRoutes(
+        project,
+        target,
+        targetIndex,
+        procedure.bodyId,
+        symbolDomains
+      );
+      if (!parsedRoutes || parsedRoutes.routes.length < 4) continue;
+      const handlerRoots = new Map();
+      const routesByProcedure = new Map();
+      for (const route of parsedRoutes.routes) {
+        const routes = routesByProcedure.get(route.procedureCode) ?? [];
+        routes.push(route);
+        routesByProcedure.set(route.procedureCode, routes);
+      }
+      for (const [procedureCode, routes] of [...routesByProcedure].sort(([left], [right]) => compareUtf8(left, right))) {
+        const handlerProcedure = procedures.get(procedureCode);
+        if (!handlerProcedure) continue;
+        for (const [pair, bodyId] of recoverDispatcherHandlerRoots(
+          project,
+          target,
+          targetIndex,
+          handlerProcedure.bodyId,
+          routes,
+          parsedRoutes,
+          symbolDomains
+        )) handlerRoots.set(pair, bodyId);
+      }
+      const handlers = [];
+      for (const route of parsedRoutes.routes) {
+        const handlerProcedure = procedures.get(route.procedureCode);
+        if (!handlerProcedure || route.procedureCode === dispatcherCode) continue;
+        const handlerRoot = handlerRoots.get(route.pair);
+        if (typeof handlerRoot !== 'string') continue;
+        const handler = recoverDispatcherHandler(
+          project,
+          target,
+          targetIndex,
+          handlerRoot,
+          dispatcherCode,
+          parsedRoutes,
+          symbolDomains
+        );
+        if (handler) handlers.push({...handler, entryPair: route.pair, procedureCode: route.procedureCode});
+      }
+      if (handlers.length < 4) continue;
+      const recovered = parsedRoutes.relational
+        ? recoverRelationalDispatcher(
+            project,
+            target,
+            targetIndex,
+            dispatcherCode,
+            parsedRoutes,
+            handlers,
+            procedures,
+            symbolDomains
+          )
+        : recoverDirectDispatcher(
+            project,
+            target,
+            targetIndex,
+            parsedRoutes,
+            handlers,
+            procedures,
+            dispatcherCode
+          );
+      machines.push({
+        targetIndex,
+        routeCount: parsedRoutes.routes.length,
+        transitionCount: handlers.length,
+        recoveredTransitionEdges: recovered.recoveredTransitionEdges,
+        unresolvedTransitionEdges: recovered.unresolvedTransitionEdges,
+        stateRailCount: parsedRoutes.rails.length,
+        transitionStoreCount: new Set(handlers.flatMap(handler => handler.transitionStores)).size,
+        relational: parsedRoutes.relational,
+        recoveryStatus: recovered.recoveryStatus,
+        chains: recovered.chains
+      });
+    }
+  }
+  machines.sort((left, right) => (
+    left.targetIndex - right.targetIndex || compareUtf8(JSON.stringify(left.chains), JSON.stringify(right.chains))
+  ));
+  const chains = machines.flatMap(machine => machine.chains);
+  return {
+    machines,
+    chains,
+    routeCount: machines.reduce((sum, machine) => sum + machine.routeCount, 0),
+    transitionCount: machines.reduce((sum, machine) => sum + machine.transitionCount, 0),
+    recoveredTransitionEdges: machines.reduce((sum, machine) => sum + machine.recoveredTransitionEdges, 0),
+    unresolvedTransitionEdges: machines.reduce((sum, machine) => sum + machine.unresolvedTransitionEdges, 0),
+    operationCount: chains.reduce((sum, chain) => sum + chain.length, 0),
+    stateRailCount: machines.reduce((sum, machine) => sum + machine.stateRailCount, 0),
+    transitionStoreCount: machines.reduce((sum, machine) => sum + machine.transitionStoreCount, 0),
+    relationalCount: machines.filter(machine => machine.relational).length,
+    completeCount: machines.filter(machine => machine.recoveryStatus === 'complete').length,
+    partialCount: machines.filter(machine => machine.recoveryStatus === 'partial').length,
+    structuralOnlyCount: machines.filter(machine => machine.recoveryStatus === 'structural-only').length
+  };
+}
+
+function collectDispatcherRoutes(project, target, targetIndex, bodyId, symbolDomains) {
+  const routes = [];
+  const visited = new Set();
+  let id = bodyId;
+  while (typeof id === 'string' && !visited.has(id)) {
+    visited.add(id);
+    const branch = target.blocks[id];
+    if (!isBlock(branch) || (branch.opcode !== 'control_if' && branch.opcode !== 'control_if_else')) break;
+    const conditionId = activeInputSlots(branch.inputs?.CONDITION)[0];
+    const condition = typeof conditionId === 'string' ? target.blocks[conditionId] : undefined;
+    const parsed = isBlock(condition)
+      ? parseDispatcherCondition(project, target, targetIndex, condition, symbolDomains)
+      : undefined;
+    const callId = activeInputSlots(branch.inputs?.SUBSTACK)[0];
+    const call = typeof callId === 'string' ? target.blocks[callId] : undefined;
+    if (!parsed || !isBlock(call) || call.opcode !== 'procedures_call') return undefined;
+    routes.push({...parsed, procedureCode: procedureCode(call)});
+    const next = branch.opcode === 'control_if_else'
+      ? activeInputSlots(branch.inputs?.SUBSTACK2)[0]
+      : branch.next;
+    id = typeof next === 'string' ? next : null;
+  }
+  if (routes.length < 2) return undefined;
+  const dataRails = uniqueSorted(routes.flatMap(route => [...route.expectations.keys()]));
+  const keyRails = uniqueSorted(routes.flatMap(route => [...route.expectations.values()]
+    .flatMap(expectation => expectation.kind === 'keyed' ? [expectation.keySymbol] : [])));
+  const relational = keyRails.length > 0;
+  const rails = uniqueSorted([...dataRails, ...keyRails]);
+  const expectedShape = relational
+    ? dataRails.length === 2 && keyRails.length === 1 && rails.length === 3
+    : dataRails.length >= 1 && dataRails.length <= 2 && keyRails.length === 0;
+  if (!expectedShape || routes.some(route => route.expectations.size !== dataRails.length)) {
+    return undefined;
+  }
+  const canonicalRoutes = [];
+  for (const route of routes) {
+    if (dataRails.some(rail => !route.expectations.has(rail))) return undefined;
+    const routeRelations = [...route.expectations.values()];
+    if (relational && routeRelations.some(relation => (
+      relation.kind !== 'keyed' || relation.keySymbol !== keyRails[0]
+    ))) return undefined;
+    if (!relational && routeRelations.some(relation => relation.kind !== 'constant')) return undefined;
+    canonicalRoutes.push({...route, pair: dispatcherRouteKey(dataRails, route.expectations)});
+  }
+  return {rails, dataRails, keyRails, relational, routes: canonicalRoutes};
+}
+
+function recoverDispatcherHandlerRoots(
+  project,
+  target,
+  targetIndex,
+  bodyId,
+  routes,
+  dispatcher,
+  symbolDomains
+) {
+  if (routes.length === 1) return new Map([[routes[0].pair, bodyId]]);
+  if (!dispatcher.relational) return new Map();
+  const guardedRoots = new Map();
+  const visited = new Set();
+  let id = bodyId;
+  while (typeof id === 'string' && !visited.has(id)) {
+    visited.add(id);
+    const branch = target.blocks[id];
+    if (!isBlock(branch) || branch.opcode !== 'control_if_else') break;
+    const conditionId = activeInputSlots(branch.inputs?.CONDITION)[0];
+    const condition = typeof conditionId === 'string' ? target.blocks[conditionId] : undefined;
+    const guard = isBlock(condition)
+      ? parseHandlerSelectionGuard(project, target, targetIndex, condition, dispatcher, symbolDomains)
+      : undefined;
+    const root = activeInputSlots(branch.inputs?.SUBSTACK)[0];
+    const alternate = activeInputSlots(branch.inputs?.SUBSTACK2)[0];
+    if (guard === undefined || typeof root !== 'string' || typeof alternate !== 'string') return new Map();
+    const key = scratchEqualityKey(guard);
+    if (guardedRoots.has(key)) return new Map();
+    guardedRoots.set(key, root);
+    id = alternate;
+  }
+  if (typeof id !== 'string' || guardedRoots.size !== routes.length - 1) return new Map();
+  const roots = new Map();
+  const unmatched = [];
+  for (const route of routes) {
+    const invariant = keyedRouteInvariant(route, dispatcher);
+    const root = invariant === undefined ? undefined : guardedRoots.get(scratchEqualityKey(invariant));
+    if (typeof root === 'string') roots.set(route.pair, root);
+    else unmatched.push(route);
+  }
+  if (roots.size !== routes.length - 1 || unmatched.length !== 1) return new Map();
+  roots.set(unmatched[0].pair, id);
+  return roots;
+}
+
+function parseHandlerSelectionGuard(project, target, targetIndex, condition, dispatcher, symbolDomains) {
+  if (condition.opcode !== 'operator_equals') return undefined;
+  const operands = [
+    activeInputSlots(condition.inputs?.OPERAND1)[0],
+    activeInputSlots(condition.inputs?.OPERAND2)[0]
+  ];
+  for (const [sumIndex, valueIndex] of [[0, 1], [1, 0]]) {
+    const sumId = operands[sumIndex];
+    const sum = typeof sumId === 'string' ? target.blocks[sumId] : undefined;
+    if (!isBlock(sum) || sum.opcode !== 'operator_add') continue;
+    const symbols = ['NUM1', 'NUM2'].flatMap(name => {
+      const reporterId = activeInputSlots(sum.inputs?.[name])[0];
+      const reporter = typeof reporterId === 'string' ? target.blocks[reporterId] : undefined;
+      return isBlock(reporter) && reporter.opcode === 'data_variable'
+        ? fieldSymbolKeys(project, targetIndex, 'variable', reporter.fields?.VARIABLE)
+        : [];
+    });
+    if (symbols.length !== 2
+      || new Set(symbols).size !== dispatcher.dataRails.length
+      || dispatcher.dataRails.some(rail => !symbols.includes(rail))) continue;
+    const expected = evaluateInput(project, targetIndex, operands[valueIndex], symbolDomains, new Set());
+    if (expected.known && Number.isFinite(scratchToNumber(expected.value))) return expected.value;
+  }
+  return undefined;
+}
+
+function keyedRouteInvariant(route, dispatcher) {
+  const expectations = dispatcher.dataRails.map(rail => route.expectations.get(rail));
+  if (expectations.some(expectation => expectation?.kind !== 'keyed')) return undefined;
+  const operations = new Set(expectations.map(expectation => expectation.operation));
+  if (!operations.has('add') || !operations.has('subtract') || operations.size !== 2) return undefined;
+  const values = expectations.map(expectation => scratchToNumber(expectation.code));
+  return values.every(Number.isFinite) ? values.reduce((sum, value) => sum + value, 0) : undefined;
+}
+
+function parseDispatcherCondition(project, target, targetIndex, condition, symbolDomains) {
+  const expectations = new Map();
+  const equalities = condition.opcode === 'operator_and'
+    ? ['OPERAND1', 'OPERAND2'].map(name => {
+        const id = activeInputSlots(condition.inputs?.[name])[0];
+        return typeof id === 'string' ? target.blocks[id] : undefined;
+      })
+    : condition.opcode === 'operator_equals' ? [condition] : [];
+  for (const equals of equalities) {
+    if (!isBlock(equals) || equals.opcode !== 'operator_equals') return undefined;
+    const parsed = parseVariableEquality(project, target, targetIndex, equals, symbolDomains);
+    if (!parsed || expectations.has(parsed.symbol)) return undefined;
+    expectations.set(parsed.symbol, parsed.expected);
+  }
+  return {expectations};
+}
+
+function parseVariableEquality(project, target, targetIndex, equals, symbolDomains) {
+  const operands = [
+    activeInputSlots(equals.inputs?.OPERAND1)[0],
+    activeInputSlots(equals.inputs?.OPERAND2)[0]
+  ];
+  for (const [reporterIndex, valueIndex] of [[0, 1], [1, 0]]) {
+    const reporterId = operands[reporterIndex];
+    const reporter = typeof reporterId === 'string' ? target.blocks[reporterId] : undefined;
+    if (!isBlock(reporter) || reporter.opcode !== 'data_variable') continue;
+    const symbols = fieldSymbolKeys(project, targetIndex, 'variable', reporter.fields?.VARIABLE);
+    const expectation = parseDispatcherExpectation(
+      project,
+      target,
+      targetIndex,
+      operands[valueIndex],
+      symbolDomains
+    );
+    if (symbols.length === 1 && expectation) return {symbol: symbols[0], expected: expectation};
+  }
+  return undefined;
+}
+
+function parseDispatcherExpectation(project, target, targetIndex, value, symbolDomains) {
+  const expression = typeof value === 'string' ? target.blocks[value] : undefined;
+  if (isBlock(expression) && (expression.opcode === 'operator_add' || expression.opcode === 'operator_subtract')) {
+    const left = activeInputSlots(expression.inputs?.NUM1)[0];
+    const right = activeInputSlots(expression.inputs?.NUM2)[0];
+    const candidates = expression.opcode === 'operator_add'
+      ? [[left, right], [right, left]]
+      : [[right, left]];
+    for (const [keyValue, codeValue] of candidates) {
+      const keyReporter = typeof keyValue === 'string' ? target.blocks[keyValue] : undefined;
+      if (!isBlock(keyReporter) || keyReporter.opcode !== 'data_variable') continue;
+      const keySymbols = fieldSymbolKeys(project, targetIndex, 'variable', keyReporter.fields?.VARIABLE);
+      const code = evaluateInput(project, targetIndex, codeValue, symbolDomains, new Set());
+      if (keySymbols.length === 1 && code.known) {
+        return {
+          kind: 'keyed',
+          keySymbol: keySymbols[0],
+          operation: expression.opcode === 'operator_add' ? 'add' : 'subtract',
+          code: code.value
+        };
+      }
+    }
+  }
+  const constant = evaluateInput(project, targetIndex, value, symbolDomains, new Set());
+  return constant.known ? {kind: 'constant', value: constant.value} : undefined;
+}
+
+function recoverDispatcherHandler(
+  project,
+  target,
+  targetIndex,
+  bodyId,
+  dispatcherCode,
+  dispatcher,
+  symbolDomains
+) {
+  const ids = directStackIds(target, bodyId);
+  const transitions = new Map();
+  const transitionStores = new Set();
+  const writtenDataRails = new Set();
+  let wroteKeyRail = false;
+  let keyDelta;
+  const operations = [];
+  for (const id of ids) {
+    const block = target.blocks[id];
+    if (!isBlock(block)) continue;
+    if (block.opcode === 'data_setvariableto') {
+      const symbols = fieldSymbolKeys(project, targetIndex, 'variable', block.fields?.VARIABLE);
+      const rail = symbols.length === 1 && dispatcher.dataRails.includes(symbols[0]) ? symbols[0] : undefined;
+      if (rail !== undefined) {
+        writtenDataRails.add(rail);
+        for (const store of collectTransitionStores(project, target, targetIndex, block.inputs?.VALUE)) {
+          transitionStores.add(store);
+        }
+        const transition = recoverTransitionValue(
+          project,
+          target,
+          targetIndex,
+          block.inputs?.VALUE,
+          symbolDomains
+        );
+        if (transition) transitions.set(rail, transition);
+        continue;
+      }
+    }
+    if (block.opcode === 'data_changevariableby' && dispatcher.relational) {
+      const symbols = fieldSymbolKeys(project, targetIndex, 'variable', block.fields?.VARIABLE);
+      const rail = symbols.length === 1 && dispatcher.keyRails.includes(symbols[0]) ? symbols[0] : undefined;
+      if (rail !== undefined) {
+        wroteKeyRail = true;
+        for (const store of collectTransitionStores(project, target, targetIndex, block.inputs?.VALUE)) {
+          transitionStores.add(store);
+        }
+        const transition = recoverTransitionValue(
+          project,
+          target,
+          targetIndex,
+          block.inputs?.VALUE,
+          symbolDomains
+        );
+        if (transition) keyDelta = {...transition, rail};
+        continue;
+      }
+    }
+    if (block.opcode === 'procedures_call' && procedureCode(block) === dispatcherCode) continue;
+    operations.push(block.opcode);
+  }
+  if (operations.length === 0 || dispatcher.dataRails.some(rail => !writtenDataRails.has(rail))) return undefined;
+  if (dispatcher.relational && !wroteKeyRail) return undefined;
+  return {
+    transitionPair: dispatcher.relational || dispatcher.dataRails.some(rail => !transitions.has(rail))
+      ? undefined
+      : dispatcherRouteKey(
+          dispatcher.dataRails,
+          new Map([...transitions].map(([rail, transition]) => [rail, {
+            kind: 'constant',
+            value: transition.value
+          }]))
+        ),
+    transitionStores: [...transitionStores].sort(compareUtf8),
+    transitions,
+    keyDelta,
+    operations
+  };
+}
+
+function collectTransitionStores(project, target, targetIndex, input, visiting = new Set()) {
+  const stores = new Set();
+  for (const slot of activeInputSlots(input)) {
+    if (typeof slot !== 'string' || visiting.has(slot)) continue;
+    const reporter = target.blocks[slot];
+    if (!isBlock(reporter)) continue;
+    visiting.add(slot);
+    if (reporter.opcode === 'data_itemoflist') {
+      for (const store of fieldSymbolKeys(project, targetIndex, 'list', reporter.fields?.LIST)) {
+        stores.add(store);
+      }
+    }
+    for (const nested of Object.values(reporter.inputs ?? {})) {
+      for (const store of collectTransitionStores(project, target, targetIndex, nested, visiting)) {
+        stores.add(store);
+      }
+    }
+    visiting.delete(slot);
+  }
+  return [...stores].sort(compareUtf8);
+}
+
+function recoverTransitionValue(project, target, targetIndex, input, symbolDomains) {
+  const reporterId = activeInputSlots(input)[0];
+  const reporter = typeof reporterId === 'string' ? target.blocks[reporterId] : undefined;
+  if (!isBlock(reporter) || reporter.opcode !== 'data_itemoflist') return undefined;
+  const stores = fieldSymbolKeys(project, targetIndex, 'list', reporter.fields?.LIST);
+  const store = stores.length === 1 ? stores[0] : undefined;
+  const index = evaluateInput(
+    project,
+    targetIndex,
+    activeInputSlots(reporter.inputs?.INDEX)[0],
+    symbolDomains,
+    new Set()
+  );
+  const slot = index.known ? exactStaticListSlot(index.value) : undefined;
+  if (!store || slot === undefined) return undefined;
+  const domain = symbolDomains.get(listSlotKey(store, slot));
+  const value = domain === undefined ? {known: false} : singleExactValue(domain);
+  if (value.known) return {store, value: value.value, source: 'domain'};
+  const declarationValue = declaredListSlotValue(project, store, slot);
+  return declarationValue.known
+    ? {store, value: declarationValue.value, source: 'declaration'}
+    : undefined;
+}
+
+function recoverDirectDispatcher(project, target, targetIndex, dispatcher, handlers, procedures, dispatcherCode) {
+  const routeByPair = new Map(handlers.map(handler => [handler.entryPair, handler]));
+  const successors = new Map();
+  for (const handler of handlers) {
+    const successor = routeByPair.get(handler.transitionPair);
+    if (successor) successors.set(handler.entryPair, successor.entryPair);
+  }
+  const ordered = recoverOrderedDispatcherChains(handlers, successors);
+  const stable = dispatcherStoresAreStable(
+    project,
+    target,
+    targetIndex,
+    dispatcher,
+    handlers,
+    procedures,
+    dispatcherCode
+  );
+  const complete = ordered.complete && stable;
+  return dispatcherRecoveryResult(handlers, successors, ordered, complete);
+}
+
+function recoverRelationalDispatcher(
+  project,
+  target,
+  targetIndex,
+  dispatcherCode,
+  dispatcher,
+  handlers,
+  procedures,
+  symbolDomains
+) {
+  const routeByPair = new Map(handlers.map(handler => [handler.entryPair, handler]));
+  const successors = new Map();
+  const nextKeys = new Map();
+  for (const handler of handlers) {
+    const matches = dispatcher.routes.flatMap(route => {
+      const match = matchRelationalRoute(dispatcher, handler.transitions, route);
+      return match ? [{...match, pair: route.pair}] : [];
+    });
+    if (matches.length !== 1) continue;
+    const match = matches[0];
+    if (!match || !routeByPair.has(match.pair)) continue;
+    successors.set(handler.entryPair, match.pair);
+    nextKeys.set(handler.entryPair, match.key);
+  }
+  const ordered = recoverOrderedDispatcherChains(handlers, successors);
+  const stable = dispatcherStoresAreStable(
+    project,
+    target,
+    targetIndex,
+    dispatcher,
+    handlers,
+    procedures,
+    dispatcherCode
+  );
+  const entry = recoverDispatcherEntry(
+    project,
+    target,
+    targetIndex,
+    dispatcherCode,
+    dispatcher,
+    procedures,
+    symbolDomains
+  );
+  const relationallyConsistent = validateRelationalPath(
+    handlers,
+    successors,
+    nextKeys,
+    ordered,
+    entry
+  );
+  const complete = ordered.complete && stable && relationallyConsistent;
+  return dispatcherRecoveryResult(handlers, successors, ordered, complete);
+}
+
+function matchRelationalRoute(dispatcher, transitions, route) {
+  let key;
+  for (const rail of dispatcher.dataRails) {
+    const relation = route.expectations.get(rail);
+    const transition = transitions.get(rail);
+    if (!relation || relation.kind !== 'keyed' || !transition) return undefined;
+    const cipher = scratchToNumber(transition.value);
+    const code = scratchToNumber(relation.code);
+    if (!Number.isFinite(cipher) || !Number.isFinite(code)) return undefined;
+    const candidate = relation.operation === 'add' ? cipher - code : code - cipher;
+    if (key !== undefined && candidate !== key) return undefined;
+    key = candidate;
+  }
+  return key === undefined ? undefined : {key};
+}
+
+function recoverDispatcherEntry(
+  project,
+  target,
+  targetIndex,
+  dispatcherCode,
+  dispatcher,
+  procedures,
+  symbolDomains
+) {
+  const owned = procedureOwnedBlocks(target, procedures);
+  const calls = Object.entries(target.blocks).filter(([id, block]) => (
+    !owned.has(id)
+    && isBlock(block)
+    && block.opcode === 'procedures_call'
+    && procedureCode(block) === dispatcherCode
+  ));
+  const candidates = [];
+  for (const [callId] of calls) {
+    const component = structuralComponent(target, callId);
+    const transitions = new Map();
+    let keyValue;
+    for (const id of component) {
+      const block = target.blocks[id];
+      if (!isBlock(block) || block.opcode !== 'data_setvariableto') continue;
+      const symbols = fieldSymbolKeys(project, targetIndex, 'variable', block.fields?.VARIABLE);
+      if (symbols.length !== 1 || !dispatcher.rails.includes(symbols[0])) continue;
+      const transition = recoverTransitionValue(project, target, targetIndex, block.inputs?.VALUE, symbolDomains);
+      if (!transition) continue;
+      if (dispatcher.keyRails.includes(symbols[0])) keyValue = transition.value;
+      else if (dispatcher.dataRails.includes(symbols[0])) transitions.set(symbols[0], transition);
+    }
+    if (transitions.size !== dispatcher.dataRails.length || keyValue === undefined) continue;
+    const matches = dispatcher.routes.flatMap(route => {
+      const match = matchRelationalRoute(dispatcher, transitions, route);
+      return match && match.key === scratchToNumber(keyValue) ? [{pair: route.pair, key: match.key}] : [];
+    });
+    if (matches.length === 1 && matches[0]) candidates.push(matches[0]);
+  }
+  const unique = new Map(candidates.map(candidate => [`${candidate.pair}\u0000${candidate.key}`, candidate]));
+  return unique.size === 1 ? [...unique.values()][0] : undefined;
+}
+
+function validateRelationalPath(handlers, successors, nextKeys, ordered, entry) {
+  if (!entry || !ordered.complete || ordered.paths.length !== 1) return false;
+  const path = ordered.paths[0];
+  if (!path || path[0] !== entry.pair) return false;
+  const byPair = new Map(handlers.map(handler => [handler.entryPair, handler]));
+  let currentKey = entry.key;
+  for (let index = 0; index < path.length; index += 1) {
+    const pair = path[index];
+    const handler = byPair.get(pair);
+    if (!handler?.keyDelta) return false;
+    const expectedNextKey = currentKey + scratchToNumber(handler.keyDelta.value);
+    const successor = successors.get(pair);
+    if (successor === undefined) return index === path.length - 1;
+    const recoveredNextKey = nextKeys.get(pair);
+    if (recoveredNextKey === undefined || recoveredNextKey !== expectedNextKey) return false;
+    currentKey = recoveredNextKey;
+  }
+  return false;
+}
+
+function dispatcherStoresAreStable(
+  project,
+  target,
+  targetIndex,
+  dispatcher,
+  handlers,
+  procedures,
+  dispatcherCode
+) {
+  const stores = new Set(handlers.flatMap(handler => handler.transitionStores));
+  const needsDeclarationProof = handlers.some(handler => (
+    [...handler.transitions.values(), handler.keyDelta].some(transition => transition?.source === 'declaration')
+  ));
+  if (!needsDeclarationProof) return true;
+  const owners = procedureOwnedBlocks(target, procedures);
+  const handlerCodes = new Set(handlers.map(handler => handler.procedureCode));
+  const routeCodes = new Set(dispatcher.routes.map(route => route.procedureCode));
+  for (const [id, block] of Object.entries(target.blocks)) {
+    if (!isBlock(block) || ![
+      'data_addtolist',
+      'data_deletealloflist',
+      'data_deleteoflist',
+      'data_insertatlist',
+      'data_replaceitemoflist'
+    ].includes(block.opcode)) continue;
+    const blockStores = fieldSymbolKeys(project, targetIndex, 'list', block.fields?.LIST);
+    if (!blockStores.some(store => stores.has(store))) continue;
+    const owner = owners.get(id);
+    if (!owner || handlerCodes.has(owner) || !routeCodes.has(owner)) return false;
+    for (const [callId, call] of Object.entries(target.blocks)) {
+      if (!isBlock(call) || call.opcode !== 'procedures_call' || procedureCode(call) !== owner) continue;
+      if (owners.get(callId) !== dispatcherCode) return false;
+    }
+  }
+  return true;
+}
+
+function dispatcherRecoveryResult(handlers, successors, ordered, complete) {
+  const recoveredTransitionEdges = successors.size;
+  const unresolvedTransitionEdges = Math.max(0, handlers.length - 1 - recoveredTransitionEdges);
+  const recoveryStatus = complete
+    ? 'complete'
+    : recoveredTransitionEdges > 0 ? 'partial' : 'structural-only';
+  return {
+    recoveredTransitionEdges,
+    unresolvedTransitionEdges,
+    recoveryStatus,
+    chains: recoveryStatus === 'structural-only' ? [] : ordered.chains
+  };
+}
+
+function recoverOrderedDispatcherChains(handlers, successors) {
+  const byPair = new Map(handlers.map(handler => [handler.entryPair, handler]));
+  const incoming = new Set(successors.values());
+  const starts = uniqueSorted(handlers.map(handler => handler.entryPair).filter(pair => !incoming.has(pair)));
+  const orderedStarts = [...starts, ...uniqueSorted(handlers.map(handler => handler.entryPair))];
+  const consumed = new Set();
+  const paths = [];
+  const chains = [];
+  for (const start of orderedStarts) {
+    if (consumed.has(start)) continue;
+    const chain = [];
+    const path = [];
+    const local = new Set();
+    let pair = start;
+    while (typeof pair === 'string' && !local.has(pair)) {
+      local.add(pair);
+      consumed.add(pair);
+      const handler = byPair.get(pair);
+      if (!handler) break;
+      path.push(pair);
+      chain.push(...handler.operations);
+      pair = successors.get(pair);
+    }
+    if (path.length > 0) paths.push(path);
+    if (path.length > 1 || handlers.length === 1) chains.push(chain);
+  }
+  return {
+    paths,
+    chains,
+    complete: paths.length === 1
+      && paths[0]?.length === handlers.length
+      && successors.size === Math.max(0, handlers.length - 1)
+  };
+}
+
+function procedureOwnedBlocks(target, procedures) {
+  const owners = new Map();
+  for (const [code, procedure] of procedures) {
+    const queue = [procedure.bodyId];
+    const visited = new Set();
+    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+      const id = queue[cursor];
+      if (id === undefined || visited.has(id)) continue;
+      const block = target.blocks[id];
+      if (!isBlock(block)) continue;
+      visited.add(id);
+      owners.set(id, code);
+      for (const edge of structuralBlockEdges(target, block)) if (!visited.has(edge)) queue.push(edge);
+    }
+  }
+  return owners;
+}
+
+function structuralComponent(target, seed) {
+  const adjacent = new Map(Object.keys(target.blocks).map(id => [id, new Set()]));
+  for (const [id, block] of Object.entries(target.blocks)) {
+    if (!isBlock(block)) continue;
+    for (const edge of structuralBlockEdges(target, block)) {
+      adjacent.get(id)?.add(edge);
+      adjacent.get(edge)?.add(id);
+    }
+  }
+  const component = new Set();
+  const queue = [seed];
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const id = queue[cursor];
+    if (id === undefined || component.has(id)) continue;
+    component.add(id);
+    for (const edge of adjacent.get(id) ?? []) if (!component.has(edge)) queue.push(edge);
+  }
+  return component;
+}
+
+function dispatcherRouteKey(rails, expectations) {
+  return rails.map(rail => {
+    const expectation = expectations.get(rail);
+    if (expectation?.kind === 'keyed') {
+      return `${rail}=${expectation.operation}:${scratchEqualityKey(expectation.code)}@${expectation.keySymbol}`;
+    }
+    return `${rail}=constant:${scratchEqualityKey(expectation?.value)}`;
+  }).join('|');
+}
+
+function declaredListSlotValue(project, key, slot) {
+  const match = /^list:(\d+):([\s\S]+)$/u.exec(key);
+  if (!match) return {known: false};
+  const targetIndex = Number(match[1]);
+  const id = match[2];
+  const declaration = id === undefined ? undefined : project.targets[targetIndex]?.lists?.[id];
+  const values = Array.isArray(declaration) ? declaration[1] : undefined;
+  return Array.isArray(values) && slot >= 1 && slot <= values.length
+    ? {known: true, value: values[slot - 1]}
+    : {known: false};
+}
+
+function scratchEqualityKey(value) {
+  const numeric = scratchComparableNumber(value);
+  if (!Number.isNaN(numeric)) return `number:${Object.is(numeric, -0) ? 0 : numeric}`;
+  return `text:${String(value).toLowerCase()}`;
+}
+
+function directStackIds(target, bodyId) {
+  const ids = [];
+  const visited = new Set();
+  let id = bodyId;
+  while (typeof id === 'string' && !visited.has(id)) {
+    visited.add(id);
+    const block = target.blocks[id];
+    if (!isBlock(block)) break;
+    ids.push(id);
+    id = block.next;
+  }
+  return ids;
+}
+
+function measureStaticDependencies(project, proceduresByTarget) {
+  const dataEdges = new Set();
+  const controlEdges = new Set();
+  const criticalSymbols = new Set();
+  const guardCounts = new Map();
+  const guardSites = new Set();
+  for (let targetIndex = 0; targetIndex < project.targets.length; targetIndex += 1) {
+    const target = project.targets[targetIndex];
+    const procedures = proceduresByTarget[targetIndex] ?? new Map();
+    const reachable = structurallyReachableBlocks(target, procedures);
+    for (const id of [...reachable].sort(compareUtf8)) {
+      const block = target.blocks[id];
+      if (!isBlock(block)) continue;
+      const reads = collectBlockSymbolReads(project, target, targetIndex, block);
+      const writes = writerSymbolKeys(project, targetIndex, block);
+      for (const symbol of [...reads, ...writes]) criticalSymbols.add(symbol);
+      for (const source of reads) for (const destination of writes) dataEdges.add(`${source}->${destination}`);
+      if (!BRANCH_OPCODES.has(block.opcode)) continue;
+      const conditionSymbols = collectInputSymbolReads(
+        project,
+        target,
+        targetIndex,
+        activeInputSlots(block.inputs?.CONDITION)[0]
+      );
+      const effects = {writes: new Set(), stopsAll: false};
+      for (const name of ['SUBSTACK', 'SUBSTACK2']) {
+        const root = activeInputSlots(block.inputs?.[name])[0];
+        if (typeof root !== 'string') continue;
+        const nested = collectStackEffects(project, target, targetIndex, root, procedures);
+        for (const symbol of nested.writes) effects.writes.add(symbol);
+        effects.stopsAll ||= nested.stopsAll;
+      }
+      for (const source of conditionSymbols) {
+        for (const destination of effects.writes) controlEdges.add(`${source}->${destination}`);
+        if (effects.stopsAll) {
+          controlEdges.add(`${source}->effect:stop-all`);
+          guardCounts.set(source, (guardCounts.get(source) ?? 0) + 1);
+          guardSites.add(blockKey(targetIndex, id));
+        }
+      }
+    }
+  }
+  const guardedSymbols = new Set(guardCounts.keys());
+  const covered = [...criticalSymbols].filter(symbol => guardedSymbols.has(symbol)).length;
+  return {
+    dataEdges: dataEdges.size,
+    controlEdges: controlEdges.size,
+    criticalSymbols: criticalSymbols.size,
+    guardedSymbols: guardedSymbols.size,
+    guardSites: guardSites.size,
+    redundantlyGuardedSymbols: [...guardCounts.values()].filter(count => count > 1).length,
+    guardCoverage: ratio(covered, criticalSymbols.size)
+  };
+}
+
+function structurallyReachableBlocks(target, procedures) {
+  const reachable = new Set();
+  const queue = Object.entries(target.blocks)
+    .filter(([, block]) => isBlock(block) && block.topLevel && isRunnableHat(block.opcode))
+    .map(([id]) => id)
+    .sort(compareUtf8);
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const id = queue[cursor];
+    if (id === undefined || reachable.has(id)) continue;
+    const block = target.blocks[id];
+    if (!isBlock(block)) continue;
+    reachable.add(id);
+    for (const edge of structuralBlockEdges(target, block)) if (!reachable.has(edge)) queue.push(edge);
+    if (block.opcode === 'procedures_call') {
+      const procedure = procedures.get(procedureCode(block));
+      if (procedure && !reachable.has(procedure.bodyId)) queue.push(procedure.bodyId);
+    }
+  }
+  return reachable;
+}
+
+function collectStackEffects(project, target, targetIndex, rootId, procedures) {
+  const writes = new Set();
+  let stopsAll = false;
+  const visited = new Set();
+  const queue = [rootId];
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const id = queue[cursor];
+    if (id === undefined || visited.has(id)) continue;
+    const block = target.blocks[id];
+    if (!isBlock(block)) continue;
+    visited.add(id);
+    for (const symbol of writerSymbolKeys(project, targetIndex, block)) writes.add(symbol);
+    if (block.opcode === 'control_stop' && block.fields?.STOP_OPTION?.[0] === 'all') stopsAll = true;
+    for (const edge of structuralBlockEdges(target, block)) if (!visited.has(edge)) queue.push(edge);
+    if (block.opcode === 'procedures_call') {
+      const procedure = procedures.get(procedureCode(block));
+      if (procedure && !visited.has(procedure.bodyId)) queue.push(procedure.bodyId);
+    }
+  }
+  return {writes, stopsAll};
+}
+
+function collectBlockSymbolReads(project, target, targetIndex, block, visiting = new Set()) {
+  const reads = new Set();
+  if (block.opcode === 'data_variable') {
+    for (const symbol of fieldSymbolKeys(project, targetIndex, 'variable', block.fields?.VARIABLE)) reads.add(symbol);
+  }
+  if (LIST_INDIRECTION_OPCODES.has(block.opcode) || block.opcode === 'data_listcontents') {
+    for (const symbol of fieldSymbolKeys(project, targetIndex, 'list', block.fields?.LIST)) reads.add(symbol);
+  }
+  if (block.opcode === 'data_changevariableby') {
+    for (const symbol of fieldSymbolKeys(project, targetIndex, 'variable', block.fields?.VARIABLE)) reads.add(symbol);
+  }
+  for (const input of Object.values(block.inputs ?? {})) {
+    for (const slot of activeInputSlots(input)) {
+      for (const symbol of collectInputSymbolReads(project, target, targetIndex, slot, visiting)) reads.add(symbol);
+    }
+  }
+  return reads;
+}
+
+function collectInputSymbolReads(project, target, targetIndex, value, visiting = new Set()) {
+  const reads = new Set();
+  if (Array.isArray(value)) {
+    const kind = value[0] === 12 ? 'variable' : value[0] === 13 ? 'list' : undefined;
+    if (kind) {
+      for (const symbol of resolveSymbolKeys(project, targetIndex, kind, value[2], value[1])) reads.add(symbol);
+    }
+    return reads;
+  }
+  if (typeof value !== 'string' || visiting.has(value)) return reads;
+  const reporter = target.blocks[value];
+  if (!isBlock(reporter)) return reads;
+  visiting.add(value);
+  for (const symbol of collectBlockSymbolReads(project, target, targetIndex, reporter, visiting)) reads.add(symbol);
+  visiting.delete(value);
+  return reads;
+}
+
+function fieldSymbolKeys(project, targetIndex, kind, field) {
+  return Array.isArray(field)
+    ? resolveSymbolKeys(project, targetIndex, kind, field[1], field[0])
+    : [];
+}
+
 function collectProjectReachability(project, proceduresByTarget) {
   const declarationValues = collectDeclarationValues(project);
   const externallyMutable = collectExternallyMutableSymbols(project);
@@ -503,13 +1544,17 @@ function collectProjectReachability(project, proceduresByTarget) {
     }
     if (domainsEqual(nextDomains, symbolDomains)) {
       const constantValues = new Map();
+      const constantListSlots = new Map();
       const unknownSymbols = new Set();
       for (const [key, domain] of symbolDomains) {
         const exact = singleExactValue(domain);
-        if (exact.known) constantValues.set(key, exact.value);
+        if (key.startsWith('list-slot:')) {
+          if (exact.known) constantListSlots.set(key, exact.value);
+        } else if (exact.known) constantValues.set(key, exact.value);
         else unknownSymbols.add(key);
       }
       reachability.constantValues = constantValues;
+      reachability.constantListSlots = constantListSlots;
       reachability.unknownSymbols = unknownSymbols;
       reachability.symbolDomains = symbolDomains;
       return reachability;
@@ -593,6 +1638,7 @@ function traverseProject(project, proceduresByTarget, symbolDomains) {
     dynamicBroadcast,
     neverSentBroadcastHats,
     constantValues: new Map(),
+    constantListSlots: new Map(),
     unknownSymbols: new Set(),
     symbolDomains: new Map()
   };
@@ -661,7 +1707,11 @@ function collectDeclarationValues(project) {
     }
     for (const [id, declaration] of Object.entries(target.lists ?? {})) {
       if (Array.isArray(declaration) && Array.isArray(declaration[1])) {
-        values.set(symbolKey('list', targetIndex, id), declaration[1]);
+        const key = symbolKey('list', targetIndex, id);
+        values.set(key, declaration[1]);
+        for (const [index, value] of declaration[1].entries()) {
+          values.set(listSlotKey(key, index + 1), value);
+        }
       }
     }
   }
@@ -744,6 +1794,37 @@ function widenWrittenSymbols(project, targetIndex, block, currentDomains, nextDo
   }
   const previous = nextDomains.get(key) ?? unknownDomain();
   nextDomains.set(key, mergeDomains(previous, written));
+  if (!block.opcode.startsWith('data_') || !block.opcode.endsWith('list')) return;
+  widenWrittenListSlots(project, targetIndex, block, key, currentDomains, nextDomains);
+}
+
+function widenWrittenListSlots(project, targetIndex, block, key, currentDomains, nextDomains) {
+  if (block.opcode === 'data_addtolist') return;
+  const slotKeys = [...nextDomains.keys()].filter(candidate => candidate.startsWith(`${listSlotKey(key, '')}`));
+  if (block.opcode === 'data_replaceitemoflist') {
+    const index = evaluateInput(
+      project,
+      targetIndex,
+      activeInputSlots(block.inputs?.INDEX)[0],
+      currentDomains,
+      new Set()
+    );
+    const slot = index.known ? exactStaticListSlot(index.value) : undefined;
+    const slotKey = slot === undefined ? undefined : listSlotKey(key, slot);
+    if (slotKey !== undefined && nextDomains.has(slotKey)) {
+      const item = evaluateInput(
+        project,
+        targetIndex,
+        activeInputSlots(block.inputs?.ITEM)[0],
+        currentDomains,
+        new Set()
+      );
+      const previous = nextDomains.get(slotKey) ?? unknownDomain();
+      nextDomains.set(slotKey, mergeDomains(previous, resultDomain(item)));
+      return;
+    }
+  }
+  for (const slotKey of slotKeys) nextDomains.set(slotKey, unknownDomain());
 }
 
 function exactDomain(value) {
@@ -836,6 +1917,10 @@ function resolveSymbolKeys(project, targetIndex, kind, id, name) {
 
 function symbolKey(kind, targetIndex, id) {
   return `${kind}:${targetIndex}:${id}`;
+}
+
+function listSlotKey(listKey, slot) {
+  return `list-slot:${listKey.slice('list:'.length)}:${slot}`;
 }
 
 function blockKey(targetIndex, id) {
@@ -1397,6 +2482,14 @@ function evaluateReporter(project, targetIndex, id, constantValues, visiting) {
     if (list.known && Array.isArray(list.value) && index.known) {
       const item = exactListItem(list.value, index.value);
       if (item.known) result = item;
+    } else if (index.known) {
+      result = constantListSlotValue(
+        project,
+        targetIndex,
+        block.fields?.LIST,
+        index.value,
+        constantValues
+      );
     }
   } else if (block.opcode === 'data_lengthoflist') {
     const list = constantFieldValue(project, targetIndex, 'list', block.fields?.LIST, constantValues);
@@ -1482,6 +2575,17 @@ function constantSymbolValue(project, targetIndex, kind, id, name, constantValue
   return exact.known ? exact : domainResult(domain);
 }
 
+function constantListSlotValue(project, targetIndex, field, index, constantValues) {
+  if (!Array.isArray(field)) return {known: false};
+  const keys = resolveSymbolKeys(project, targetIndex, 'list', field[1], field[0]);
+  const slot = exactStaticListSlot(index);
+  if (keys.length !== 1 || slot === undefined) return {known: false};
+  const domain = constantValues.get(listSlotKey(keys[0], slot));
+  if (domain === undefined) return {known: false};
+  const exact = singleExactValue(domain);
+  return exact.known ? exact : domainResult(domain);
+}
+
 function domainResult(domain) {
   return {known: false, domain};
 }
@@ -1531,6 +2635,12 @@ function exactListItem(list, index) {
   const numeric = Math.floor(scratchToNumber(index));
   if (numeric < 1 || numeric > list.length) return {known: true, value: ''};
   return {known: true, value: list[numeric - 1]};
+}
+
+function exactStaticListSlot(index) {
+  if (index === 'last' || index === 'random' || index === 'any' || index === 'all') return undefined;
+  const numeric = Math.floor(scratchToNumber(index));
+  return Number.isFinite(numeric) && numeric >= 1 ? numeric : undefined;
 }
 
 function obviousEqual(left, right) {

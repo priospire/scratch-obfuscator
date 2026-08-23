@@ -219,7 +219,7 @@ describe('aggressive transform coverage regressions', () => {
     validateProject(project);
   });
 
-  it('splits an exact 16-command run around one native separator and preserves execution', async () => {
+  it('splits an exact 16-command run around bounded native separators and preserves execution', async () => {
     const project = incrementProject(16);
     const sprite = project.targets.find(target => !target.isStage);
     if (!sprite) throw new Error('fixture Sprite is unavailable');
@@ -232,7 +232,10 @@ describe('aggressive transform coverage regressions', () => {
       resultStats
     );
 
-    expect(resultStats.virtualizedBlocks).toBe(15);
+    expect(resultStats.virtualizedBlocks).toBe(14);
+    const firstSeparator = requireBlock(sprite, 'increment-5');
+    expect(firstSeparator.opcode).toBe('data_changevariableby');
+    expect(firstSeparator.next).not.toBe('increment-6');
     const separator = requireBlock(sprite, 'increment-11');
     expect(separator.opcode).toBe('data_changevariableby');
     expect(separator.next).not.toBe('increment-12');
@@ -255,13 +258,13 @@ describe('aggressive transform coverage regressions', () => {
     stage.blocks['hat'] = block('event_whenflagclicked', 'change', null, true);
     stage.blocks['change'] = block(
       'data_changevariableby',
-      null,
+      'empty-if',
       'hat',
       false,
       {},
       {VARIABLE: ['local', 'local']}
     );
-    stage.blocks['empty-if'] = block('control_if', null, null, true);
+    stage.blocks['empty-if'] = block('control_if', null, 'change', false);
 
     applyAggressiveTransforms(
       project,

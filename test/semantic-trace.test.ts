@@ -96,10 +96,10 @@ describe('deterministic semantic trace', () => {
     expect(actual.at(-1)?.randomCalls).toBe(0);
   }, 60_000);
 
-  it('no-preserve remains deterministic and terminating for a race-sensitive project', async () => {
+  it('no-preserve conservatively falls back and remains deterministic for a race-sensitive project', async () => {
     const original = createRaceProject();
     const result = obfuscateProject(original, 'no-preserve', new Uint8Array(32).fill(0x3c));
-    expect(result.stats.virtualizedBlocks).toBeGreaterThan(0);
+    expect(result.stats.virtualizedBlocks).toBe(0);
     const originalTrace = await executeTrace(createFixtureArchive(original), 2);
     const first = await executeTrace(createFixtureArchive(result.project), 2);
     const second = await executeTrace(createFixtureArchive(result.project), 2);

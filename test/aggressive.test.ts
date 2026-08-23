@@ -82,44 +82,52 @@ describe('aggressive transforms', () => {
       const value = sprite?.blocks[id];
       expect(value && isScratchBlock(value) && value.next ? originalIds.has(value.next) : false).toBe(false);
     }
-    const encodedLabels = collectDispatcherTokens(project, '!');
-    const encodedTags = collectDispatcherTokens(project, '?');
-    expect(encodedLabels.size).toBeGreaterThan(resultStats.virtualizedBlocks);
-    expect(encodedTags.size).toBeGreaterThan(resultStats.virtualizedBlocks);
-    expect([...encodedLabels].every(label => /^![0-9._~-]{24}$/.test(label))).toBe(true);
-    expect([...encodedTags].every(tag => /^\?[0-9._~-]{24}$/.test(tag))).toBe(true);
-    expect([...encodedLabels].some(label => encodedTags.has(label))).toBe(false);
-    const transitionListEntries = Object.entries(sprite?.lists ?? {}).filter(([, declaration]) => (
-      Array.isArray(declaration[1])
-      && declaration[1].some(item => typeof item === 'string' && item.startsWith('r_'))
-    ));
-    expect(transitionListEntries).not.toHaveLength(0);
-    const transitionRecords = transitionListEntries.flatMap(([, declaration]) => (
-      parseTransitionRecords(declaration[1])
-    ));
-    expect(new Set(transitionRecords.map(record => record.width))).toEqual(new Set([1, 2, 3, 4]));
-    expect(transitionRecords.length).toBeGreaterThan(resultStats.virtualizedBlocks);
-    expect(transitionRecords.every(record => /^![0-9._~-]{24}$/.test(record.label))).toBe(true);
-    expect(transitionRecords.every(record => /^\?[0-9._~-]{24}$/.test(record.tag))).toBe(true);
-    expect(transitionRecords.every(record => Number.isNaN(Number(record.label)) && Number.isNaN(Number(record.tag)))).toBe(true);
-    expect(transitionRecords.every(record => !/[A-Za-z]/.test(record.label + record.tag))).toBe(true);
-    const transitionListIds = new Set(transitionListEntries.map(([id]) => id));
+    const dynamicReads = Object.values(sprite?.blocks ?? {}).flatMap(value => {
+      if (!isScratchBlock(value) || value.opcode !== 'data_itemoflist') return [];
+      const indexId = value.inputs['INDEX']?.[1];
+      const index = typeof indexId === 'string' ? sprite?.blocks[indexId] : undefined;
+      const listId = value.fields['LIST']?.[1];
+      const modulus = index && isScratchBlock(index) && index.opcode === 'operator_mod'
+        ? Number((index.inputs['NUM2']?.[1] as ScratchInput | undefined)?.[1])
+        : Number.NaN;
+      return typeof listId === 'string' && Number.isSafeInteger(modulus) ? [{listId, modulus}] : [];
+    });
+    const dispatcherStoreIds = new Set(dynamicReads.map(read => read.listId));
+    expect(dispatcherStoreIds.size).toBeGreaterThanOrEqual(3);
+    expect(new Set(dynamicReads.map(read => read.modulus))).toEqual(new Set([17, 19, 23]));
+    for (const storeId of dispatcherStoreIds) {
+      const values = sprite?.lists[storeId]?.[1];
+      expect(Array.isArray(values)).toBe(true);
+      expect(Array.isArray(values) ? values.some(value => typeof value === 'number') : false).toBe(true);
+      expect(Array.isArray(values) ? values.some(value => typeof value === 'string') : false).toBe(true);
+    }
     const indirectTransitions = Object.values(sprite?.blocks ?? {}).filter(value => {
       if (!isScratchBlock(value) || value.opcode !== 'data_setvariableto') return false;
       const reporterId = value.inputs['VALUE']?.[1];
       const reporter = typeof reporterId === 'string' ? sprite?.blocks[reporterId] : undefined;
       const listId = reporter && isScratchBlock(reporter) ? reporter.fields['LIST']?.[1] : undefined;
       return reporter && isScratchBlock(reporter) && reporter.opcode === 'data_itemoflist'
-        && typeof listId === 'string' && transitionListIds.has(listId);
+        && typeof listId === 'string' && dispatcherStoreIds.has(listId);
     });
     expect(indirectTransitions.length).toBeGreaterThan(resultStats.virtualizedBlocks);
+    const indirectKeyUpdates = Object.values(sprite?.blocks ?? {}).filter(value => {
+      if (!isScratchBlock(value) || value.opcode !== 'data_changevariableby') return false;
+      const reporterId = value.inputs['VALUE']?.[1];
+      const reporter = typeof reporterId === 'string' ? sprite?.blocks[reporterId] : undefined;
+      const listId = reporter && isScratchBlock(reporter) ? reporter.fields['LIST']?.[1] : undefined;
+      return reporter && isScratchBlock(reporter) && reporter.opcode === 'data_itemoflist'
+        && typeof listId === 'string' && dispatcherStoreIds.has(listId);
+    });
+    expect(indirectKeyUpdates.length).toBe(resultStats.virtualizedBlocks);
+    expect(countKeyedRouteExpressions(project, 'operator_add')).toBeGreaterThan(resultStats.virtualizedBlocks);
+    expect(countKeyedRouteExpressions(project, 'operator_subtract')).toBeGreaterThan(resultStats.virtualizedBlocks);
     expect(Object.values(sprite?.blocks ?? {}).some(value => isDualRail(sprite, value))).toBe(true);
     expect(Object.values(sprite?.blocks ?? {}).some(value => {
       if (!isScratchBlock(value) || value.opcode !== 'procedures_definition' || !value.next) return false;
       const body = sprite?.blocks[value.next];
       const listId = body && isScratchBlock(body) ? body.fields['LIST']?.[1] : undefined;
       return body && isScratchBlock(body) && body.opcode === 'data_deletealloflist'
-        && typeof listId === 'string' && transitionListIds.has(listId);
+        && typeof listId === 'string' && dispatcherStoreIds.has(listId);
     })).toBe(true);
     expect(hasFieldReference(project, 'original-variable-id')).toBe(false);
     expect(sprite?.variables['original-variable-id']).toBeUndefined();
@@ -478,7 +486,7 @@ describe('aggressive transforms', () => {
 
     applyAggressiveTransforms(project, 'no-preserve', generator(55), resultStats);
 
-    expect(resultStats.virtualizedBlocks).toBe(28);
+    expect(resultStats.virtualizedBlocks).toBe(20);
     expect(dispatcherRouteOpcodes(project).length).toBeGreaterThanOrEqual(31);
     expect(Object.values(sprite.variables).filter(tuple => typeof tuple[0] === 'string' && tuple[0].startsWith('\u2063')).length).toBeGreaterThanOrEqual(2);
     validateProject(project);
@@ -818,6 +826,74 @@ describe('aggressive transforms', () => {
     expect(opcodes(project).some(opcode => opcode === 'control_if' || opcode === 'control_if_else')).toBe(true);
     validateProject(project);
   });
+
+  it('permutes statically addressed fixed lists into one private heap and rejects dynamic indices', () => {
+    const project: ScratchProject = {
+      targets: [target(true, 'Stage'), target(false, 'Sprite1')],
+      monitors: [],
+      extensions: [],
+      meta: {semver: '3.0.0'}
+    };
+    const sprite = project.targets[1];
+    if (!sprite) throw new Error('fixture is missing its sprite');
+    sprite.lists['fixed-a'] = ['fixed a', ['a0', 'a1']];
+    sprite.lists['fixed-b'] = ['fixed b', [17, 'b1', 'b2']];
+    sprite.lists['dynamic'] = ['dynamic', ['keep']];
+    sprite.blocks['read-a'] = block(
+      'data_itemoflist',
+      null,
+      null,
+      true,
+      {INDEX: [1, [10, 'last']]},
+      {LIST: ['fixed a', 'fixed-a']}
+    );
+    sprite.blocks['replace-b'] = block(
+      'data_replaceitemoflist',
+      null,
+      null,
+      true,
+      {INDEX: [1, [4, '1']], ITEM: [1, [10, 'changed']]},
+      {LIST: ['fixed b', 'fixed-b']}
+    );
+    sprite.blocks['read-dynamic'] = block(
+      'data_itemoflist',
+      null,
+      null,
+      true,
+      {INDEX: [2, 'random-index']},
+      {LIST: ['dynamic', 'dynamic']}
+    );
+    sprite.blocks['random-index'] = block(
+      'operator_random',
+      null,
+      'read-dynamic',
+      false,
+      {FROM: [1, [4, '1']], TO: [1, [4, '1']]}
+    );
+    const resultStats = stats('lossy', project);
+
+    applyAggressiveTransforms(project, 'lossy', generator(93), resultStats);
+
+    expect(resultStats.listsVirtualized).toBe(2);
+    expect(sprite.lists['fixed-a']).toBeUndefined();
+    expect(sprite.lists['fixed-b']).toBeUndefined();
+    expect(sprite.lists['dynamic']).toEqual(['dynamic', ['keep']]);
+    const read = sprite.blocks['read-a'];
+    const replace = sprite.blocks['replace-b'];
+    if (!read || !isScratchBlock(read) || !replace || !isScratchBlock(replace)) {
+      throw new Error('fixed list blocks disappeared');
+    }
+    const heapId = read.fields['LIST']?.[1];
+    expect(replace.fields['LIST']?.[1]).toBe(heapId);
+    if (typeof heapId !== 'string') throw new Error('fixed list heap ID is missing');
+    const heap = sprite.lists[heapId]?.[1];
+    if (!Array.isArray(heap)) throw new Error('fixed list heap is missing');
+    const readIndex = Number((read.inputs['INDEX']?.[1] as ScratchInput | undefined)?.[1]);
+    const replaceIndex = Number((replace.inputs['INDEX']?.[1] as ScratchInput | undefined)?.[1]);
+    expect(heap[readIndex - 1]).toBe('a1');
+    expect(heap[replaceIndex - 1]).toBe(17);
+    validateProject(project);
+  });
 });
 
 function fixtureProject(): ScratchProject {
@@ -1008,46 +1084,20 @@ function hasFieldReference(project: ScratchProject, id: string): boolean {
   return false;
 }
 
-function collectDispatcherTokens(project: ScratchProject, prefix: '!' | '?'): Set<string> {
-  const tokens = new Set<string>();
+function countKeyedRouteExpressions(
+  project: ScratchProject,
+  opcode: 'operator_add' | 'operator_subtract'
+): number {
+  let count = 0;
   for (const targetValue of project.targets) {
     for (const value of Object.values(targetValue.blocks)) {
-      if (!isScratchBlock(value) || value.opcode !== 'operator_equals') continue;
-      const reporterId = value.inputs['OPERAND1']?.[1];
+      if (!isScratchBlock(value) || value.opcode !== opcode) continue;
+      const reporterId = value.inputs['NUM2']?.[1];
       const reporter = typeof reporterId === 'string' ? targetValue.blocks[reporterId] : undefined;
-      if (!reporter || !isScratchBlock(reporter) || reporter.opcode !== 'data_variable') continue;
-      const literal = value.inputs['OPERAND2']?.[1];
-      if (isPrimitive(literal) && literal[0] === 10 && typeof literal[1] === 'string' && literal[1].startsWith(prefix)) {
-        tokens.add(literal[1]);
-      }
+      if (reporter && isScratchBlock(reporter) && reporter.opcode === 'data_variable') count += 1;
     }
   }
-  return tokens;
-}
-
-interface DispatcherTransitionRecord {
-  readonly width: number;
-  readonly label: string;
-  readonly tag: string;
-}
-
-function parseTransitionRecords(value: unknown): DispatcherTransitionRecord[] {
-  if (!Array.isArray(value)) return [];
-  const entries = value as readonly unknown[];
-  const records: DispatcherTransitionRecord[] = [];
-  let cursor = 0;
-  while (cursor < entries.length) {
-    const marker: unknown = entries[cursor];
-    const width: unknown = entries[cursor + 1];
-    if (typeof marker !== 'string' || !marker.startsWith('r_') || typeof width !== 'number' || width < 1 || width > 4) return [];
-    const labelIndex = cursor + 2 + width;
-    const label: unknown = entries[labelIndex];
-    const tag: unknown = entries[labelIndex + 1];
-    if (typeof label !== 'string' || !label.startsWith('!') || typeof tag !== 'string' || !tag.startsWith('?')) return [];
-    records.push({width, label, tag});
-    cursor = labelIndex + 2;
-  }
-  return records;
+  return count;
 }
 
 function isDualRail(targetValue: ScratchTarget | undefined, value: ScratchBlockValue): boolean {

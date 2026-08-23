@@ -90,6 +90,7 @@ export interface ObfuscationStats {
   decoysAdded: number;
   virtualizedBlocks: number;
   variablesVirtualized?: number;
+  listsVirtualized?: number;
   constantsFolded?: number;
   inactiveFallbacksRemoved?: number;
   antiCheatDecoys?: number;
