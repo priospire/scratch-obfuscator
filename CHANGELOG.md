@@ -34,6 +34,7 @@
 - Fixed coverage instrumentation affecting VM scheduler-step assertions by freezing only its frame-budget clock.
 - Fixed the all-seed attacker coverage timeout by bounding each exact digest case independently.
 - Updated the exact release coverage snapshot after hardening tests.
+- Fixed hosted action runtime deprecations with current immutable Node 24 pins.
 - Removed unreachable legacy dispatcher and camouflage branches.
 - Updated ESLint to 10.9.1 and typescript-eslint to 8.68.0; retained compatible `@types/yauzl` 2.10.3.
 - Fixed deprecated dependency edges with reviewed local shims and maintained overrides.
