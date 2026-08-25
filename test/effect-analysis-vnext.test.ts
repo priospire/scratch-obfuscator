@@ -1,15 +1,35 @@
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
+import {isScratchBlock} from '../src/model/blocks.js';
 import {
   analyzeProjectEffects,
   certifyRegionEffects,
   certifyRegionsEffects,
   collectCertifiedNestedLinearRuns,
-  collectNestedLinearRuns
+  collectNestedLinearRuns,
+  isOfficialHatOpcode
 } from '../src/obfuscation/analysis.js';
 import type {ScratchBlock, ScratchInput, ScratchProject, ScratchTarget} from '../src/types.js';
+import {OFFICIAL_CORE_OPCODES, OFFICIAL_EXTENSION_OPCODES} from '../src/validation/extensions.js';
 
 describe('per-region effect analysis', () => {
+  it('classifies the complete official core and extension hat surface centrally', () => {
+    for (const opcode of OFFICIAL_CORE_OPCODES) {
+      const expected = opcode.startsWith('event_when') || opcode === 'control_start_as_clone';
+      expect(isOfficialHatOpcode(opcode), opcode).toBe(expected);
+    }
+    for (const opcodes of OFFICIAL_EXTENSION_OPCODES.values()) {
+      for (const opcode of opcodes) {
+        const separator = opcode.indexOf('_');
+        const expected = separator > 0 && opcode.slice(separator + 1).startsWith('when');
+        expect(isOfficialHatOpcode(opcode), opcode).toBe(expected);
+      }
+    }
+    expect(isOfficialHatOpcode('event_wheninvented')).toBe(false);
+    expect(isOfficialHatOpcode('custom_whenButtonPressed')).toBe(false);
+    expect(isOfficialHatOpcode('microbit_isButtonPressed')).toBe(false);
+  });
+
   it('discovers deterministic branch and procedure-body runs with exact entry connectors', () => {
     const project = baseProject();
     const stage = requireTarget(project, 0);
@@ -155,7 +175,7 @@ describe('per-region effect analysis', () => {
 
     const dynamic = certifyRegionEffects(project, {targetIndex: 1, blockIds: ['goto']}, 'no-preserve');
     expect(dynamic.effects.ownership.dynamicTargetRead).toBe(true);
-    expect(dynamic.reasons.map(reason => reason.code)).toEqual(['dynamic-target-owner', 'concurrent-target-owner']);
+    expect(dynamic.reasons.map(reason => reason.code)).toEqual(['dynamic-target-owner']);
     expect(dynamic.sameTargetConcurrentEntries.map(entry => entry.blockId)).toEqual(['first']);
 
     const lossyDynamic = certifyRegionEffects(project, {targetIndex: 1, blockIds: ['goto']}, 'lossy');
@@ -164,6 +184,299 @@ describe('per-region effect analysis', () => {
       'random-source',
       'dynamic-target-owner'
     ]);
+  });
+
+  it('uses synchronous hat ownership while distinguishing frame-moving parameter references and inherited warp', () => {
+    const direct = baseProject();
+    const directStage = requireTarget(direct, 0);
+    directStage.blocks = {
+      first: block('event_whenflagclicked', 'show', null, true),
+      show: block('looks_show', null, 'first'),
+      second: block('event_whenkeypressed', 'hide', null, true),
+      hide: block('looks_hide', null, 'second')
+    };
+    expect(certifyRegionEffects(direct, {targetIndex: 0, blockIds: ['show']}, 'no-preserve').eligible).toBe(true);
+    expect(certifyRegionEffects(direct, {targetIndex: 0, blockIds: ['hide']}, 'no-preserve').eligible).toBe(true);
+
+    const ownedProcedure = baseProject();
+    const ownedStage = requireTarget(ownedProcedure, 0);
+    ownedStage.blocks = {
+      owner: block('event_whenflagclicked', 'owner-call', null, true),
+      'owner-call': procedureCall('work', null, 'owner'),
+      unrelated: block('event_whenkeypressed', 'unrelated-body', null, true),
+      'unrelated-body': block('looks_hide', null, 'unrelated'),
+      definition: block('procedures_definition', 'procedure-body', null, true, {custom_block: [1, 'prototype']}),
+      prototype: procedurePrototype('work', false, 'definition'),
+      'procedure-body': block('looks_show', null, 'definition')
+    };
+    expect(certifyRegionEffects(
+      ownedProcedure,
+      {targetIndex: 0, blockIds: ['procedure-body']},
+      'no-preserve'
+    ).eligible).toBe(true);
+    ownedStage.blocks['unrelated-body'] = procedureCall('work', null, 'unrelated');
+    expect(certifyRegionEffects(
+      ownedProcedure,
+      {targetIndex: 0, blockIds: ['procedure-body']},
+      'no-preserve'
+    ).reasons.map(reason => reason.code)).toEqual(['concurrent-target-owner']);
+
+    const parameterized = baseProject();
+    const parameterStage = requireTarget(parameterized, 0);
+    parameterStage.blocks = {
+      hat: block('event_whenflagclicked', 'call', null, true),
+      call: {
+        ...procedureCall('write %s', null, 'hat'),
+        inputs: {value: [1, [10, 'sample']]},
+        mutation: {proccode: 'write %s', argumentids: '["value"]', warp: 'false'}
+      },
+      definition: block('procedures_definition', 'set', null, true, {custom_block: [1, 'prototype']}),
+      prototype: procedurePrototype('write %s', false, 'definition', ['value']),
+      set: command('data_setvariableto', null, 'definition', {VALUE: [2, 'argument']}, {VARIABLE: ['global value', 'global']}),
+      argument: {
+        ...reporter('argument_reporter_string_number', 'set', {}, {VALUE: ['value', null]}),
+        shadow: false
+      }
+    };
+    const inFrame = certifyRegionEffects(parameterized, {targetIndex: 0, blockIds: ['set']}, 'no-preserve');
+    expect(inFrame.introducesProcedureFrame).toBe(false);
+    expect(inFrame.eligible).toBe(true);
+    expect(inFrame.reasons).toEqual([]);
+    const movedToNewFrame = certifyRegionEffects(parameterized, {
+      targetIndex: 0,
+      blockIds: ['set'],
+      introducesProcedureFrame: true
+    }, 'no-preserve');
+    expect(movedToNewFrame.introducesProcedureFrame).toBe(true);
+    expect(movedToNewFrame.reasons.map(reason => reason.code)).toEqual(['procedure-parameter']);
+
+    const set = parameterStage.blocks['set'];
+    if (!isScratchBlock(set)) throw new Error('parameterized procedure body is unavailable');
+    set.next = 'show';
+    parameterStage.blocks['show'] = command('looks_show', 'hide', 'set');
+    parameterStage.blocks['hide'] = command('looks_hide', 'clear', 'show');
+    parameterStage.blocks['clear'] = command('looks_cleargraphiceffects', null, 'hide');
+    const framedRun = collectCertifiedNestedLinearRuns(parameterized, 'no-preserve', {
+      includeProcedureBodies: true
+    }).find(candidate => candidate.run.blockIds[0] === 'set');
+    expect(framedRun?.certificate.introducesProcedureFrame).toBe(true);
+    expect(framedRun?.certificate.reasons.map(reason => reason.code)).toEqual(['procedure-parameter']);
+
+    const inheritedWarp = baseProject();
+    const warpStage = requireTarget(inheritedWarp, 0);
+    warpStage.blocks = {
+      hat: block('event_whenflagclicked', 'outer-call', null, true),
+      'outer-call': procedureCall('outer', null, 'hat'),
+      'outer-definition': block('procedures_definition', 'inner-call', null, true, {custom_block: [1, 'outer-prototype']}),
+      'outer-prototype': procedurePrototype('outer', true, 'outer-definition'),
+      'inner-call': procedureCall('inner', null, 'outer-definition'),
+      'inner-definition': block('procedures_definition', 'inner-body', null, true, {custom_block: [1, 'inner-prototype']}),
+      'inner-prototype': procedurePrototype('inner', false, 'inner-definition'),
+      'inner-body': block('looks_show', null, 'inner-definition')
+    };
+    const helper = certifyRegionEffects(inheritedWarp, {targetIndex: 0, blockIds: ['inner-body']}, 'no-preserve');
+    expect(helper.reasons.map(reason => reason.code)).toEqual(['warp-procedure']);
+
+    const liveHat = warpStage.blocks['hat'];
+    const deadCall = warpStage.blocks['outer-call'];
+    if (!isScratchBlock(liveHat) || !isScratchBlock(deadCall)) {
+      throw new Error('warp ownership fixture is malformed');
+    }
+    liveHat.next = 'inner-live-call';
+    warpStage.blocks['inner-live-call'] = procedureCall('inner', null, 'hat');
+    deadCall.topLevel = true;
+    deadCall.parent = null;
+    const unreachableWarp = certifyRegionEffects(
+      inheritedWarp,
+      {targetIndex: 0, blockIds: ['inner-body']},
+      'no-preserve'
+    );
+    expect(unreachableWarp.reasons.map(reason => reason.code)).toEqual([]);
+
+    const extension = baseProject();
+    const extensionStage = requireTarget(extension, 0);
+    extensionStage.blocks = {
+      extension: block('microbit_whenButtonPressed', 'body', null, true),
+      body: block('looks_show', null, 'extension')
+    };
+    expect(analyzeProjectEffects(extension).runnableEntries).toEqual([
+      expect.objectContaining({blockId: 'extension', kind: 'hat'})
+    ]);
+  });
+
+  it('excludes dead-branch and post-terminal calls from procedure owners without pruning dynamic paths', () => {
+    const project = baseProject();
+    const stage = requireTarget(project, 0);
+    stage.blocks = {
+      live: block('event_whenflagclicked', 'live-call', null, true),
+      'live-call': procedureCall('work', null, 'live'),
+      conditional: block('event_whenkeypressed', 'guard', null, true),
+      guard: command('control_if', null, 'conditional', {
+        CONDITION: [1, [4, '0']],
+        SUBSTACK: [2, 'conditional-call']
+      }),
+      'conditional-call': procedureCall('work', null, 'guard'),
+      definition: block('procedures_definition', 'body', null, true, {custom_block: [1, 'prototype']}),
+      prototype: procedurePrototype('work', false, 'definition'),
+      body: block('looks_show', null, 'definition')
+    };
+
+    const certifyBody = (): readonly string[] => certifyRegionEffects(
+      project,
+      {targetIndex: 0, blockIds: ['body']},
+      'no-preserve'
+    ).reasons.map(reason => reason.code);
+    expect(certifyBody()).toEqual([]);
+
+    const guard = stage.blocks['guard'];
+    if (!isScratchBlock(guard)) throw new Error('owner guard is unavailable');
+    guard.inputs['CONDITION'] = [2, 'dynamic-condition'];
+    stage.blocks['dynamic-condition'] = reporter(
+      'data_variable',
+      'guard',
+      {},
+      {VARIABLE: ['global value', 'global']}
+    );
+    expect(certifyBody()).toEqual(['concurrent-target-owner']);
+
+    delete stage.blocks['dynamic-condition'];
+    stage.blocks['guard'] = command(
+      'control_stop',
+      'conditional-call',
+      'conditional',
+      {},
+      {STOP_OPTION: ['this script', null]}
+    );
+    const conditionalCall = stage.blocks['conditional-call'];
+    if (!isScratchBlock(conditionalCall)) throw new Error('conditional procedure call is unavailable');
+    conditionalCall.parent = 'guard';
+    expect(certifyBody()).toEqual([]);
+
+    const stop = stage.blocks['guard'];
+    if (!isScratchBlock(stop)) throw new Error('terminal owner block is unavailable');
+    stop.fields['STOP_OPTION'] = ['other scripts in sprite', null];
+    expect(certifyBody()).toEqual(['concurrent-target-owner']);
+  });
+
+  it('tracks finite-loop procedure owners through static, dynamic, and missing iteration inputs', () => {
+    const project = baseProject();
+    const stage = requireTarget(project, 0);
+    stage.blocks = {
+      live: block('event_whenflagclicked', 'live-call', null, true),
+      'live-call': procedureCall('work', null, 'live'),
+      candidate: block('event_whenkeypressed', 'loop', null, true),
+      loop: command('control_repeat', null, 'candidate', {
+        TIMES: [1, [4, '0']],
+        SUBSTACK: [2, 'loop-call']
+      }),
+      'loop-call': procedureCall('work', null, 'loop'),
+      definition: block('procedures_definition', 'body', null, true, {custom_block: [1, 'prototype']}),
+      prototype: procedurePrototype('work', false, 'definition'),
+      body: block('looks_show', null, 'definition')
+    };
+    const certifyBody = (): readonly string[] => certifyRegionEffects(
+      project,
+      {targetIndex: 0, blockIds: ['body']},
+      'no-preserve'
+    ).reasons.map(reason => reason.code);
+    const loop = stage.blocks['loop'];
+    if (!isScratchBlock(loop)) throw new Error('owner loop is unavailable');
+
+    expect(certifyBody()).toEqual([]);
+    loop.inputs['TIMES'] = [1, [4, '1']];
+    expect(certifyBody()).toEqual(['concurrent-target-owner']);
+
+    loop.inputs['TIMES'] = [2, 'dynamic-count'];
+    stage.blocks['dynamic-count'] = reporter(
+      'data_variable',
+      'loop',
+      {},
+      {VARIABLE: ['global value', 'global']}
+    );
+    expect(certifyBody()).toEqual(['concurrent-target-owner']);
+
+    delete stage.blocks['dynamic-count'];
+    loop.opcode = 'control_for_each';
+    delete loop.inputs['TIMES'];
+    loop.inputs['VALUE'] = [1, [4, '0']];
+    expect(certifyBody()).toEqual([]);
+    loop.inputs['VALUE'] = [1, [4, '1']];
+    expect(certifyBody()).toEqual(['concurrent-target-owner']);
+
+    delete loop.inputs['VALUE'];
+    expect(certifyBody()).toEqual(['concurrent-target-owner']);
+    delete loop.inputs['SUBSTACK'];
+    expect(certifyBody()).toEqual([]);
+
+    loop.inputs['VALUE'] = [1, [4, '1']];
+    loop.inputs['SUBSTACK'] = [2, 'loop-call'];
+    loop.next = 'loop';
+    expect(certifyBody()).toEqual(['concurrent-target-owner']);
+
+    loop.next = null;
+    loop.opcode = 'control_all_at_once';
+    loop.inputs = {SUBSTACK: [2, 'loop-call']};
+    expect(certifyBody()).toEqual(['concurrent-target-owner']);
+
+    loop.opcode = 'control_forever';
+    expect(certifyBody()).toEqual(['concurrent-target-owner']);
+
+    loop.opcode = 'control_wait_until';
+    loop.next = 'loop-call';
+    loop.inputs = {CONDITION: [1, [10, 'true']]};
+    expect(certifyBody()).toEqual(['concurrent-target-owner']);
+    loop.inputs['CONDITION'] = [1, [10, 'false']];
+    expect(certifyBody()).toEqual([]);
+  });
+
+  it('excludes unreachable calls from inherited-warp analysis while retaining unknown branches', () => {
+    const project = baseProject();
+    const stage = requireTarget(project, 0);
+    stage.blocks = {
+      hat: block('event_whenflagclicked', 'outer-call', null, true),
+      'outer-call': procedureCall('outer', null, 'hat'),
+      'outer-definition': block('procedures_definition', 'guard', null, true, {custom_block: [1, 'outer-prototype']}),
+      'outer-prototype': procedurePrototype('outer', true, 'outer-definition'),
+      guard: command('control_if', null, 'outer-definition', {
+        CONDITION: [1, [4, '0']],
+        SUBSTACK: [2, 'inner-call']
+      }),
+      'inner-call': procedureCall('inner', null, 'guard'),
+      'inner-definition': block('procedures_definition', 'inner-body', null, true, {custom_block: [1, 'inner-prototype']}),
+      'inner-prototype': procedurePrototype('inner', false, 'inner-definition'),
+      'inner-body': block('looks_show', null, 'inner-definition')
+    };
+
+    const certifyInner = (): readonly string[] => certifyRegionEffects(
+      project,
+      {targetIndex: 0, blockIds: ['inner-body']},
+      'no-preserve'
+    ).reasons.map(reason => reason.code);
+    expect(certifyInner()).toEqual([]);
+
+    const guard = stage.blocks['guard'];
+    if (!isScratchBlock(guard)) throw new Error('warp guard is unavailable');
+    guard.inputs['CONDITION'] = [2, 'dynamic-condition'];
+    stage.blocks['dynamic-condition'] = reporter(
+      'data_variable',
+      'guard',
+      {},
+      {VARIABLE: ['global value', 'global']}
+    );
+    expect(certifyInner()).toEqual(['warp-procedure']);
+
+    delete stage.blocks['dynamic-condition'];
+    stage.blocks['guard'] = command(
+      'control_stop',
+      'inner-call',
+      'outer-definition',
+      {},
+      {STOP_OPTION: ['all', null]}
+    );
+    const innerCall = stage.blocks['inner-call'];
+    if (!isScratchBlock(innerCall)) throw new Error('inner procedure call is unavailable');
+    innerCall.parent = 'guard';
+    expect(certifyInner()).toEqual([]);
   });
 
   it('separates broadcast, clone, re-entry, and thread-control effects', () => {

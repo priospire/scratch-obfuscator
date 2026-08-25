@@ -23,7 +23,7 @@ describe('executable CLI entry point', () => {
     await import(entryModule);
     await vi.waitFor(() => {
       expect(process.exitCode).toBe(0);
-      expect(stdout).toHaveBeenCalledWith('0.6.0\n');
+      expect(stdout).toHaveBeenCalledWith('0.7.0\n');
       expect(process.listenerCount('SIGINT')).toBe(initialInterruptListeners);
       expect(process.listenerCount('SIGTERM')).toBe(initialTerminateListeners);
     });

@@ -202,6 +202,7 @@ describe('anti-cheat transform', () => {
     expect(watermark?.[1]).toBe(0);
     expect(watermark).toHaveLength(2);
     expect(Object.values(stage.variables).filter(value => value[0] === ANTI_CHEAT_WATERMARK_NAME)).toHaveLength(1);
+    expect(JSON.stringify(first).split(ANTI_CHEAT_WATERMARK_NAME)).toHaveLength(2);
     expect(Object.keys(stage.variables).slice(0, originalVariableIds.length)).toEqual(originalVariableIds);
     expect(Object.keys(stage.blocks).filter(id => originalBlockIds.includes(id))).toEqual(originalBlockIds);
     expect(Object.keys(stage.blocks)[0]).toBe(firstResult.watchdogHatId);
@@ -274,7 +275,7 @@ describe('anti-cheat transform', () => {
     expect(generatedNames).not.toContain(monitorProperty);
   });
 
-  it('reuses and protects an existing Stage watermark without changing its value', () => {
+  it('reuses and leaves an existing Stage watermark inert without changing its value', () => {
     const project = createFixtureProject();
     const stage = stageOf(project);
     stage.variables['existing-watermark'] = [ANTI_CHEAT_WATERMARK_NAME, 'project-owned-value'];
@@ -306,11 +307,11 @@ describe('anti-cheat transform', () => {
           : undefined).toBe('project-owned-value');
       }
     }
-    expect(protectedReadCount).toBe(3);
+    expect(protectedReadCount).toBe(0);
     validateProject(project);
   });
 
-  it('protects a reused watermark with every schema-valid scalar value', async () => {
+  it('leaves a reused watermark inert with every schema-valid scalar value', async () => {
     const cases: ReadonlyArray<readonly [boolean | number | string, boolean | number | string]> = [
       ['', '!'],
       ['x', 'x!'],
@@ -338,7 +339,7 @@ describe('anti-cheat transform', () => {
       const watermark = runtime.variables['existing-watermark'];
       const latch = runtime.variables[result.latchVariableId];
       const effect = runtime.variables[effectId];
-      if (!watermark || !latch || !effect) throw new Error('runtime watermark guard variables are unavailable');
+      if (!watermark || !latch || !effect) throw new Error('runtime watermark fixture variables are unavailable');
       const safeLatchValue = latch.value;
 
       vm.runtime.startHats('event_whenkeypressed', {KEY_OPTION: 'space'});
@@ -349,9 +350,8 @@ describe('anti-cheat transform', () => {
       watermark.value = tamperedValue;
       vm.runtime.startHats('event_whenkeypressed', {KEY_OPTION: 'space'});
       stepUntilStopped(vm);
-      expect(effect.value).toBe(1);
-      expect(latch.value).not.toBe(safeLatchValue);
-      expect(vm.runtime.threads).toHaveLength(0);
+      expect(effect.value).toBe(2);
+      expect(latch.value).toBe(safeLatchValue);
     }
   }, 30_000);
 

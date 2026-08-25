@@ -138,18 +138,29 @@ describe('coherent decoy subsystems', () => {
     const smallStats = stats(small);
     const largeStats = stats(large);
 
-    applyAggressiveTransforms(small, 'no-preserve', generator(91), smallStats);
-    applyAggressiveTransforms(large, 'no-preserve', generator(91), largeStats);
+    const compact = scaledNoPreserveProject();
+    const compactBefore = countBlockEquivalents(compact);
+    applyAggressiveTransforms(compact, 'no-preserve', generator(91), stats(compact));
+    expect(countBlockEquivalents(compact)).toBe(Math.min((compactBefore * 3) + 512, 30_000));
 
-    expect(countBlockEquivalents(small)).toBe(Math.min((smallBefore * 25) + 512, 100_000));
-    expect(countBlockEquivalents(large)).toBe(Math.min((largeBefore * 25) + 512, 100_000));
+    applyAggressiveTransforms(small, 'no-preserve', generator(91), smallStats, undefined, true);
+    applyAggressiveTransforms(large, 'no-preserve', generator(91), largeStats, undefined, true);
+
+    expect(countBlockEquivalents(small)).toBe(Math.min(
+      Math.max((smallBefore * 25) + 512, smallBefore + 2048),
+      100_000
+    ));
+    expect(countBlockEquivalents(large)).toBe(Math.min(
+      Math.max((largeBefore * 25) + 512, largeBefore + 2048),
+      100_000
+    ));
     const smallPaired = pairedBroadcastCount(small);
     const largePaired = pairedBroadcastCount(large);
     expect(smallPaired).toBeGreaterThanOrEqual(6);
     expect(largePaired).toBeGreaterThan(128);
-    expect(largePaired).toBeGreaterThan(smallPaired * 10);
+    expect(largePaired).toBeGreaterThan(smallPaired * 4);
     expect(smallStats.decoysAdded).toBeGreaterThan(100);
-    expect(largeStats.decoysAdded).toBeGreaterThan(smallStats.decoysAdded * 10);
+    expect(largeStats.decoysAdded).toBeGreaterThan(smallStats.decoysAdded * 4);
     const largeRetained = procedureAwareReachableBlocks(large);
     expect(generatedRetentionRatio(scaledNoPreserveProject(), large, largeRetained)).toBeGreaterThan(0.9);
     expect(procedureTopologySignatures(large).size).toBeGreaterThanOrEqual(3);
@@ -164,10 +175,10 @@ describe('coherent decoy subsystems', () => {
     expect(largeSiteAudit.componentGrowths).toHaveLength(largePaired);
     expect(smallSiteAudit.componentGrowths.every(growth => growth >= 38 && growth <= 56)).toBe(true);
     expect(largeSiteAudit.componentGrowths.every(growth => growth >= 38 && growth <= 56)).toBe(true);
-    expect(smallSiteAudit.siteGrowths.every(growth => growth <= 256)).toBe(true);
-    expect(largeSiteAudit.siteGrowths.every(growth => growth <= 256)).toBe(true);
-    expect(Math.max(...smallSiteAudit.siteGrowths)).toBeGreaterThan(200);
-    expect(Math.max(...largeSiteAudit.siteGrowths)).toBeGreaterThan(200);
+    expect(smallSiteAudit.siteGrowths.every(growth => growth <= 2_048)).toBe(true);
+    expect(largeSiteAudit.siteGrowths.every(growth => growth <= 2_048)).toBe(true);
+    expect(Math.max(...smallSiteAudit.siteGrowths)).toBeGreaterThan(256);
+    expect(Math.max(...largeSiteAudit.siteGrowths)).toBeGreaterThan(256);
     const originalLargeIds = new Set(scaledNoPreserveProject().targets.flatMap(target => Object.keys(target.blocks)));
     const generatedVocabulary = new Set(large.targets.flatMap(target => Object.entries(target.blocks)
       .filter(([id, value]) => !originalLargeIds.has(id) && isScratchBlock(value))

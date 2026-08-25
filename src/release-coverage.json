@@ -1,0 +1,7 @@
+{
+  "version": "0.7.0",
+  "statements": {"covered": 9078, "total": 9285, "percentage": 97.77, "allCovered": false},
+  "branches": {"covered": 6623, "total": 7051, "percentage": 93.92, "allCovered": false},
+  "functions": {"covered": 1265, "total": 1265, "percentage": 100, "allCovered": true},
+  "lines": {"covered": 7888, "total": 7961, "percentage": 99.08, "allCovered": false}
+}

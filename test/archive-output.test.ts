@@ -8,6 +8,7 @@ import {
   commitOutput,
   prepareOutput,
   serializeProject,
+  serializeProjectPayload,
   validateReferencedAssets,
   writeDeterministicArchive
 } from '../src/archive/index.js';
@@ -61,6 +62,8 @@ describe('project serialization and deterministic writer failures', () => {
     if (target === undefined) throw new Error('fixture target is missing');
     target.variables['negative'] = ['value', -0];
     target.lists['values'] = ['values', [-0, 0]];
+    const payload = serializeProjectPayload(project);
+    expect(Buffer.from(payload).toString()).toContain('["value",-0]');
     const parsed = JSON.parse(Buffer.from(serializeProject(project, 'lossless')).toString()) as ScratchProject;
     expect(Object.is(parsed.targets[0]?.variables['negative']?.[1], -0)).toBe(true);
     const listValues = parsed.targets[0]?.lists['values']?.[1] as unknown[];

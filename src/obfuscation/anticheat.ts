@@ -5,7 +5,7 @@ import type {JsonValue, ScratchBlock, ScratchInput, ScratchProject, ScratchTarge
 import type {VariableCandidate} from './analysis.js';
 
 export const ANTI_CHEAT_WATERMARK_NAME = 'Obfuscated by PrioSDK Gen 4.';
-export const ANTI_CHEAT_DECOY_COUNT = 6;
+export const ANTI_CHEAT_DECOY_COUNT = 7;
 
 const MAX_PROTECTED_GAMEPLAY_VARIABLES = 16;
 const TOKEN_ALPHABET = '!#$%*+-./:;=?@^_~';
@@ -39,7 +39,7 @@ interface Sentinel {
   readonly expected: boolean | number | string;
 }
 
-interface GameplayIntegrityPair {
+export interface GameplayIntegrityPair {
   readonly declarationTargetIndex: number;
   readonly valueId: string;
   readonly valueName: string;
@@ -48,6 +48,28 @@ interface GameplayIntegrityPair {
   readonly secret: string;
   readonly selector: string;
   readonly usageTargetIndex: number;
+  readonly groupSize: number;
+  readonly groupPosition: number;
+  readonly nextValueId?: string;
+  readonly nextValueName?: string;
+  readonly linkSecret?: string;
+}
+
+interface GameplayPairPlan {
+  readonly candidate: VariableCandidate;
+  readonly originalIndex: number;
+  readonly declarationTarget: ScratchTarget;
+  readonly usageTarget: ScratchTarget;
+  readonly usageTargetIndex: number;
+  readonly tagId: string;
+  readonly tagName: string;
+  readonly secret: string;
+  next?: GameplayPairPlan;
+  predecessor?: GameplayPairPlan;
+  linkSecret?: string;
+  groupSize: number;
+  groupPosition: number;
+  pair?: GameplayIntegrityPair;
 }
 
 export interface GameplayStateReservation {
@@ -266,11 +288,7 @@ function isGameplayProtectionCandidate(
   return true;
 }
 
-/**
- * Temporarily mark selected real variables as monitored so aggressive packing leaves
- * them available for the anti-tamper pass. The marker objects must be released before
- * final validation and are never serialized.
- */
+/** Select real variables that aggressive packing must leave for anti-tamper protection. */
 export function reserveGameplayStateCandidates(
   project: ScratchProject,
   candidates: readonly VariableCandidate[],
@@ -282,33 +300,10 @@ export function reserveGameplayStateCandidates(
   eligible.sort((left, right) => right.usages.length - left.usages.length);
   const selected = eligible.slice(0, MAX_PROTECTED_GAMEPLAY_VARIABLES);
   const candidateKeys = new Set(selected.map(candidate => gameplayCandidateKey(candidate.targetIndex, candidate.id)));
-  const markerMonitors: Array<Record<string, JsonValue>> = [];
-  for (const candidate of selected) {
-    const target = project.targets[candidate.targetIndex];
-    if (!target) throw new Error('anti-cheat gameplay declaration target is unavailable');
-    const marker: Record<string, JsonValue> = {
-      id: candidate.id,
-      mode: 'default',
-      opcode: 'data_variable',
-      params: {VARIABLE: candidate.name},
-      spriteName: target.isStage ? null : target.name,
-      value: candidate.initialValue,
-      width: 0,
-      height: 0,
-      x: 0,
-      y: 0,
-      visible: false,
-      sliderMin: 0,
-      sliderMax: 100,
-      isDiscrete: true
-    };
-    markerMonitors.push(marker);
-    project.monitors.push(marker);
-  }
-  return Object.freeze({candidateKeys, markerMonitors: Object.freeze(markerMonitors)});
+  return Object.freeze({candidateKeys, markerMonitors: Object.freeze([])});
 }
 
-/** Remove the non-serialized reservation markers after aggressive transforms. */
+/** Remove markers emitted by pre-v0.7 reservation objects retained for API compatibility. */
 export function releaseGameplayStateCandidates(
   project: ScratchProject,
   reservation: GameplayStateReservation
@@ -378,6 +373,24 @@ function sentinelReporterInput(sentinel: Pick<Sentinel, 'id' | 'name'>): Scratch
 
 function scratchScalarString(value: boolean | number | string): string {
   return typeof value === 'boolean' ? (value ? 'true' : 'false') : String(value);
+}
+
+function integrityTagValue(
+  pair: GameplayIntegrityPair,
+  ownValue: boolean | number | string,
+  nextValue?: boolean | number | string
+): string {
+  if (pair.nextValueId === undefined) return pair.secret + scratchScalarString(ownValue);
+  if (pair.linkSecret === undefined || nextValue === undefined) {
+    throw new Error('anti-cheat linked gameplay integrity metadata is unavailable');
+  }
+  const own = scratchScalarString(ownValue);
+  return pair.secret
+    + String(own.length)
+    + ':'
+    + own
+    + pair.linkSecret
+    + scratchScalarString(nextValue);
 }
 
 function procedureMutation(proccode: string): Record<string, JsonValue> {
@@ -450,8 +463,20 @@ function buildIntegrityMismatchCondition(
   const equalsId = allocateBlock();
   const expectedId = allocateBlock();
   const secretId = allocateBlock();
+  const linked = pair.nextValueId !== undefined;
+  if (linked && (pair.nextValueName === undefined || pair.linkSecret === undefined)) {
+    throw new Error('anti-cheat linked gameplay integrity metadata is unavailable');
+  }
+  const ownJoinId = linked ? allocateBlock() : undefined;
+  const linkJoinId = linked ? allocateBlock() : undefined;
+  const linkSecretId = linked ? allocateBlock() : undefined;
   const valueSenseId = useSensing ? allocateBlock() : undefined;
+  const nextValueSenseId = useSensing && linked ? allocateBlock() : undefined;
   const tagSenseId = useSensing ? allocateBlock() : undefined;
+  const bodyId = linked ? allocateBlock() : undefined;
+  const lengthPrefixId = linked ? allocateBlock() : undefined;
+  const lengthId = linked ? allocateBlock() : undefined;
+  const valueLengthSenseId = useSensing && linked ? allocateBlock() : undefined;
   blocks.set(notId, {
     opcode: 'operator_not',
     next: null,
@@ -481,9 +506,11 @@ function buildIntegrityMismatchCondition(
     parent: equalsId,
     inputs: {
       STRING1: [2, secretId],
-      STRING2: useSensing && valueSenseId
-        ? [2, valueSenseId]
-        : sentinelReporterInput({id: pair.valueId, name: pair.valueName})
+      STRING2: bodyId
+        ? [2, bodyId]
+        : useSensing && valueSenseId
+          ? [2, valueSenseId]
+          : sentinelReporterInput({id: pair.valueId, name: pair.valueName})
     },
     fields: {},
     shadow: false,
@@ -493,8 +520,89 @@ function buildIntegrityMismatchCondition(
     secretId,
     makeEncodedExpectedValue(expectedId, pair.secret, generator.fork('secret'))
   );
+  if (
+    bodyId
+    && lengthPrefixId
+    && lengthId
+    && ownJoinId
+    && linkJoinId
+    && linkSecretId
+    && pair.nextValueId
+    && pair.nextValueName
+    && pair.linkSecret
+  ) {
+    blocks.set(bodyId, {
+      opcode: 'operator_join',
+      next: null,
+      parent: expectedId,
+      inputs: {STRING1: [2, lengthPrefixId], STRING2: [2, ownJoinId]},
+      fields: {},
+      shadow: false,
+      topLevel: false
+    });
+    blocks.set(lengthPrefixId, {
+      opcode: 'operator_join',
+      next: null,
+      parent: bodyId,
+      inputs: {STRING1: [2, lengthId], STRING2: textInput(':')},
+      fields: {},
+      shadow: false,
+      topLevel: false
+    });
+    blocks.set(lengthId, {
+      opcode: 'operator_length',
+      next: null,
+      parent: lengthPrefixId,
+      inputs: {
+        STRING: useSensing && valueLengthSenseId
+          ? [2, valueLengthSenseId]
+          : sentinelReporterInput({id: pair.valueId, name: pair.valueName})
+      },
+      fields: {},
+      shadow: false,
+      topLevel: false
+    });
+    blocks.set(ownJoinId, {
+      opcode: 'operator_join',
+      next: null,
+      parent: bodyId,
+      inputs: {
+        STRING1: useSensing && valueSenseId
+          ? [2, valueSenseId]
+          : sentinelReporterInput({id: pair.valueId, name: pair.valueName}),
+        STRING2: [2, linkJoinId]
+      },
+      fields: {},
+      shadow: false,
+      topLevel: false
+    });
+    blocks.set(linkJoinId, {
+      opcode: 'operator_join',
+      next: null,
+      parent: ownJoinId,
+      inputs: {
+        STRING1: [2, linkSecretId],
+        STRING2: useSensing && nextValueSenseId
+          ? [2, nextValueSenseId]
+          : sentinelReporterInput({id: pair.nextValueId, name: pair.nextValueName})
+      },
+      fields: {},
+      shadow: false,
+      topLevel: false
+    });
+    blocks.set(
+      linkSecretId,
+      makeEncodedExpectedValue(linkJoinId, pair.linkSecret, generator.fork('link-secret'))
+    );
+  }
   if (valueSenseId && tagSenseId) {
-    blocks.set(valueSenseId, makeSensingOf(expectedId, pair.valueName, pair.selector));
+    blocks.set(valueSenseId, makeSensingOf(ownJoinId ?? expectedId, pair.valueName, pair.selector));
+    if (valueLengthSenseId && lengthId) {
+      blocks.set(valueLengthSenseId, makeSensingOf(lengthId, pair.valueName, pair.selector));
+    }
+    if (nextValueSenseId && linkJoinId && pair.nextValueName) {
+      blocks.set(nextValueSenseId, makeSensingOf(linkJoinId, pair.nextValueName, pair.selector));
+    }
     blocks.set(tagSenseId, makeSensingOf(equalsId, pair.tagName, pair.selector));
   }
   return {blocks, rootId: notId};
@@ -916,6 +1024,195 @@ function addGameplayGuardProcedures(
   return {guardCodes, generatedBlocks};
 }
 
+function cyclicGroupSizes(count: number): number[] {
+  const sizes: number[] = [];
+  let remaining = count;
+  while (remaining > 0) {
+    if (remaining === 5) {
+      sizes.push(3, 2);
+      break;
+    }
+    const size = remaining > 5 ? 4 : remaining;
+    sizes.push(size);
+    remaining -= size;
+  }
+  return sizes;
+}
+
+function assignCyclicGameplayGroups(
+  plans: readonly GameplayPairPlan[],
+  generator: DeterministicGenerator,
+  occupiedTokens: Set<string>
+): void {
+  const scopes = new Map<string, GameplayPairPlan[]>();
+  for (const plan of plans) {
+    const key = `${plan.candidate.targetIndex}\u0000${plan.usageTargetIndex}`;
+    const members = scopes.get(key) ?? [];
+    members.push(plan);
+    scopes.set(key, members);
+  }
+
+  let scopeIndex = 0;
+  for (const members of scopes.values()) {
+    let offset = 0;
+    for (const [groupIndex, size] of cyclicGroupSizes(members.length).entries()) {
+      const group = members.slice(offset, offset + size);
+      offset += size;
+      for (const [position, plan] of group.entries()) {
+        plan.groupSize = group.length;
+        plan.groupPosition = position;
+        if (group.length === 1) continue;
+        const next = group[(position + 1) % group.length];
+        const predecessor = group[(position + group.length - 1) % group.length];
+        if (!next || !predecessor) throw new Error('anti-cheat gameplay integrity group is unavailable');
+        plan.next = next;
+        plan.predecessor = predecessor;
+        plan.linkSecret = uniqueToken(
+          generator.fork(`scope:${scopeIndex}:group:${groupIndex}:link:${plan.originalIndex}`),
+          occupiedTokens
+        );
+      }
+    }
+    scopeIndex += 1;
+  }
+}
+
+function finalizeGameplayIntegrityPair(plan: GameplayPairPlan): GameplayIntegrityPair {
+  const linked = plan.next !== undefined;
+  if (linked && plan.linkSecret === undefined) {
+    throw new Error('anti-cheat gameplay integrity link is unavailable');
+  }
+  const pair: GameplayIntegrityPair = Object.freeze({
+    declarationTargetIndex: plan.candidate.targetIndex,
+    valueId: plan.candidate.id,
+    valueName: plan.candidate.name,
+    tagId: plan.tagId,
+    tagName: plan.tagName,
+    secret: plan.secret,
+    selector: plan.declarationTarget.isStage ? '_stage_' : plan.declarationTarget.name,
+    usageTargetIndex: plan.usageTargetIndex,
+    groupSize: plan.groupSize,
+    groupPosition: plan.groupPosition,
+    ...(plan.next === undefined ? {} : {
+      nextValueId: plan.next.candidate.id,
+      nextValueName: plan.next.candidate.name,
+      linkSecret: plan.linkSecret as string
+    })
+  });
+  plan.pair = pair;
+  return pair;
+}
+
+function appendIntegrityTagRefresh(
+  target: ScratchTarget,
+  parentId: string,
+  pair: GameplayIntegrityPair,
+  allocateBlock: () => string,
+  generator: DeterministicGenerator
+): {readonly tailId: string; readonly generatedBlocks: number} {
+  const parent = target.blocks[parentId];
+  if (!isScratchBlock(parent)) throw new Error('anti-cheat gameplay refresh parent is unavailable');
+  const setterId = allocateBlock();
+  const expectedId = allocateBlock();
+  const secretId = allocateBlock();
+  const linked = pair.nextValueId !== undefined;
+  if (linked && (pair.nextValueName === undefined || pair.linkSecret === undefined)) {
+    throw new Error('anti-cheat linked gameplay integrity metadata is unavailable');
+  }
+  const ownJoinId = linked ? allocateBlock() : undefined;
+  const linkJoinId = linked ? allocateBlock() : undefined;
+  const linkSecretId = linked ? allocateBlock() : undefined;
+  const bodyId = linked ? allocateBlock() : undefined;
+  const lengthPrefixId = linked ? allocateBlock() : undefined;
+  const lengthId = linked ? allocateBlock() : undefined;
+  parent.next = setterId;
+  target.blocks[setterId] = makeVariableSetter(parentId, null, pair.tagId, pair.tagName, [2, expectedId]);
+  target.blocks[expectedId] = {
+    opcode: 'operator_join',
+    next: null,
+    parent: setterId,
+    inputs: {
+      STRING1: [2, secretId],
+      STRING2: bodyId
+        ? [2, bodyId]
+        : sentinelReporterInput({id: pair.valueId, name: pair.valueName})
+    },
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[secretId] = makeEncodedExpectedValue(expectedId, pair.secret, generator.fork('secret'));
+  if (
+    bodyId
+    && lengthPrefixId
+    && lengthId
+    && ownJoinId
+    && linkJoinId
+    && linkSecretId
+    && pair.nextValueId
+    && pair.nextValueName
+    && pair.linkSecret
+  ) {
+    target.blocks[bodyId] = {
+      opcode: 'operator_join',
+      next: null,
+      parent: expectedId,
+      inputs: {STRING1: [2, lengthPrefixId], STRING2: [2, ownJoinId]},
+      fields: {},
+      shadow: false,
+      topLevel: false
+    };
+    target.blocks[lengthPrefixId] = {
+      opcode: 'operator_join',
+      next: null,
+      parent: bodyId,
+      inputs: {STRING1: [2, lengthId], STRING2: textInput(':')},
+      fields: {},
+      shadow: false,
+      topLevel: false
+    };
+    target.blocks[lengthId] = {
+      opcode: 'operator_length',
+      next: null,
+      parent: lengthPrefixId,
+      inputs: {STRING: sentinelReporterInput({id: pair.valueId, name: pair.valueName})},
+      fields: {},
+      shadow: false,
+      topLevel: false
+    };
+    target.blocks[ownJoinId] = {
+      opcode: 'operator_join',
+      next: null,
+      parent: bodyId,
+      inputs: {
+        STRING1: sentinelReporterInput({id: pair.valueId, name: pair.valueName}),
+        STRING2: [2, linkJoinId]
+      },
+      fields: {},
+      shadow: false,
+      topLevel: false
+    };
+    target.blocks[linkJoinId] = {
+      opcode: 'operator_join',
+      next: null,
+      parent: ownJoinId,
+      inputs: {
+        STRING1: [2, linkSecretId],
+        STRING2: sentinelReporterInput({id: pair.nextValueId, name: pair.nextValueName})
+      },
+      fields: {},
+      shadow: false,
+      topLevel: false
+    };
+    target.blocks[linkSecretId] = makeEncodedExpectedValue(
+      linkJoinId,
+      pair.linkSecret,
+      generator.fork('link-secret')
+    );
+  }
+  return {tailId: setterId, generatedBlocks: linked ? 9 : 3};
+}
+
 /**
  * Protect conservative, single-owner gameplay scalars with a dynamic integrity tag.
  * Legal writes refresh the tag; reads and writes call a warp guard which also probes
@@ -938,6 +1235,16 @@ export function applyGameplayStateProtection(
   });
   if (usable.length === 0) return emptyGameplayStateProtection();
 
+  const prepared = usable.flatMap((candidate, originalIndex) => {
+    const declarationTarget = project.targets[candidate.targetIndex];
+    const usageTargetIndex = candidate.usages[0]?.targetIndex;
+    const usageTarget = usageTargetIndex === undefined ? undefined : project.targets[usageTargetIndex];
+    return declarationTarget && usageTargetIndex !== undefined && usageTarget && isSupportedScalar(candidate.initialValue)
+      ? [{candidate, originalIndex, declarationTarget, usageTarget, usageTargetIndex}]
+      : [];
+  });
+  if (prepared.length === 0) return emptyGameplayStateProtection();
+
   const stage = stageOf(project);
   const occupiedIds = collectOccupiedIds(project);
   const occupiedNames = collectOccupiedNames(project);
@@ -955,93 +1262,80 @@ export function applyGameplayStateProtection(
   stage.variables[breachVariableId] = [breachName, safeBreachValue];
   const breach: Sentinel = {id: breachVariableId, name: breachName, expected: safeBreachValue};
 
-  const pairs: GameplayIntegrityPair[] = [];
-  const protectedVariableIds: string[] = [];
-  const integrityVariableIds: string[] = [];
+  const plans: GameplayPairPlan[] = prepared.map(item => ({
+    ...item,
+    tagId: allocateVariable(),
+    tagName: uniqueName(names.fork(`tag:${item.originalIndex}`), occupiedNames),
+    secret: uniqueToken(generator.fork(`tag-secret:${item.originalIndex}`), occupiedTokens),
+    groupSize: 1,
+    groupPosition: 0
+  }));
+  assignCyclicGameplayGroups(plans, generator.fork('integrity-links'), occupiedTokens);
+  const pairs = plans.map(finalizeGameplayIntegrityPair);
+  for (const plan of plans) {
+    const pair = plan.pair;
+    if (!pair || !isSupportedScalar(plan.candidate.initialValue)) {
+      throw new Error('anti-cheat gameplay integrity pair is unavailable');
+    }
+    const nextInitialValue = plan.next?.candidate.initialValue;
+    if (nextInitialValue !== undefined && !isSupportedScalar(nextInitialValue)) {
+      throw new Error('anti-cheat linked gameplay initial value is unavailable');
+    }
+    plan.declarationTarget.variables[plan.tagId] = [
+      plan.tagName,
+      integrityTagValue(pair, plan.candidate.initialValue, nextInitialValue)
+    ];
+  }
+
+  const protectedVariableIds = plans.map(plan => plan.candidate.id);
+  const integrityVariableIds = plans.map(plan => plan.tagId);
   const statementSites = new Map<number, Set<string>>();
   let generatedBlockCount = 0;
-  for (const [candidateIndex, candidate] of usable.entries()) {
-    const declarationTarget = project.targets[candidate.targetIndex];
-    const usageTargetIndex = candidate.usages[0]?.targetIndex;
-    const usageTarget = usageTargetIndex === undefined ? undefined : project.targets[usageTargetIndex];
-    if (
-      !declarationTarget
-      || usageTargetIndex === undefined
-      || !usageTarget
-      || !isSupportedScalar(candidate.initialValue)
-    ) continue;
-    const tagId = allocateVariable();
-    const tagName = uniqueName(names.fork(`tag:${candidateIndex}`), occupiedNames);
-    const secret = uniqueToken(generator.fork(`tag-secret:${candidateIndex}`), occupiedTokens);
-    declarationTarget.variables[tagId] = [tagName, secret + scratchScalarString(candidate.initialValue)];
-    const pair: GameplayIntegrityPair = {
-      declarationTargetIndex: candidate.targetIndex,
-      valueId: candidate.id,
-      valueName: candidate.name,
-      tagId,
-      tagName,
-      secret,
-      selector: declarationTarget.isStage ? '_stage_' : declarationTarget.name,
-      usageTargetIndex
-    };
-    pairs.push(pair);
-    protectedVariableIds.push(candidate.id);
-    integrityVariableIds.push(tagId);
-
-    const targetStatements = statementSites.get(usageTargetIndex) ?? new Set<string>();
-    statementSites.set(usageTargetIndex, targetStatements);
-    for (const [usageIndex, usage] of candidate.usages.entries()) {
-      const statementId = statementContaining(usageTarget, usage.blockId);
+  for (const plan of plans) {
+    const targetStatements = statementSites.get(plan.usageTargetIndex) ?? new Set<string>();
+    statementSites.set(plan.usageTargetIndex, targetStatements);
+    for (const [usageIndex, usage] of plan.candidate.usages.entries()) {
+      const statementId = statementContaining(plan.usageTarget, usage.blockId);
       if (!statementId) throw new Error('anti-cheat gameplay statement is unavailable');
       targetStatements.add(statementId);
       if (usage.kind !== 'field') continue;
-      const writer = usageTarget.blocks[usage.blockId];
+      const writer = plan.usageTarget.blocks[usage.blockId];
       if (
         !isScratchBlock(writer)
         || (writer.opcode !== 'data_setvariableto' && writer.opcode !== 'data_changevariableby')
       ) continue;
       const originalNext = writer.next;
-      const updateId = allocateBlock();
-      const encodedId = allocateBlock();
-      const secretId = allocateBlock();
-      writer.next = updateId;
-      usageTarget.blocks[updateId] = makeVariableSetter(
-        usage.blockId,
-        originalNext,
-        tagId,
-        tagName,
-        [2, encodedId]
-      );
-      usageTarget.blocks[encodedId] = {
-        opcode: 'operator_join',
-        next: null,
-        parent: updateId,
-        inputs: {
-          STRING1: [2, secretId],
-          STRING2: sentinelReporterInput({id: candidate.id, name: candidate.name})
-        },
-        fields: {},
-        shadow: false,
-        topLevel: false
-      };
-      usageTarget.blocks[secretId] = makeEncodedExpectedValue(
-        encodedId,
-        secret,
-        generator.fork(`tag-update:${candidateIndex}:${usageIndex}`)
-      );
-      if (originalNext) {
-        const successor = usageTarget.blocks[originalNext];
-        if (!isScratchBlock(successor)) throw new Error('anti-cheat gameplay write successor is unavailable');
-        successor.parent = updateId;
+      const affected = plan.predecessor && plan.predecessor !== plan
+        ? [plan, plan.predecessor].sort((left, right) => left.originalIndex - right.originalIndex)
+        : [plan];
+      let refreshTail = usage.blockId;
+      for (const refreshPlan of affected) {
+        const refreshPair = refreshPlan.pair;
+        if (!refreshPair) throw new Error('anti-cheat gameplay refresh pair is unavailable');
+        const domain = affected.length === 1
+          ? `tag-update:${plan.originalIndex}:${usageIndex}`
+          : `tag-update:${plan.originalIndex}:${usageIndex}:authenticator:${refreshPlan.originalIndex}`;
+        const refresh = appendIntegrityTagRefresh(
+          plan.usageTarget,
+          refreshTail,
+          refreshPair,
+          allocateBlock,
+          generator.fork(domain)
+        );
+        refreshTail = refresh.tailId;
+        generatedBlockCount += refresh.generatedBlocks;
       }
-      generatedBlockCount += 3;
+      const refreshTailBlock = plan.usageTarget.blocks[refreshTail];
+      if (!isScratchBlock(refreshTailBlock)) throw new Error('anti-cheat gameplay refresh tail is unavailable');
+      refreshTailBlock.next = originalNext;
+      if (originalNext) {
+        const successor = plan.usageTarget.blocks[originalNext];
+        if (!isScratchBlock(successor)) throw new Error('anti-cheat gameplay write successor is unavailable');
+        successor.parent = refreshTail;
+      }
     }
   }
 
-  if (pairs.length === 0) {
-    delete stage.variables[breachVariableId];
-    return emptyGameplayStateProtection();
-  }
   const procedures = addGameplayGuardProcedures(
     project,
     pairs,
@@ -1347,18 +1641,12 @@ export function applyAntiCheatTransform(
 
   const additions: Array<readonly [string, JsonValue[]]> = [];
   const watermarkDeclaration = stage.variables[watermark.watermarkVariableId];
-  const watermarkExpected = watermarkDeclaration?.[1];
   if (
     !watermarkDeclaration
     || watermarkDeclaration[0] !== ANTI_CHEAT_WATERMARK_NAME
-    || watermarkExpected === undefined
-    || !isSupportedScalar(watermarkExpected)
+    || watermarkDeclaration[1] === undefined
+    || !isSupportedScalar(watermarkDeclaration[1])
   ) throw new Error('anti-cheat watermark declaration is unavailable');
-  const watermarkSentinel: Sentinel = {
-    id: watermark.watermarkVariableId,
-    name: ANTI_CHEAT_WATERMARK_NAME,
-    expected: watermarkExpected
-  };
 
   const decoys: Sentinel[] = [];
   for (let index = 0; index < ANTI_CHEAT_DECOY_COUNT; index += 1) {
@@ -1441,7 +1729,7 @@ export function applyAntiCheatTransform(
   const additionalSentinels = options.gameplayState?.tripSentinel
     ? [options.gameplayState.tripSentinel]
     : [];
-  const mismatchSentinels = [watermarkSentinel, ...decoys, ...additionalSentinels, latchSentinel];
+  const mismatchSentinels = [...decoys, ...additionalSentinels, latchSentinel];
   for (const sentinel of mismatchSentinels) {
     const notId = allocateBlock();
     const equalsId = allocateBlock();

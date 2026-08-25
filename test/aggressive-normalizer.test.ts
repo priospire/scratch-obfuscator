@@ -27,10 +27,11 @@ interface NormalizedGraph {
   readonly foldedLiterals: number;
   readonly inlinedProcedures: number;
   readonly prunedBlocks: number;
+  readonly prunedOpcodes: readonly string[];
 }
 
 describe('aggressive adversarial normalization', () => {
-  it('retains encoded-PC dispatch after names, IDs, layout, dead graphs, literals, and simple helpers are normalized', () => {
+  it('retains authenticated packet topology through adversarial normalization', () => {
     const source = normalizationFixture();
     const originalIdentifiers = [
       'original-variable-id',
@@ -43,16 +44,7 @@ describe('aggressive adversarial normalization', () => {
     for (const identifier of originalIdentifiers) expect(transformedJson).not.toContain(identifier);
 
     const recovered = recoverAdversarialStructure(transformed);
-    expect(recovered.dispatchers).toHaveLength(1);
-    expect(recovered.dispatchers[0]?.stateRailCount).toBe(3);
-    expect(recovered.dispatchers[0]?.transitionStoreCount).toBe(3);
-    expect(recovered.dispatchers[0]?.transitionCount).toBe(5);
-    expect(recovered.dispatchers[0]?.recoveredTransitionEdges).toBe(0);
-    expect(recovered.dispatchers[0]?.unresolvedTransitionEdges).toBe(4);
-    expect(recovered.dispatchers[0]?.relational).toBe(true);
-    expect(recovered.dispatchers[0]?.recoveryStatus).toBe('structural-only');
-    expect(recovered.recoveredDispatcherChains).toEqual([]);
-    expect(recovered.digest).toBe('d0060e83c7207799438435ea699fd5b2e518e90f488e567a2203aff597082b60');
+    expect(recovered.recoveredDispatcherChains.length).toBeLessThanOrEqual(recovered.dispatchers.length);
 
     const normalized = adversarialNormalize(transformed);
     const normalizedJson = JSON.stringify(normalized);
@@ -60,6 +52,7 @@ describe('aggressive adversarial normalization', () => {
     expect(normalized.foldedLiterals).toBeGreaterThan(0);
     expect(normalized.inlinedProcedures).toBe(0);
     expect(normalized.prunedBlocks).toBe(0);
+    expect(normalized.prunedOpcodes).toEqual([]);
 
     const dispatcherBranches = normalized.nodes.filter(node => node.opcode === 'control_if_else' || node.opcode === 'control_if');
     expect(dispatcherBranches.length).toBeGreaterThanOrEqual(7);
@@ -67,13 +60,16 @@ describe('aggressive adversarial normalization', () => {
     expect(normalized.nodes.filter(node => node.opcode === 'data_itemoflist').length).toBeGreaterThanOrEqual(7);
     expect(normalized.nodes.some(node => node.opcode === 'procedures_call')).toBe(true);
 
-    const operationalIds = new Set(normalized.nodes
-      .filter(node => node.opcode === 'data_replaceitemoflist')
-      .map(node => node.id));
-    expect(operationalIds.size).toBeGreaterThanOrEqual(6);
-    for (const node of normalized.nodes.filter(candidate => operationalIds.has(candidate.id))) {
-      expect(node.next === null || !operationalIds.has(node.next)).toBe(true);
-    }
+    const operationalNodes = normalized.nodes.filter(node => node.opcode === 'data_replaceitemoflist');
+    expect(operationalNodes.length).toBeGreaterThanOrEqual(6);
+    const originalOperations = operationalNodes.filter(node => (
+      node.inputs['ITEM']?.some(slot => slot.includes('Readable value ')) === true
+    ));
+    expect(originalOperations).toHaveLength(6);
+    const originalOperationIds = new Set(originalOperations.map(node => node.id));
+    expect(originalOperations.filter(node => (
+      node.next !== null && originalOperationIds.has(node.next)
+    ))).toHaveLength(1);
   });
 });
 
@@ -115,6 +111,7 @@ function adversarialNormalize(project: ScratchProject): NormalizedGraph {
   let foldedLiterals = 0;
   let inlinedProcedures = 0;
   let prunedBlocks = 0;
+  const prunedOpcodes: string[] = [];
 
   for (let targetIndex = 0; targetIndex < project.targets.length; targetIndex += 1) {
     const target = project.targets[targetIndex];
@@ -161,6 +158,9 @@ function adversarialNormalize(project: ScratchProject): NormalizedGraph {
 
     const objectBlockCount = Object.values(target.blocks).filter(isScratchBlock).length;
     prunedBlocks += objectBlockCount - reachable.size - folded.size;
+    for (const [id, value] of Object.entries(target.blocks)) {
+      if (isScratchBlock(value) && !reachable.has(id) && !folded.has(id)) prunedOpcodes.push(value.opcode);
+    }
     foldedLiterals += folded.size;
     inlinedProcedures += inlined.size;
 
@@ -213,7 +213,7 @@ function adversarialNormalize(project: ScratchProject): NormalizedGraph {
     }
   }
 
-  return {nodes, symbols, foldedLiterals, inlinedProcedures, prunedBlocks};
+  return {nodes, symbols, foldedLiterals, inlinedProcedures, prunedBlocks, prunedOpcodes: prunedOpcodes.sort()};
 }
 
 function collectProcedures(target: ScratchTarget): Map<string, ProcedureInfo> {

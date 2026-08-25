@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import {Buffer} from 'node:buffer';
 import {fileURLToPath} from 'node:url';
 import {basename} from 'node:path';
 import {realpathSync} from 'node:fs';
@@ -17,10 +18,20 @@ import {obfuscateProject} from './obfuscation/index.js';
 import {validateProject} from './validation/index.js';
 import {compareUtf8} from './deterministic.js';
 import {DEFAULT_LIMITS, type ArchiveEntry, type ObfuscationMode, type ObfuscationStats} from './types.js';
+import {
+  CliProgressReporter,
+  cliCaveats,
+  formatSuccessSummary,
+  formatVerboseReport,
+  type CliExecutionMetrics,
+  type CliVerbosity
+} from './cli-reporting.js';
 
-const VERSION = '0.6.0';
+const VERSION = '0.7.0';
 
-const HELP = `Usage: scratch-obfuscator <input.sb3> [options]
+const HELP = `Scratch Obfuscator — PrioSDK Gen 4
+
+Usage: scratch-obfuscator <input.sb3> [options]
 
 Deterministically obfuscate a Scratch 3 project archive.
 
@@ -31,6 +42,10 @@ Modes (mutually exclusive):
 
 Options:
   -anticheat, --anticheat     Add tamper-response sentinels and event guards
+  -antisave, --antisave       Add signed-zero resave guards and Unicode canaries
+  -allowsize, --allowsize     Permit expanded bounded block/JSON growth in stronger modes
+  -extra, --extra             Add compatibility-breaking project privacy transforms
+  -verbose, --verbose [max]   Show progress and reporting; max adds safe details
   -o, --output <file.sb3>      Output path (default: <stem>.obfuscated.sb3)
   --force                     Replace an existing output transactionally
   -h, --help                  Show this help
@@ -43,7 +58,11 @@ export interface ParsedCliArguments {
   readonly output?: string;
   readonly mode: ObfuscationMode;
   readonly antiCheat: boolean;
+  readonly antiSave: boolean;
+  readonly allowSize: boolean;
+  readonly extra: boolean;
   readonly force: boolean;
+  readonly verbosity: CliVerbosity;
 }
 
 interface InformationalArguments {
@@ -53,23 +72,48 @@ interface InformationalArguments {
 export interface CliIo {
   readonly stdout: (text: string) => void;
   readonly stderr: (text: string) => void;
+  readonly interactive?: boolean;
 }
 
 export function parseCliArguments(arguments_: readonly string[]): ParsedCliArguments | InformationalArguments {
+  let normalizationEnded = false;
   const argumentsNormalized = arguments_.map(argument => {
-    if (argument === '-lossless' || argument === '-lossy' || argument === '-no-preserve' || argument === '-anticheat') {
+    if (normalizationEnded) return argument;
+    if (argument === '--') {
+      normalizationEnded = true;
+      return argument;
+    }
+    if (
+      argument === '-lossless'
+      || argument === '-lossy'
+      || argument === '-no-preserve'
+      || argument === '-anticheat'
+      || argument === '-antisave'
+      || argument === '-allowsize'
+      || argument === '-extra'
+      || argument === '-verbose'
+    ) {
       return `-${argument}`;
     }
+    if (argument.startsWith('-verbose=')) return `--${argument.slice(1)}`;
     return argument;
   });
-  if (argumentsNormalized.includes('--help') || argumentsNormalized.includes('-h')) return {kind: 'help'};
-  if (argumentsNormalized.includes('--version') || argumentsNormalized.includes('-V')) return {kind: 'version'};
+  const terminatorIndex = argumentsNormalized.indexOf('--');
+  const optionArguments = terminatorIndex === -1
+    ? argumentsNormalized
+    : argumentsNormalized.slice(0, terminatorIndex);
+  if (optionArguments.includes('--help') || optionArguments.includes('-h')) return {kind: 'help'};
+  if (optionArguments.includes('--version') || optionArguments.includes('-V')) return {kind: 'version'};
 
   const positionals: string[] = [];
   const modes = new Set<ObfuscationMode>();
   let output: string | undefined;
   let force = false;
   let antiCheat = false;
+  let antiSave = false;
+  let allowSize = false;
+  let extra = false;
+  let verbosity: CliVerbosity = 'normal';
   let optionsEnded = false;
 
   for (let index = 0; index < argumentsNormalized.length; index += 1) {
@@ -80,6 +124,23 @@ export function parseCliArguments(arguments_: readonly string[]): ParsedCliArgum
       modes.add(argument.slice(2) as ObfuscationMode);
     } else if (!optionsEnded && argument === '--anticheat') {
       antiCheat = true;
+    } else if (!optionsEnded && argument === '--antisave') {
+      antiSave = true;
+    } else if (!optionsEnded && argument === '--allowsize') {
+      allowSize = true;
+    } else if (!optionsEnded && argument === '--extra') {
+      extra = true;
+    } else if (!optionsEnded && argument === '--verbose') {
+      if (argumentsNormalized[index + 1] === 'max') {
+        verbosity = 'max';
+        index += 1;
+      } else if (verbosity !== 'max') {
+        verbosity = 'verbose';
+      }
+    } else if (!optionsEnded && argument.startsWith('--verbose=')) {
+      const value = argument.slice('--verbose='.length);
+      if (value !== 'max') throw new UsageError('--verbose accepts only the optional value "max"');
+      verbosity = 'max';
     } else if (!optionsEnded && argument === '--force') {
       force = true;
     } else if (!optionsEnded && (argument === '-o' || argument === '--output')) {
@@ -105,18 +166,20 @@ export function parseCliArguments(arguments_: readonly string[]): ParsedCliArgum
   const input = positionals[0] as string;
   const mode = modes.values().next().value ?? 'lossless';
   return output === undefined
-    ? {kind: 'run', input, mode, antiCheat, force}
-    : {kind: 'run', input, output, mode, antiCheat, force};
+    ? {kind: 'run', input, mode, antiCheat, antiSave, allowSize, extra, force, verbosity}
+    : {kind: 'run', input, output, mode, antiCheat, antiSave, allowSize, extra, force, verbosity};
 }
 
 export async function runCli(
   arguments_: readonly string[],
   io: CliIo = {
     stdout: text => process.stdout.write(text),
-    stderr: text => process.stderr.write(text)
+    stderr: text => process.stderr.write(text),
+    interactive: process.stderr.isTTY === true
   },
   signal?: AbortSignal
 ): Promise<number> {
+  let progress: CliProgressReporter | undefined;
   try {
     const parsed = parseCliArguments(arguments_);
     if (parsed.kind !== 'run') {
@@ -124,21 +187,39 @@ export async function runCli(
       return 0;
     }
 
-    const {paths, stats} = await executeObfuscation(parsed, signal);
-    io.stdout(
-      `Obfuscated ${JSON.stringify(basename(paths.inputPath))} -> ${JSON.stringify(basename(paths.outputPath))}` +
-      ` (mode=${parsed.mode}, anticheat=${parsed.antiCheat ? 'on' : 'off'},` +
-      ` blocks=${stats.blocksBefore}->${stats.blocksAfter}, renamed=${stats.identifiersRenamed + stats.symbolsRenamed},` +
-      ` packed=${stats.variablesVirtualized ?? 0}, folded=${stats.constantsFolded ?? 0},` +
-      ` fallbacks=${stats.inactiveFallbacksRemoved ?? 0}, comments=${stats.commentsRemoved},` +
-      ` packed-lists=${stats.listsVirtualized ?? 0},` +
-      ` decoys=${stats.decoysAdded}, virtualized=${stats.virtualizedBlocks}, warnings=${stats.warnings.length})\n`
-    );
+    progress = new CliProgressReporter({
+      stderr: io.stderr,
+      interactive: io.interactive === true,
+      verbosity: parsed.verbosity
+    });
+    progress.update(0, 'Preparing output');
+    const {paths, stats, metrics} = await executeObfuscation(parsed, signal, progress);
+    progress.complete();
+    const caveats = new Set([
+      ...(stats.caveats ?? []),
+      ...cliCaveats(parsed.mode, parsed.antiCheat, parsed.extra, parsed.allowSize, parsed.antiSave)
+    ]);
+    io.stdout(formatSuccessSummary(
+      basename(paths.inputPath),
+      basename(paths.outputPath),
+      parsed.mode,
+      parsed.antiCheat,
+      stats,
+      caveats.size,
+      parsed.extra,
+      parsed.allowSize,
+      parsed.antiSave
+    ));
+    io.stdout(formatVerboseReport(stats, metrics, parsed.verbosity));
     for (const warning of stats.warnings) {
       io.stderr(`warning: ${warning}\n`);
     }
+    for (const caveat of caveats) {
+      io.stderr(`caveat: ${caveat}\n`);
+    }
     return 0;
   } catch (error) {
+    progress?.stop();
     if (error instanceof AppError) {
       io.stderr(`error: ${error.message}\n`);
       return error.exitCode;
@@ -154,11 +235,18 @@ export async function runCli(
 
 async function executeObfuscation(
   parsed: ParsedCliArguments,
-  signal: AbortSignal | undefined
-): Promise<{paths: Awaited<ReturnType<typeof prepareOutput>>; stats: ObfuscationStats}> {
+  signal: AbortSignal | undefined,
+  progress: CliProgressReporter
+): Promise<{
+  paths: Awaited<ReturnType<typeof prepareOutput>>;
+  stats: ObfuscationStats;
+  metrics: CliExecutionMetrics;
+}> {
   const paths = await prepareOutput(parsed.input, parsed.output, parsed.force);
+  progress.update(0.04, 'Reading input archive');
   const source = await loadArchive(paths.inputPath, DEFAULT_LIMITS, signal);
   try {
+    progress.update(0.10, 'Validating input archive');
     validateProject(source.project, {
       allowRecoverableLocalSymbolIdCollisions: true,
       allowRecoverableInactiveShadowOwnership: true,
@@ -166,23 +254,48 @@ async function executeObfuscation(
     });
     validateReferencedAssets(source.project, source.entries);
     const modeSeed = deriveModeSeed(source.seed, parsed.mode);
-    const transformed = obfuscateProject(source.project, parsed.mode, modeSeed, {antiCheat: parsed.antiCheat});
+    progress.update(0.15, 'Transforming project');
+    const transformed = obfuscateProject(source.project, parsed.mode, modeSeed, {
+      antiCheat: parsed.antiCheat,
+      antiSave: parsed.antiSave,
+      allowSize: parsed.allowSize,
+      extra: parsed.extra,
+      onProgress: event => {
+        progress.update(
+          0.15 + ((event.percentage / 100) * 0.60),
+          formatEngineProgress(event.stage, event.detail, event.metrics, parsed.verbosity)
+        );
+      }
+    });
+    progress.update(0.78, 'Validating transformed project');
     validateProject(transformed.project);
+    progress.update(0.80, 'Serializing transformed project');
     const projectBytes = serializeProject(transformed.project, parsed.mode);
+    const sourceAssets = source.entries.filter(entry => entry.name !== 'project.json');
+    const assetBytes = sourceAssets.reduce((total, entry) => total + entry.uncompressedSize, 0);
 
+    progress.update(0.84, 'Writing deterministic archive');
     await commitOutput(
       paths.outputPath,
       parsed.force,
       temporaryPath => writeDeterministicArchive(temporaryPath, projectBytes, source.entries, signal),
       async temporaryPath => {
+        progress.update(0.90, 'Reopening written archive');
         const outputLimits = parsed.mode === 'no-preserve' ? {
           ...DEFAULT_LIMITS,
           maxProjectBytes: 128 * 1024 * 1024
         } : DEFAULT_LIMITS;
         const reopened = await loadArchive(temporaryPath, outputLimits, signal);
         try {
+          progress.update(0.94, 'Validating written archive');
           validateProject(reopened.project);
           validateReferencedAssets(reopened.project, reopened.entries);
+          progress.update(0.96, 'Verifying serialized project state');
+          const reopenedProjectBytes = serializeProject(reopened.project, parsed.mode);
+          if (Buffer.compare(projectBytes, reopenedProjectBytes) !== 0) {
+            throw new Error('archive serialization altered the verified project state during write or reopen');
+          }
+          progress.update(0.97, 'Verifying preserved assets');
           assertAssetsPreserved(source.entries, reopened.entries);
         } finally {
           await reopened.cleanup();
@@ -190,11 +303,69 @@ async function executeObfuscation(
       },
       signal
     );
-    return {paths, stats: transformed.stats};
+    progress.update(0.99, 'Verified output committed');
+    return {
+      paths,
+      stats: transformed.stats,
+      metrics: {
+        archiveEntries: source.entries.length,
+        assetsVerified: sourceAssets.length,
+        assetBytesVerified: assetBytes,
+        projectBytesWritten: projectBytes.length
+      }
+    };
   } finally {
     await source.cleanup();
   }
 }
+
+function formatEngineProgress(
+  stage: string,
+  detail: string | undefined,
+  metrics: Readonly<Record<string, number | string | boolean>> | undefined,
+  verbosity: CliVerbosity
+): string {
+  const stageLabel = stage
+    .split('-')
+    .filter(part => part.length > 0)
+    .map((part, index) => index === 0 ? `${part[0]?.toUpperCase() ?? ''}${part.slice(1)}` : part)
+    .join(' ') || 'Transforming project';
+  const label = detail === undefined ? stageLabel : `${stageLabel} - ${detail}`;
+  if (verbosity !== 'max' || metrics === undefined) return label;
+  const values = Object.entries(metrics)
+    .filter((entry): entry is [string, number | boolean] => (
+      SAFE_PROGRESS_METRICS.has(entry[0]) && (typeof entry[1] === 'number' || typeof entry[1] === 'boolean')
+    ))
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([name, value]) => `${name}=${String(value)}`);
+  return values.length === 0 ? label : `${label} - ${values.join(', ')}`;
+}
+
+const SAFE_PROGRESS_METRICS = new Set([
+  'blockEquivalents',
+  'blocksAfter',
+  'blocksBefore',
+  'candidates',
+  'canaries',
+  'cap',
+  'commentsRemoved',
+  'conditions',
+  'decoyBlocks',
+  'decoyVariables',
+  'displayNames',
+  'guards',
+  'identifiers',
+  'linearRuns',
+  'numbers',
+  'packedLists',
+  'packedVariables',
+  'pools',
+  'protectedVariables',
+  'strings',
+  'variables',
+  'virtualizedBlocks',
+  'warnings'
+]);
 
 function assertAssetsPreserved(before: readonly ArchiveEntry[], after: readonly ArchiveEntry[]): void {
   const beforeAssets = before.filter(entry => entry.name !== 'project.json').sort((left, right) => compareUtf8(left.name, right.name));

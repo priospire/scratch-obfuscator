@@ -7,6 +7,7 @@ import {
   makeInvisibleDisplayName
 } from '../src/obfuscation/aggressive.js';
 import {countObjectBlocks} from '../src/obfuscation/analysis.js';
+import {obfuscateProject} from '../src/obfuscation/index.js';
 import {
   ANTI_CHEAT_WATERMARK_NAME,
   applyAntiCheatTransform,
@@ -31,6 +32,10 @@ interface RuntimeVariable {
 interface RuntimeTarget {
   isStage: boolean;
   variables: Record<string, RuntimeVariable>;
+  x: number;
+  y: number;
+  size: number;
+  volume: number;
 }
 
 interface ScratchVmInstance {
@@ -83,6 +88,7 @@ describe('aggressive transform coverage regressions', () => {
     const project = blankProject();
     const stage = requireStage(project);
     stage.variables['counter'] = [occupiedDisplayName, 0];
+    stage.variables['unrelated-id'] = ['unrelated', 0];
     stage.blocks['hat'] = block('event_whenflagclicked', 'command-0', null, true);
     for (let index = 0; index < 4; index += 1) {
       stage.blocks[`command-${index}`] = block(
@@ -94,10 +100,17 @@ describe('aggressive transform coverage regressions', () => {
         {VARIABLE: [occupiedDisplayName, 'counter']}
       );
     }
-    const last = stage.blocks['command-3'];
-    if (!last || !isScratchBlock(last)) throw new Error('fixture command is unavailable');
-    last.mutation = {tagName: 'mutation', children: [], proccode: occupiedProcedureCode};
-    stage.blocks[occupiedBlockId] = [12, occupiedDisplayName, 'counter'];
+    stage.blocks['occupied-definition'] = {
+      ...block('procedures_definition', null, null, true, {custom_block: [1, 'occupied-prototype']}),
+      x: 40,
+      y: 60
+    };
+    stage.blocks['occupied-prototype'] = {
+      ...block('procedures_prototype', null, 'occupied-definition', false),
+      shadow: true,
+      mutation: procedureMutation(occupiedProcedureCode, false)
+    };
+    stage.blocks[occupiedBlockId] = [12, 'unrelated', 'unrelated-id'];
 
     applyAggressiveTransforms(
       project,
@@ -106,13 +119,18 @@ describe('aggressive transform coverage regressions', () => {
       stats(project, 'lossy')
     );
 
-    expect(stage.blocks[occupiedBlockId]).toEqual([12, occupiedDisplayName, 'counter']);
-    const generatedPrototype = Object.values(stage.blocks).find(value => (
+    expect(stage.blocks[occupiedBlockId]).toEqual([12, 'unrelated', 'unrelated-id']);
+    const procedureCodes = Object.values(stage.blocks).flatMap(value => (
       isScratchBlock(value)
       && value.opcode === 'procedures_prototype'
-      && value.mutation?.['proccode'] === `${occupiedProcedureCode}_`
+      && typeof value.mutation?.['proccode'] === 'string'
+        ? [value.mutation['proccode']]
+        : []
     ));
-    expect(generatedPrototype).toBeDefined();
+    expect(procedureCodes).toContain(occupiedProcedureCode);
+    expect(procedureCodes.some(code => (
+      code !== occupiedProcedureCode && code.startsWith(occupiedProcedureCode)
+    ))).toBe(true);
     expect(requireBlock(stage, replacementBlockId).opcode).toBe('procedures_definition');
     validateProject(project);
   });
@@ -194,28 +212,55 @@ describe('aggressive transform coverage regressions', () => {
   it('retries both deterministic dispatcher procedure suffixes before allocating a code', () => {
     const seed = new Uint8Array(32).fill(131);
     const domain = 'coverage:dispatcher-procedure-collision';
-    const runRng = new DeterministicGenerator(seed, domain).fork('run-0');
-    const occupiedCode = makeInvisibleDisplayName(runRng.fork('dispatcher-code'), 5);
+    const runRng = new DeterministicGenerator(seed, domain).fork('run-0').fork('expanded-aliases-4');
+    const occupiedCode = makeInvisibleDisplayName(runRng.fork('dispatcher-code'), 9);
     const occupiedFirstSuffix = `${occupiedCode}\u200b`;
     const replacementCode = `${occupiedFirstSuffix}\u2060`;
-    const project = incrementProject(4);
+    const project = incrementProject(8);
     const sprite = project.targets.find(target => !target.isStage);
     if (!sprite) throw new Error('fixture Sprite is unavailable');
-    requireBlock(sprite, 'increment-2').mutation = {tagName: 'mutation', proccode: occupiedCode};
-    requireBlock(sprite, 'increment-3').mutation = {tagName: 'mutation', proccode: occupiedFirstSuffix};
+    for (const [index, code] of [occupiedCode, occupiedFirstSuffix].entries()) {
+      const definitionId = `occupied-definition-${index}`;
+      const prototypeId = `occupied-prototype-${index}`;
+      sprite.blocks[definitionId] = {
+        ...block('procedures_definition', null, null, true, {custom_block: [1, prototypeId]}),
+        x: 20 + (index * 20),
+        y: 40
+      };
+      sprite.blocks[prototypeId] = {
+        ...block('procedures_prototype', null, definitionId, false),
+        shadow: true,
+        mutation: procedureMutation(code, false)
+      };
+    }
+    validateProject(project);
 
     applyAggressiveTransforms(
       project,
       'no-preserve',
       new DeterministicGenerator(seed, domain),
-      stats(project)
+      stats(project),
+      undefined,
+      true
     );
 
-    expect(Object.values(sprite.blocks).some(value => (
+    const transformedSprite = project.targets.find(target => !target.isStage);
+    if (!transformedSprite) throw new Error('transformed Sprite is unavailable');
+    const prototypeCodes = Object.values(transformedSprite.blocks).flatMap(value => (
       isScratchBlock(value)
       && value.opcode === 'procedures_prototype'
-      && value.mutation?.['proccode'] === replacementCode
-    ))).toBe(true);
+      && typeof value.mutation?.['proccode'] === 'string'
+        ? [value.mutation['proccode']]
+        : []
+    ));
+    const callCounts = new Map<string, number>();
+    for (const value of Object.values(transformedSprite.blocks)) {
+      if (!isScratchBlock(value) || value.opcode !== 'procedures_call') continue;
+      const code = value.mutation?.['proccode'];
+      if (typeof code === 'string') callCounts.set(code, (callCounts.get(code) ?? 0) + 1);
+    }
+    expect(prototypeCodes).toContain(replacementCode);
+    expect(callCounts.get(replacementCode)).toBe(9);
     validateProject(project);
   });
 
@@ -224,31 +269,106 @@ describe('aggressive transform coverage regressions', () => {
     const sprite = project.targets.find(target => !target.isStage);
     if (!sprite) throw new Error('fixture Sprite is unavailable');
     const resultStats = stats(project);
+    let virtualizationSnapshot: ScratchProject | undefined;
 
     applyAggressiveTransforms(
       project,
       'no-preserve',
       new DeterministicGenerator(new Uint8Array(32).fill(14), 'coverage:dispatcher-sixteen'),
-      resultStats
+      resultStats,
+      event => {
+        if (event.stage === 'virtualizing-control-flow') virtualizationSnapshot = structuredClone(project);
+      },
+      true
     );
 
-    expect(resultStats.virtualizedBlocks).toBe(14);
-    const firstSeparator = requireBlock(sprite, 'increment-5');
-    expect(firstSeparator.opcode).toBe('data_changevariableby');
-    expect(firstSeparator.next).not.toBe('increment-6');
-    const separator = requireBlock(sprite, 'increment-11');
-    expect(separator.opcode).toBe('data_changevariableby');
-    expect(separator.next).not.toBe('increment-12');
-    validateProject(project);
+    expect(resultStats.virtualizedBlocks).toBe(12);
+    if (!virtualizationSnapshot) throw new Error('sixteen-command dispatcher snapshot is unavailable');
+    const transformedSprite = virtualizationSnapshot.targets.find(target => !target.isStage);
+    if (!transformedSprite) throw new Error('transformed Sprite is unavailable');
+    const originalIds = new Set(Array.from({length: 16}, (_, index) => `increment-${index}`));
+    const removedOriginalIds = [...originalIds].filter(id => transformedSprite.blocks[id] === undefined);
+    expect(removedOriginalIds).toEqual(Array.from({length: 8}, (_, index) => `increment-${index}`));
+    const clonedCommands = Object.entries(transformedSprite.blocks).filter(([id, value]) => (
+      !originalIds.has(id)
+      && isScratchBlock(value)
+      && value.opcode === 'data_changevariableby'
+      && value.fields['VARIABLE']?.[1] === 'counter-id'
+    ));
+    expect(clonedCommands).toHaveLength(8 * 4);
+    for (const [, command] of clonedCommands) {
+      if (!isScratchBlock(command)) throw new Error('expanded command clone is malformed');
+      const route = command.parent === null ? undefined : transformedSprite.blocks[command.parent];
+      expect(isScratchBlock(route) && route.opcode === 'control_if').toBe(true);
+    }
+    const retainedOriginals = [...originalIds].flatMap(id => {
+      const command = transformedSprite.blocks[id];
+      return isScratchBlock(command) ? [command] : [];
+    });
+    expect(retainedOriginals).toHaveLength(8);
+    expect(retainedOriginals.filter(command => {
+      const route = command.parent === null ? undefined : transformedSprite.blocks[command.parent];
+      return isScratchBlock(route) && route.opcode === 'control_if';
+    })).toHaveLength(4);
+    expect(retainedOriginals.filter(command => command.next !== null && originalIds.has(command.next))).toHaveLength(2);
+    const callCounts = new Map<string, number>();
+    for (const value of Object.values(transformedSprite.blocks)) {
+      if (!isScratchBlock(value) || value.opcode !== 'procedures_call') continue;
+      const code = value.mutation?.['proccode'];
+      if (typeof code === 'string') callCounts.set(code, (callCounts.get(code) ?? 0) + 1);
+    }
+    expect([...callCounts.values()]).toContain(5);
+    expect([...callCounts.values()].filter(count => count === 9).length).toBeGreaterThanOrEqual(1);
+    validateProject(virtualizationSnapshot);
 
     const vm = createVm();
-    await vm.loadProject(createFixtureArchive(project));
+    await vm.loadProject(createFixtureArchive(virtualizationSnapshot));
     vm.start();
     vm.greenFlag();
     for (let step = 0; step < 500 && vm.runtime.threads.length > 0; step += 1) vm.runtime._step();
     expect(vm.runtime.threads).toHaveLength(0);
     const runtimeSprite = vm.runtime.targets.find(target => !target.isStage);
     expect(runtimeSprite?.variables['counter-id']?.value).toBe(16);
+  }, 30_000);
+
+  it('virtualizes the generated CI fixture marker tail after non-private prefix writes', async () => {
+    const configurations = [
+      {options: {}, aliases: 1},
+      {options: {antiSave: true}, aliases: 1},
+      {options: {allowSize: true}, aliases: 4}
+    ] as const;
+    const markerOpcodes = [
+      'motion_changexby',
+      'motion_changeyby',
+      'looks_changesizeby',
+      'sound_changevolumeby'
+    ];
+    const baseline = await executeSpriteState(releaseMarkerProject());
+    expect(baseline).toEqual({x: 83, y: -7, size: 100, volume: 28});
+
+    for (const [index, configuration] of configurations.entries()) {
+      const result = obfuscateProject(
+        releaseMarkerProject(),
+        'no-preserve',
+        new Uint8Array(32).fill(0x71 + index),
+        configuration.options
+      );
+      expect(result.stats.virtualizedBlocks).toBe(4);
+      const sprite = result.project.targets.find(target => !target.isStage);
+      if (!sprite) throw new Error('transformed release fixture Sprite is unavailable');
+      for (const opcode of markerOpcodes) {
+        expect(Object.values(sprite.blocks).filter(value => (
+          isScratchBlock(value) && value.opcode === opcode
+        ))).toHaveLength(configuration.aliases);
+      }
+      expect(Object.values(sprite.blocks).filter(value => (
+        isScratchBlock(value) && value.opcode === 'motion_setrotationstyle'
+      ))).toHaveLength(1);
+      validateProject(result.project);
+      if (!('antiSave' in configuration.options)) {
+        expect(await executeSpriteState(result.project)).toEqual(baseline);
+      }
+    }
   }, 30_000);
 
   it('preserves default condition, branch, and variable-delta behavior while obscuring their forms', () => {
@@ -507,6 +627,26 @@ function createVm(): ScratchVmInstance {
   return vm;
 }
 
+async function executeSpriteState(project: ScratchProject): Promise<{
+  readonly x: number;
+  readonly y: number;
+  readonly size: number;
+  readonly volume: number;
+}> {
+  const vm = createVm();
+  await vm.loadProject(createFixtureArchive(project));
+  vm.start();
+  vm.greenFlag();
+  for (let step = 0; step < 1_000 && vm.runtime.threads.length > 0; step += 1) {
+    vm.runtime._step();
+    await Promise.resolve();
+  }
+  expect(vm.runtime.threads).toHaveLength(0);
+  const sprite = vm.runtime.targets.find(target => !target.isStage);
+  if (!sprite) throw new Error('runtime Sprite is unavailable');
+  return {x: sprite.x, y: sprite.y, size: sprite.size, volume: sprite.volume};
+}
+
 function blankProject(): ScratchProject {
   const project = createFixtureProject();
   const stage = requireStage(project);
@@ -546,8 +686,132 @@ function incrementProject(length: number): ScratchProject {
       {VARIABLE: ['counter', 'counter-id']}
     );
   }
-  project.monitors = [monitor('data_variable', 'counter-id', sprite.name, false)];
+  project.monitors = [];
   project.extensions = [];
+  return project;
+}
+
+function releaseMarkerProject(): ScratchProject {
+  const project = createFixtureProject();
+  const stage = requireStage(project);
+  const sprite = project.targets.find(target => !target.isStage);
+  if (!sprite) throw new Error('fixture Sprite is unavailable');
+  stage.variables = {
+    'global-score': ['Readable score', 0],
+    'stage-alpha': ['Readable stage alpha', 'stage-alpha-initial-v2'],
+    'stage-beta': ['Readable stage beta', 'stage-beta-initial-v2']
+  };
+  stage.lists = {'global-list': ['Readable list', ['alpha', 'beta']]};
+  stage.broadcasts = {};
+  stage.blocks = {};
+  stage.comments = {};
+  sprite.variables = {
+    'sprite-alpha': ['Readable sprite alpha', 'sprite-alpha-initial-v2'],
+    'sprite-beta': ['Readable sprite beta', 'sprite-beta-initial-v2']
+  };
+  sprite.lists = {};
+  sprite.broadcasts = {};
+  sprite.comments = {};
+  sprite.blocks = {
+    flag: block('event_whenflagclicked', 'set-stage-alpha', null, true),
+    'set-stage-alpha': block(
+      'data_setvariableto',
+      'set-stage-beta',
+      'flag',
+      false,
+      {VALUE: [1, [10, 'stage-alpha-runtime-v2']]},
+      {VARIABLE: ['Readable stage alpha', 'stage-alpha']}
+    ),
+    'set-stage-beta': block(
+      'data_setvariableto',
+      'set-sprite-alpha',
+      'set-stage-alpha',
+      false,
+      {VALUE: [1, [10, 'stage-beta-runtime-v2']]},
+      {VARIABLE: ['Readable stage beta', 'stage-beta']}
+    ),
+    'set-sprite-alpha': block(
+      'data_setvariableto',
+      'set-sprite-beta',
+      'set-stage-beta',
+      false,
+      {VALUE: [1, [10, 'sprite-alpha-runtime-v2']]},
+      {VARIABLE: ['Readable sprite alpha', 'sprite-alpha']}
+    ),
+    'set-sprite-beta': block(
+      'data_setvariableto',
+      'set-x',
+      'set-sprite-alpha',
+      false,
+      {VALUE: [1, [10, 'sprite-beta-runtime-v2']]},
+      {VARIABLE: ['Readable sprite beta', 'sprite-beta']}
+    ),
+    'set-x': block(
+      'motion_setx',
+      'set-y',
+      'set-sprite-beta',
+      false,
+      {X: [3, 'multiply', [4, '999']]}
+    ),
+    multiply: block(
+      'operator_multiply',
+      null,
+      'set-x',
+      false,
+      {NUM1: [2, 'add'], NUM2: [1, [4, '8']]}
+    ),
+    add: block(
+      'operator_add',
+      null,
+      'multiply',
+      false,
+      {NUM1: [1, [4, '5']], NUM2: [1, [4, '4']]}
+    ),
+    'set-y': block('motion_sety', 'set-size', 'set-x', false, {Y: [3, 'stage-reporter', [4, '777']]}),
+    'stage-reporter': block(
+      'data_variable',
+      null,
+      'set-y',
+      false,
+      {},
+      {VARIABLE: ['Readable stage alpha', 'stage-alpha']}
+    ),
+    'set-size': block('looks_setsizeto', 'set-volume', 'set-y', false, {SIZE: [1, [4, '83']]}),
+    'set-volume': block(
+      'sound_setvolumeto',
+      'separator',
+      'set-size',
+      false,
+      {VOLUME: [1, [4, '37']]}
+    ),
+    separator: block(
+      'motion_setrotationstyle',
+      'change-x',
+      'set-volume',
+      false,
+      {},
+      {STYLE: ['left-right', null]}
+    ),
+    'change-x': block('motion_changexby', 'change-y', 'separator', false, {DX: [1, [4, '11']]}),
+    'change-y': block('motion_changeyby', 'change-size', 'change-x', false, {DY: [1, [4, '-7']]}),
+    'change-size': block(
+      'looks_changesizeby',
+      'change-volume',
+      'change-y',
+      false,
+      {CHANGE: [1, [4, '13']]}
+    ),
+    'change-volume': block(
+      'sound_changevolumeby',
+      null,
+      'change-size',
+      false,
+      {VOLUME: [1, [4, '-9']]}
+    )
+  };
+  project.monitors = [monitor('data_variable', 'global-score', '', true)];
+  project.extensions = [];
+  validateProject(project);
   return project;
 }
 

@@ -75,13 +75,17 @@ afterEach(async () => {
 });
 
 describe('portable output publication fallbacks', () => {
-  it('uses exclusive copy when the filesystem rejects no-force hardlinks', async () => {
+  it('fails closed without exposing an output when no-force hardlinks are unavailable', async () => {
     const directory = await temporaryDirectory();
     const output = join(directory, 'output.sb3');
     hooks.rejectLinks = true;
-    await commitOutput(output, false, path => writeFile(path, 'portable'), () => Promise.resolve());
-    expect(await readFile(output, 'utf8')).toBe('portable');
-    expect((await readdir(directory)).filter(name => name.startsWith('.output.sb3.'))).toEqual([]);
+    await expect(commitOutput(
+      output,
+      false,
+      path => writeFile(path, 'portable'),
+      () => Promise.resolve()
+    )).rejects.toThrowError(/cannot atomically publish a new output/u);
+    expect(await readdir(directory)).toEqual([]);
   });
 
   it('creates and syncs a fallback backup before atomically replacing an existing output', async () => {
@@ -115,23 +119,29 @@ describe('portable output publication fallbacks', () => {
     expect((await readdir(directory)).filter(name => name.startsWith('.output.sb3.'))).toEqual([]);
   });
 
-  it('normalizes exclusive-copy destination failures and removes the temporary file', async () => {
+  it('normalizes fallback-backup open failures and preserves the existing output', async () => {
     const directory = await temporaryDirectory();
     const output = join(directory, 'output.sb3');
+    const backup = join(directory, '.output.sb3.scratch-obfuscator.backup');
+    await writeFile(output, 'old');
     hooks.rejectLinks = true;
-    hooks.failOpenPath = output;
-    await expect(commitOutput(output, false, path => writeFile(path, 'new'), () => Promise.resolve())).rejects.toThrowError(/EIO/);
-    expect(await readdir(directory)).toEqual([]);
+    hooks.failOpenPath = backup;
+    await expect(commitOutput(output, true, path => writeFile(path, 'new'), () => Promise.resolve())).rejects.toThrowError(/EIO/);
+    expect(await readFile(output, 'utf8')).toBe('old');
+    expect(await readdir(directory)).toEqual(['output.sb3']);
   });
 
-  it('removes an exclusive-copy destination when closing its handle fails', async () => {
+  it('removes a fallback backup when closing its handle fails and preserves the existing output', async () => {
     const directory = await temporaryDirectory();
     const output = join(directory, 'output.sb3');
+    const backup = join(directory, '.output.sb3.scratch-obfuscator.backup');
+    await writeFile(output, 'old');
     hooks.rejectLinks = true;
-    hooks.failClosePath = output;
+    hooks.failClosePath = backup;
     hooks.remainingCloseFailures = 1;
-    await expect(commitOutput(output, false, path => writeFile(path, 'new'), () => Promise.resolve())).rejects.toThrowError(/EIO/);
-    expect(await readdir(directory)).toEqual([]);
+    await expect(commitOutput(output, true, path => writeFile(path, 'new'), () => Promise.resolve())).rejects.toThrowError(/EIO/);
+    expect(await readFile(output, 'utf8')).toBe('old');
+    expect(await readdir(directory)).toEqual(['output.sb3']);
   });
 });
 

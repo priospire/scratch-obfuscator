@@ -99,6 +99,10 @@ const SAFE_NUMERIC_INPUTS = new Map<string, ReadonlySet<string>>([
   ['sound_setvolumeto', new Set(['VOLUME'])]
 ]);
 
+export function isImmediatelyNumericInput(opcode: string, inputName: string): boolean {
+  return SAFE_NUMERIC_INPUTS.get(opcode)?.has(inputName) ?? false;
+}
+
 const CANONICAL_FINITE_DECIMAL = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/u;
 
 const STAGE_SENSING_ATTRIBUTES = new Set(['background #', 'backdrop #', 'backdrop name', 'volume']);
@@ -449,6 +453,7 @@ export type RegionRejectionCode =
   | 'live-input'
   | 'random-source'
   | 'recursive-procedure'
+  | 'procedure-parameter'
   | 'symbol-owner-unresolved'
   | 'target-missing'
   | 'thread-control'
@@ -473,6 +478,8 @@ export interface RegionEffectRequest {
   readonly blockIds: readonly string[];
   readonly connector?: LinearRunEntryConnector;
   readonly inputNamesByBlock?: Readonly<Record<string, readonly string[]>>;
+  /** True only when the rewrite moves the region into a new custom-procedure invocation frame. */
+  readonly introducesProcedureFrame?: boolean;
 }
 
 export interface RegionEligibilityCertificate {
@@ -481,6 +488,7 @@ export interface RegionEligibilityCertificate {
   readonly blockIds: readonly string[];
   readonly connector?: LinearRunEntryConnector;
   readonly inputNamesByBlock?: Readonly<Record<string, readonly string[]>>;
+  readonly introducesProcedureFrame: boolean;
   readonly eligible: boolean;
   readonly reasons: readonly RegionRejectionReason[];
   readonly effects: RegionEffectSummary;
@@ -556,7 +564,9 @@ export function countObjectBlocks(project: ScratchProject): number {
 }
 
 export function isVirtualizableStackBlock(block: ScratchBlock): boolean {
-  return !block.shadow && VIRTUALIZABLE_STACK_OPCODES.has(block.opcode);
+  return !block.shadow
+    && block.mutation === undefined
+    && VIRTUALIZABLE_STACK_OPCODES.has(block.opcode);
 }
 
 /**
@@ -571,7 +581,7 @@ export function isLossyLiveTransformSafe(project: ScratchProject): boolean {
       if (!isCoreBlock(value.opcode)) return false;
       if (value.opcode.startsWith('sensing_')) return false;
       if (value.opcode.startsWith('control_') && value.opcode !== 'control_if' && value.opcode !== 'control_if_else' && value.opcode !== 'control_start_as_clone') return false;
-      if (value.topLevel && isRunnableHat(value.opcode)) runnableHats += 1;
+      if (value.topLevel && isOfficialHatOpcode(value.opcode)) runnableHats += 1;
       if (LOSSY_OBSERVABILITY_HAZARDS.has(value.opcode)) return false;
       if (value.opcode.startsWith('event_when') && value.opcode !== 'event_whenflagclicked') return false;
     }
@@ -765,7 +775,12 @@ export function collectCertifiedNestedLinearRuns(
   const internalAnalysis = buildProjectEffectAnalysis(project);
   return collectNestedLinearRuns(project, options).map(run => ({
     run,
-    certificate: certifyRegionWithAnalysis(project, run, profile, internalAnalysis)
+    certificate: certifyRegionWithAnalysis(
+      project,
+      {...run, introducesProcedureFrame: true},
+      profile,
+      internalAnalysis
+    )
   }));
 }
 
@@ -971,7 +986,7 @@ function hasOpaqueVariableSurface(target: ScratchTarget): boolean {
     if (!isScratchBlock(value)) continue;
     if (isOfficialExtensionOpcode(value.opcode)) continue;
     if (!OFFICIAL_CORE_OPCODES.has(value.opcode)) return true;
-    if (value.mutation !== undefined && !isRecognizedProcedureMutation(value.opcode, value.mutation)) return true;
+    if (value.mutation !== undefined && !isRecognizedVariableSafeMutation(value.opcode, value.mutation)) return true;
   }
   return false;
 }
@@ -982,7 +997,17 @@ function isOfficialExtensionOpcode(opcode: string): boolean {
   return OFFICIAL_EXTENSION_OPCODES.get(opcode.slice(0, separator))?.has(opcode) === true;
 }
 
-function isRecognizedProcedureMutation(opcode: string, mutation: Readonly<Record<string, JsonValue>>): boolean {
+function isRecognizedVariableSafeMutation(opcode: string, mutation: Readonly<Record<string, JsonValue>>): boolean {
+  if (opcode === 'control_stop') {
+    const keys = Object.keys(mutation);
+    const hasNext = mutation['hasnext'];
+    return keys.length === 3
+      && keys.every(key => key === 'tagName' || key === 'children' || key === 'hasnext')
+      && mutation['tagName'] === 'mutation'
+      && Array.isArray(mutation['children'])
+      && mutation['children'].length === 0
+      && (typeof hasNext === 'boolean' || hasNext === 'true' || hasNext === 'false');
+  }
   if (opcode !== 'procedures_call' && opcode !== 'procedures_prototype') return false;
   const allowedKeys = new Set([
     'argumentdefaults',
@@ -1022,8 +1047,14 @@ function isCoreBlock(opcode: string): boolean {
   return prefix === 'argument' || prefix === 'colour' || prefix === 'control' || prefix === 'data' || prefix === 'event' || prefix === 'looks' || prefix === 'math' || prefix === 'motion' || prefix === 'operator' || prefix === 'procedures' || prefix === 'sensing' || prefix === 'sound';
 }
 
-function isRunnableHat(opcode: string): boolean {
-  return opcode.startsWith('event_when') || opcode === 'control_start_as_clone';
+export function isOfficialHatOpcode(opcode: string): boolean {
+  if (OFFICIAL_CORE_OPCODES.has(opcode)) {
+    return opcode.startsWith('event_when') || opcode === 'control_start_as_clone';
+  }
+  const separator = opcode.indexOf('_');
+  return separator > 0
+    && isOfficialExtensionOpcode(opcode)
+    && opcode.slice(separator + 1).startsWith('when');
 }
 
 type VariablesByTarget = Map<ScratchTarget, Set<string>>;
@@ -1190,6 +1221,16 @@ function collectSensedVariables(project: ScratchProject): VariablesByTarget {
     );
   }
   return result;
+}
+
+/** Return whether a variable declaration is externally observable through sensing-of. */
+export function isProjectVariableSensed(
+  project: ScratchProject,
+  targetIndex: number,
+  id: string
+): boolean {
+  const target = project.targets[targetIndex];
+  return target !== undefined && collectSensedVariables(project).get(target)?.has(id) === true;
 }
 
 interface InternalProcedureNode {
@@ -1393,27 +1434,125 @@ function collectProcedureCallsInStack(
   proceduresByTargetAndCode: readonly ReadonlyMap<string, readonly InternalProcedureNode[]>[]
 ): ProcedureCallSite[] {
   const calls: ProcedureCallSite[] = [];
-  const visited = new Set<string>();
-  const visit = (blockId: string, followNext: boolean): void => {
-    if (visited.has(blockId)) return;
-    visited.add(blockId);
-    const value = blockAt(target, blockId);
-    if (!value) return;
-    if (value.opcode === 'procedures_call') {
-      calls.push(resolveProcedureCall(targetIndex, blockId, value, proceduresByTargetAndCode));
+  const stackMemo = new Map<string, boolean>();
+  const stackVisiting = new Set<string>();
+  const reporterVisited = new Set<string>();
+  const evaluateStaticInput = staticInputEvaluator(target);
+  const recordCall = (blockId: string, block: ScratchBlock): void => {
+    if (block.opcode === 'procedures_call') {
+      calls.push(resolveProcedureCall(targetIndex, blockId, block, proceduresByTargetAndCode));
     }
-    for (const input of Object.values(value.inputs)) {
-      const childId = activeBlockId(input);
-      if (childId) visit(childId, isSubstackInput(value, childId));
-    }
-    if (followNext && value.next !== null) visit(value.next, true);
   };
-  visit(entryId, true);
+  const scanReporter = (blockId: string): void => {
+    if (reporterVisited.has(blockId)) return;
+    reporterVisited.add(blockId);
+    const block = blockAt(target, blockId);
+    if (!block) return;
+    recordCall(blockId, block);
+    for (const input of Object.values(block.inputs)) {
+      const childId = activeBlockId(input);
+      if (childId) scanReporter(childId);
+    }
+  };
+  const scanReporterInputs = (block: ScratchBlock): void => {
+    for (const [inputName, input] of Object.entries(block.inputs)) {
+      if (inputName === 'SUBSTACK' || inputName === 'SUBSTACK2') continue;
+      const childId = activeBlockId(input);
+      if (childId) scanReporter(childId);
+    }
+  };
+  const staticControlValue = (
+    blockId: string,
+    block: ScratchBlock,
+    inputName: string
+  ): boolean | number | string | undefined => {
+    const input = block.inputs[inputName];
+    return input === undefined ? undefined : evaluateStaticInput(blockId, input);
+  };
+  const scanBranch = (block: ScratchBlock, inputName: 'SUBSTACK' | 'SUBSTACK2'): boolean => {
+    const branchId = activeBlockId(block.inputs[inputName]);
+    return branchId === undefined ? true : scanStack(branchId);
+  };
+  const scanFiniteLoop = (blockId: string, block: ScratchBlock, inputName: 'TIMES' | 'VALUE'): boolean => {
+    const value = staticControlValue(blockId, block, inputName);
+    if (value === undefined) {
+      scanBranch(block, 'SUBSTACK');
+      return true;
+    }
+    const iterations = inputName === 'TIMES' ? Math.round(scratchNumber(value)) : scratchNumber(value);
+    return iterations <= 0 || scanBranch(block, 'SUBSTACK');
+  };
+  const executeBlock = (blockId: string, block: ScratchBlock, after: () => boolean): boolean => {
+    recordCall(blockId, block);
+    scanReporterInputs(block);
+    if (block.opcode === 'control_if') {
+      const condition = staticControlValue(blockId, block, 'CONDITION');
+      if (condition === undefined) {
+        scanBranch(block, 'SUBSTACK');
+        return after();
+      }
+      return !scratchBoolean(condition) || scanBranch(block, 'SUBSTACK') ? after() : false;
+    }
+    if (block.opcode === 'control_if_else') {
+      const condition = staticControlValue(blockId, block, 'CONDITION');
+      if (condition !== undefined) {
+        return scanBranch(block, scratchBoolean(condition) ? 'SUBSTACK' : 'SUBSTACK2') ? after() : false;
+      }
+      const firstFallsThrough = scanBranch(block, 'SUBSTACK');
+      const secondFallsThrough = scanBranch(block, 'SUBSTACK2');
+      return firstFallsThrough || secondFallsThrough ? after() : false;
+    }
+    if (block.opcode === 'control_all_at_once') {
+      return scanBranch(block, 'SUBSTACK') ? after() : false;
+    }
+    if (block.opcode === 'control_repeat') {
+      return scanFiniteLoop(blockId, block, 'TIMES') ? after() : false;
+    }
+    if (block.opcode === 'control_for_each') {
+      return scanFiniteLoop(blockId, block, 'VALUE') ? after() : false;
+    }
+    if (block.opcode === 'control_forever') {
+      scanBranch(block, 'SUBSTACK');
+      return false;
+    }
+    if (block.opcode === 'control_repeat_until' || block.opcode === 'control_while') {
+      const condition = staticControlValue(blockId, block, 'CONDITION');
+      if (condition === undefined) {
+        scanBranch(block, 'SUBSTACK');
+        return after();
+      }
+      const entersBranch = block.opcode === 'control_while'
+        ? scratchBoolean(condition)
+        : !scratchBoolean(condition);
+      if (!entersBranch) return after();
+      scanBranch(block, 'SUBSTACK');
+      return false;
+    }
+    if (block.opcode === 'control_wait_until') {
+      const condition = staticControlValue(blockId, block, 'CONDITION');
+      return condition === undefined || scratchBoolean(condition) ? after() : false;
+    }
+    if (block.opcode === 'control_stop') {
+      const option = block.fields['STOP_OPTION']?.[0];
+      if (option === 'all' || option === 'this script') return false;
+    }
+    return after();
+  };
+  function scanStack(blockId: string): boolean {
+    const memoized = stackMemo.get(blockId);
+    if (memoized !== undefined) return memoized;
+    if (stackVisiting.has(blockId)) return true;
+    stackVisiting.add(blockId);
+    const block = blockAt(target, blockId);
+    const result = block === undefined
+      ? true
+      : executeBlock(blockId, block, () => block.next === null ? true : scanStack(block.next));
+    stackVisiting.delete(blockId);
+    stackMemo.set(blockId, result);
+    return result;
+  };
+  scanStack(entryId);
   return calls;
-}
-
-function isSubstackInput(owner: ScratchBlock, childId: string): boolean {
-  return activeBlockId(owner.inputs['SUBSTACK']) === childId || activeBlockId(owner.inputs['SUBSTACK2']) === childId;
 }
 
 function resolveProcedureCall(
@@ -1505,7 +1644,7 @@ function collectRunnableEntries(project: ScratchProject): RunnableEntry[] {
   for (const [targetIndex, target] of project.targets.entries()) {
     for (const [blockId, value] of Object.entries(target.blocks)) {
       if (!isScratchBlock(value) || !value.topLevel || value.opcode === 'procedures_definition' || value.opcode === 'procedures_prototype') continue;
-      const hat = isRunnableHat(value.opcode);
+      const hat = isOfficialHatOpcode(value.opcode);
       entries.push({
         targetIndex,
         blockId,
@@ -1546,21 +1685,47 @@ function certifyRegionWithAnalysis(
 
   addEffectReasons(reasons, effects, profile);
   addProcedureReasons(reasons, effects.procedureCalls, analysis);
-  if (owningProcedure) addProcedureNodeReasons(reasons, owningProcedure, request.targetIndex);
+  if (owningProcedure && target) {
+    addProcedureNodeReasons(reasons, owningProcedure, request.targetIndex);
+    if (procedureHasWarpCaller(owningProcedure, analysis)) {
+      reasons.push(makeReason(
+        'warp-procedure',
+        request.targetIndex,
+        {blockId: owningProcedure.definitionId, opcode: 'procedures_definition'},
+        owningProcedure.procedureId,
+        `block ${quoted(owningProcedure.definitionId)} (procedures_definition) inherits warp mode from a caller`
+      ));
+    }
+    const parameterReporter = effects.evaluatedBlockIds.find(blockId => {
+      const opcode = blockAt(target, blockId)?.opcode;
+      return opcode === 'argument_reporter_string_number' || opcode === 'argument_reporter_boolean';
+    });
+    if (request.introducesProcedureFrame === true && parameterReporter !== undefined) {
+      const reporter = blockAt(target, parameterReporter);
+      reasons.push(makeReason(
+        'procedure-parameter',
+        request.targetIndex,
+        {blockId: parameterReporter, opcode: reporter?.opcode ?? ''},
+        owningProcedure.procedureId
+      ));
+    }
+  }
   if (profile === 'lossy' && reasons.length === 0 && target) {
     addForwardTemporalInfluenceReasons(project, target, request, analysis, reasons);
   }
-  if (profile === 'no-preserve' && owningEntry?.reentrant === true) {
-    reasons.push(makeReason('thread-reentry', request.targetIndex, owningEntry, undefined, 'the owning hat can be entered again while generated target-local state is live'));
-  }
-  if (profile === 'no-preserve' && sameTargetConcurrentEntries.length > 0) {
-    const first = sameTargetConcurrentEntries[0];
+  const procedureOwners = owningProcedure ? procedureOwningHats(owningProcedure, analysis) : [];
+  const unsafeProcedureOwner = procedureOwners.length > 1
+    ? procedureOwners[1]
+    : procedureOwners.find(owner => owner.reentrant);
+  if (profile === 'no-preserve' && owningProcedure && unsafeProcedureOwner !== undefined) {
     reasons.push(makeReason(
       'concurrent-target-owner',
       request.targetIndex,
-      first,
+      unsafeProcedureOwner,
       undefined,
-      `target ${request.targetIndex} has another runnable hat ${quoted(first?.blockId ?? '')}`
+      procedureOwners.length > 1
+        ? `target ${request.targetIndex} has another runnable hat ${quoted(unsafeProcedureOwner.blockId)}`
+        : `procedure owner ${quoted(unsafeProcedureOwner.blockId)} can restart while its body is running`
     ));
   }
 
@@ -1571,6 +1736,7 @@ function certifyRegionWithAnalysis(
     blockIds: [...request.blockIds],
     ...(request.connector === undefined ? {} : {connector: request.connector}),
     ...(request.inputNamesByBlock === undefined ? {} : {inputNamesByBlock: copyInputFilter(request.inputNamesByBlock)}),
+    introducesProcedureFrame: request.introducesProcedureFrame === true,
     eligible: sortedReasons.length === 0,
     reasons: sortedReasons,
     effects,
@@ -2529,6 +2695,92 @@ function findOwningProcedure(
   return analysis.procedures.find(procedure => procedure.targetIndex === targetIndex && procedure.definitionId === rootId);
 }
 
+function procedureHasWarpCaller(
+  procedure: InternalProcedureNode,
+  analysis: InternalProjectEffectAnalysis
+): boolean {
+  const liveProcedures = liveProcedureIds(procedure.targetIndex, analysis);
+  const visited = new Set<string>([procedure.procedureId]);
+  const pending = [procedure.procedureId];
+  while (pending.length > 0) {
+    const calleeId = pending.pop();
+    if (calleeId === undefined) continue;
+    for (const caller of analysis.procedures) {
+      if (visited.has(caller.procedureId) || !liveProcedures.has(caller.procedureId)) continue;
+      if (!caller.calls.some(call => call.resolution === 'resolved' && call.calleeProcedureIds[0] === calleeId)) continue;
+      if (caller.warp === true) return true;
+      visited.add(caller.procedureId);
+      pending.push(caller.procedureId);
+    }
+  }
+  return false;
+}
+
+function procedureOwningHats(
+  procedure: InternalProcedureNode,
+  analysis: InternalProjectEffectAnalysis
+): RunnableEntry[] {
+  const target = analysis.project.targets[procedure.targetIndex];
+  if (!target) return [];
+  return analysis.publicAnalysis.runnableEntries.filter(entry => {
+    if (entry.kind !== 'hat' || entry.targetIndex !== procedure.targetIndex) return false;
+    const calls = collectProcedureCallsInStack(
+      target,
+      procedure.targetIndex,
+      entry.blockId,
+      analysis.proceduresByTargetAndCode
+    );
+    return calls.some(call => resolvedCallReachesProcedure(call, procedure.procedureId, analysis, new Set()));
+  });
+}
+
+function liveProcedureIds(
+  targetIndex: number,
+  analysis: InternalProjectEffectAnalysis
+): Set<string> {
+  const live = new Set<string>();
+  const target = analysis.project.targets[targetIndex];
+  if (!target) return live;
+  const visitCall = (call: ProcedureCallSite): void => {
+    if (call.resolution !== 'resolved') return;
+    const procedureId = call.calleeProcedureIds[0];
+    if (procedureId === undefined || live.has(procedureId)) return;
+    live.add(procedureId);
+    const procedure = analysis.proceduresById.get(procedureId);
+    if (!procedure) return;
+    for (const nested of procedure.calls) visitCall(nested);
+  };
+  for (const entry of analysis.publicAnalysis.runnableEntries) {
+    if (entry.kind !== 'hat' || entry.targetIndex !== targetIndex) continue;
+    const calls = collectProcedureCallsInStack(
+      target,
+      targetIndex,
+      entry.blockId,
+      analysis.proceduresByTargetAndCode
+    );
+    for (const call of calls) visitCall(call);
+  }
+  return live;
+}
+
+function resolvedCallReachesProcedure(
+  call: ProcedureCallSite,
+  desiredProcedureId: string,
+  analysis: InternalProjectEffectAnalysis,
+  visited: Set<string>
+): boolean {
+  if (call.resolution !== 'resolved') return false;
+  const procedureId = call.calleeProcedureIds[0];
+  if (procedureId === undefined) return false;
+  if (procedureId === desiredProcedureId) return true;
+  if (visited.has(procedureId)) return false;
+  visited.add(procedureId);
+  const procedure = analysis.proceduresById.get(procedureId);
+  return procedure?.calls.some(nested => (
+    resolvedCallReachesProcedure(nested, desiredProcedureId, analysis, visited)
+  )) ?? false;
+}
+
 function findTopLevelAncestor(target: ScratchTarget, blockId: string | undefined): string | undefined {
   if (blockId === undefined) return undefined;
   const visited = new Set<string>();
@@ -2565,6 +2817,7 @@ function makeReason(
       case 'live-input': return `${at} samples live input or mutable sensed state`;
       case 'random-source': return `${at} may consume Scratch runtime randomness`;
       case 'recursive-procedure': return `${at} reaches a recursive custom-procedure component`;
+      case 'procedure-parameter': return `${at} depends on an outer custom-procedure parameter`;
       case 'symbol-owner-unresolved': return `${at} contains a symbol whose owning target cannot be proven`;
       case 'target-missing': return `${at} does not exist`;
       case 'thread-control': return `${at} changes thread scheduling or termination`;
@@ -2596,6 +2849,7 @@ const REASON_ORDER: readonly RegionRejectionCode[] = [
   'warp-procedure',
   'recursive-procedure',
   'argument-evaluation',
+  'procedure-parameter',
   'yield',
   'timer',
   'live-input',

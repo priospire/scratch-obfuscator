@@ -54,6 +54,20 @@ const ScratchVm = vmValue as ScratchVmConstructor;
 const ScratchStorage = (storageValue as Record<string, unknown>)['ScratchStorage'] as StorageConstructor;
 
 describe('gameplay-state anti-tamper hardening', () => {
+  it('retains eligible control-flow virtualization while gameplay state is reserved', () => {
+    const result = obfuscateProject(
+      dispatcherGameplayProject(),
+      'no-preserve',
+      new Uint8Array(32).fill(0x61),
+      {antiCheat: true}
+    );
+
+    expect(result.stats.virtualizedBlocks).toBe(4);
+    expect(result.stats.warnings.some(warning => warning.includes('rolled back'))).toBe(false);
+    expect(result.project.monitors).toHaveLength(0);
+    validateProject(result.project);
+  });
+
   it.each<ObfuscationMode>(['lossless', 'lossy', 'no-preserve'])(
     'preserves the gameplay result through the integrated %s pipeline',
     async mode => {
@@ -293,6 +307,54 @@ function gameplayProject(): {project: ScratchProject; scoreId: string; resultsId
   };
   validateProject(project);
   return {project, scoreId: 'score', resultsId: 'results'};
+}
+
+function dispatcherGameplayProject(): ScratchProject {
+  const project = createFixtureProject();
+  const stage = stageOf(project);
+  project.targets = [stage];
+  project.monitors = [];
+  stage.variables = {score: ['score', 0]};
+  stage.lists = {};
+  stage.broadcasts = {};
+  stage.comments = {};
+  stage.blocks = {
+    hat: block('event_whenflagclicked', 'set-1', null, true),
+    'set-1': block(
+      'data_setvariableto',
+      'set-2',
+      'hat',
+      false,
+      {VALUE: [1, [4, '1']]},
+      {VARIABLE: ['score', 'score']}
+    ),
+    'set-2': block(
+      'data_setvariableto',
+      'set-3',
+      'set-1',
+      false,
+      {VALUE: [1, [4, '2']]},
+      {VARIABLE: ['score', 'score']}
+    ),
+    'set-3': block(
+      'data_setvariableto',
+      'set-4',
+      'set-2',
+      false,
+      {VALUE: [1, [4, '3']]},
+      {VARIABLE: ['score', 'score']}
+    ),
+    'set-4': block(
+      'data_setvariableto',
+      null,
+      'set-3',
+      false,
+      {VALUE: [1, [4, '4']]},
+      {VARIABLE: ['score', 'score']}
+    )
+  };
+  validateProject(project);
+  return project;
 }
 
 function fallbackProject(): ScratchProject {

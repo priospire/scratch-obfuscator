@@ -1346,7 +1346,9 @@ function rewriteBlocks(
         if (typeof item === 'string') input[slot] = blockIds.get(item) ?? item;
         else if (isPrimitive(item)) rewritePrimitive(item, project, maps, target);
       }
-      if (input[0] === 3) poisonShadow(input[2], generator.fork(`shadow:${targetIndex}:${oldId}:${inputName}`));
+      if (input[0] === 3 && input[1] !== null && input[1] !== undefined) {
+        poisonShadow(input[2], generator.fork(`shadow:${targetIndex}:${oldId}:${inputName}`));
+      }
     }
     for (const [fieldName, field] of Object.entries(value.fields)) {
       rewriteField(
@@ -1400,17 +1402,18 @@ export function applyCommonTransforms(
   generator: DeterministicGenerator,
   stats: ObfuscationStats
 ): void {
+  const caveats = stats.caveats ?? (stats.caveats = []);
   const observableNames = buildObservableTypedNamePlan(project);
   const namePlan = buildSymbolNamePlan(project, observableNames);
   const broadcastPlan = buildBroadcastNamePlan(project, observableNames);
   if (namePlan.sensingNamesPreserved) {
-    stats.warnings.push('Variable display names were preserved because the project uses name-based sensing.');
+    caveats.push('Variable display names were preserved because the project uses name-based sensing.');
   }
   if (observableNames.hasReferences) {
-    stats.warnings.push('Display names were preserved because typed menu fields are used as runtime reporter values.');
+    caveats.push('Display names were preserved because typed menu fields are used as runtime reporter values.');
   }
   if (broadcastPlan.computedNamesPreserved && Object.keys(stageOf(project).broadcasts).length > 0) {
-    stats.warnings.push('Broadcast display names were preserved because the project computes broadcast names at runtime.');
+    caveats.push('Broadcast display names were preserved because the project computes broadcast names at runtime.');
   }
   const maps = targetSymbolMaps(
     project,

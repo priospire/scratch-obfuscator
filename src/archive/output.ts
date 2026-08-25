@@ -133,8 +133,8 @@ export async function commitOutput(
     await syncFile(temporaryPath);
     throwIfAborted(signal);
 
-    if (force) await publishWithRecovery(outputPath, temporaryPath);
-    else await publishWithoutReplacement(outputPath, temporaryPath);
+    if (force) await publishWithRecovery(outputPath, temporaryPath, signal);
+    else await publishWithoutReplacement(outputPath, temporaryPath, signal);
   } catch (error) {
     failure = normalizeCommitError(error);
   }
@@ -153,7 +153,12 @@ export async function commitOutput(
   if (failure !== undefined) throw failure;
 }
 
-async function publishWithoutReplacement(outputPath: string, temporaryPath: string): Promise<void> {
+async function publishWithoutReplacement(
+  outputPath: string,
+  temporaryPath: string,
+  signal: AbortSignal | undefined
+): Promise<void> {
+  throwIfAborted(signal);
   try {
     await link(temporaryPath, outputPath);
   } catch (error) {
@@ -161,9 +166,16 @@ async function publishWithoutReplacement(outputPath: string, temporaryPath: stri
       throw new UsageError('output was created while processing; use --force to replace it');
     }
     if (!hardlinkUnsupported(error)) throw error;
-    await copyExclusive(temporaryPath, outputPath, () => new UsageError('output was created while processing; use --force to replace it'));
-    return;
+    if (await pathExists(outputPath)) {
+      throw new UsageError('output was created while processing; use --force to replace it');
+    }
+    throw new FileSystemError(
+      'cannot atomically publish a new output on this filesystem because hardlink no-replace is unavailable'
+    );
   }
+  // The hardlink is the atomic no-replace publication point. Once it succeeds,
+  // cancellation is no longer observed: either durability succeeds, or the link is
+  // removed and the durability failure is reported.
   try {
     await syncDirectory(dirname(outputPath));
   } catch (error) {
@@ -172,12 +184,18 @@ async function publishWithoutReplacement(outputPath: string, temporaryPath: stri
   }
 }
 
-async function copyExclusive(sourcePath: string, destinationPath: string, destinationExists: () => Error): Promise<void> {
+async function copyExclusive(
+  sourcePath: string,
+  destinationPath: string,
+  destinationExists: () => Error,
+  signal?: AbortSignal
+): Promise<void> {
   let source: Awaited<ReturnType<typeof open>> | undefined;
   let destination: Awaited<ReturnType<typeof open>> | undefined;
   let created = false;
   let failure: Error | undefined;
   try {
+    throwIfAborted(signal);
     source = await open(sourcePath, 'r');
     try {
       destination = await open(destinationPath, 'wx', 0o600);
@@ -189,10 +207,11 @@ async function copyExclusive(sourcePath: string, destinationPath: string, destin
       throw error;
     }
 
-    // Node has no cross-platform rename-without-replacement primitive. An exclusive
-    // destination handle provides portable no-clobber publication without hardlinks.
+    // This copy is only used for a private transaction backup. The final no-force
+    // output is never populated through a user-visible copy.
     const buffer = Buffer.allocUnsafe(COPY_BUFFER_BYTES);
     while (true) {
+      throwIfAborted(signal);
       const {bytesRead} = await source.read(buffer, 0, buffer.length, null);
       if (bytesRead === 0) break;
       await writeAll(destination, buffer.subarray(0, bytesRead));
@@ -225,8 +244,13 @@ async function copyExclusive(sourcePath: string, destinationPath: string, destin
   await syncDirectory(dirname(destinationPath));
 }
 
-async function publishWithRecovery(outputPath: string, temporaryPath: string): Promise<void> {
+async function publishWithRecovery(
+  outputPath: string,
+  temporaryPath: string,
+  signal: AbortSignal | undefined
+): Promise<void> {
   const paths = transactionPaths(outputPath);
+  throwIfAborted(signal);
   if (await pathExists(paths.backup)) {
     throw new FileSystemError(`reserved backup path already exists: ${JSON.stringify(paths.backup)}`);
   }
@@ -243,10 +267,14 @@ async function publishWithRecovery(outputPath: string, temporaryPath: string): P
   let outputInstalled = false;
   try {
     if (hadPrevious) {
-      await createDurableBackup(outputPath, paths.backup);
+      await createDurableBackup(outputPath, paths.backup, signal);
       backupAvailable = true;
     }
 
+    throwIfAborted(signal);
+    // Renaming the verified temporary file is the commit point. Cancellation is
+    // deliberately not observed after this point; the transaction is completed
+    // durably so callers never receive an ambiguous interrupted result.
     await rename(temporaryPath, outputPath);
     outputInstalled = true;
     await syncFile(outputPath);
@@ -299,7 +327,12 @@ async function restoreBackup(backupPath: string, outputPath: string, journalPath
   }
 }
 
-async function createDurableBackup(outputPath: string, backupPath: string): Promise<void> {
+async function createDurableBackup(
+  outputPath: string,
+  backupPath: string,
+  signal: AbortSignal | undefined
+): Promise<void> {
+  throwIfAborted(signal);
   try {
     await link(outputPath, backupPath);
   } catch (error) {
@@ -307,10 +340,16 @@ async function createDurableBackup(outputPath: string, backupPath: string): Prom
       throw new FileSystemError(`reserved backup path already exists: ${JSON.stringify(backupPath)}`);
     }
     if (!hardlinkUnsupported(error)) throw error;
-    await copyExclusive(outputPath, backupPath, () => new FileSystemError(`reserved backup path already exists: ${JSON.stringify(backupPath)}`));
+    await copyExclusive(
+      outputPath,
+      backupPath,
+      () => new FileSystemError(`reserved backup path already exists: ${JSON.stringify(backupPath)}`),
+      signal
+    );
     return;
   }
   try {
+    throwIfAborted(signal);
     await syncFile(backupPath);
     await syncDirectory(dirname(outputPath));
   } catch (error) {
@@ -434,9 +473,21 @@ async function validateOutputDirectory(outputPath: string): Promise<string> {
 }
 
 async function syncFile(filePath: string): Promise<void> {
-  const file = await open(filePath, 'r+');
+  let writable = true;
+  let file: Awaited<ReturnType<typeof open>>;
   try {
-    await file.sync();
+    file = await open(filePath, 'r+');
+  } catch (error) {
+    if (!isErrno(error, 'EACCES') && !isErrno(error, 'EPERM')) throw error;
+    writable = false;
+    file = await open(filePath, 'r');
+  }
+  try {
+    try {
+      await file.sync();
+    } catch (error) {
+      if (writable || process.platform !== 'win32' || !isErrno(error, 'EPERM')) throw error;
+    }
   } finally {
     await file.close();
   }

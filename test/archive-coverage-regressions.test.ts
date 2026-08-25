@@ -338,23 +338,22 @@ describe('output transaction regression coverage', () => {
       .rejects.toThrowError(/cannot access output directory.*not a directory|ENOTDIR/u);
   });
 
-  it('rejects zero-progress fallback writes and bounded temporary-name exhaustion', async () => {
+  it('fails closed without atomic no-replace support and bounds temporary-name allocation', async () => {
     const writeDirectory = await temporaryDirectory();
     const writeOutput = join(writeDirectory, 'output.sb3');
+    const finalOpen = vi.fn();
     hooks.link = () => Promise.reject(errno('EPERM'));
     hooks.open = async (path, flags, mode) => {
-      const handle = await actualFs.open(path, flags, mode);
-      if (resolve(String(path)) !== resolve(writeOutput) || flags !== 'wx') return handle;
-      return proxyHandle(handle, {
-        write: buffer => Promise.resolve({bytesWritten: 0, buffer})
-      });
+      if (resolve(String(path)) === resolve(writeOutput)) finalOpen();
+      return actualFs.open(path, flags, mode);
     };
     await expect(commitOutput(
       writeOutput,
       false,
       path => actualFs.writeFile(path, 'new'),
       () => Promise.resolve()
-    )).rejects.toThrowError(/output write made no progress/u);
+    )).rejects.toThrowError(/cannot atomically publish a new output/u);
+    expect(finalOpen).not.toHaveBeenCalled();
     expect(await actualFs.readdir(writeDirectory)).toEqual([]);
 
     resetHooks();
@@ -388,45 +387,66 @@ describe('output transaction regression coverage', () => {
     expect((await actualFs.readdir(directory)).some(name => name.includes('.tmp-'))).toBe(true);
   });
 
-  it('reports an incomplete exclusive-copy cleanup failure and preserves the original write error', async () => {
-    const cleanupDirectory = await temporaryDirectory();
-    const cleanupOutput = join(cleanupDirectory, 'cleanup-output.sb3');
-    hooks.link = () => Promise.reject(errno('EPERM'));
-    hooks.open = async (path, flags, mode) => {
-      const handle = await actualFs.open(path, flags, mode);
-      if (resolve(String(path)) !== resolve(cleanupOutput) || flags !== 'wx') return handle;
-      return proxyHandle(handle, {write: buffer => Promise.resolve({bytesWritten: 0, buffer})});
+  it('honors cancellation before publication and completes an atomic publication already in progress', async () => {
+    const beforeDirectory = await temporaryDirectory();
+    const beforeOutput = join(beforeDirectory, 'output.sb3');
+    const beforeBackup = join(beforeDirectory, '.output.sb3.scratch-obfuscator.backup');
+    const beforeController = new AbortController();
+    await actualFs.writeFile(beforeOutput, 'old');
+    hooks.link = async (from, to) => {
+      await actualFs.link(from, to);
+      if (resolve(String(to)) === resolve(beforeBackup)) {
+        beforeController.abort(new Error('cancel before replacement'));
+      }
     };
-    hooks.unlink = path => resolve(String(path)) === resolve(cleanupOutput)
-      ? Promise.reject(errno('EACCES'))
-      : actualFs.unlink(path);
     await expect(commitOutput(
-      cleanupOutput,
-      false,
+      beforeOutput,
+      true,
       path => actualFs.writeFile(path, 'new'),
-      () => Promise.resolve()
-    )).rejects.toThrowError(/cannot remove an incomplete output after output write made no progress.*EACCES/u);
-    expect(await actualFs.readFile(cleanupOutput, 'utf8')).toBe('');
+      () => Promise.resolve(),
+      beforeController.signal
+    )).rejects.toThrowError(/interrupted/u);
+    expect(await actualFs.readFile(beforeOutput, 'utf8')).toBe('old');
+    expect(await actualFs.readdir(beforeDirectory)).toEqual(['output.sb3']);
 
     resetHooks();
-    const primaryDirectory = await temporaryDirectory();
-    const primaryOutput = join(primaryDirectory, 'primary-output.sb3');
-    hooks.link = () => Promise.reject(errno('EPERM'));
-    hooks.open = async (path, flags, mode) => {
-      const handle = await actualFs.open(path, flags, mode);
-      if (resolve(String(path)) !== resolve(primaryOutput) || flags !== 'wx') return handle;
-      return proxyHandle(handle, {
-        write: () => Promise.reject(errno('EIO')),
-        close: () => handle.close().then(() => Promise.reject(errno('EACCES')))
-      });
+    const noForceDirectory = await temporaryDirectory();
+    const noForceOutput = join(noForceDirectory, 'output.sb3');
+    const noForceController = new AbortController();
+    hooks.link = async (from, to) => {
+      await actualFs.link(from, to);
+      noForceController.abort(new Error('cancel during atomic link'));
     };
-    await expect(commitOutput(
-      primaryOutput,
+    await commitOutput(
+      noForceOutput,
       false,
+      path => actualFs.writeFile(path, 'published'),
+      () => Promise.resolve(),
+      noForceController.signal
+    );
+    expect(await actualFs.readFile(noForceOutput, 'utf8')).toBe('published');
+    expect(await actualFs.readdir(noForceDirectory)).toEqual(['output.sb3']);
+
+    resetHooks();
+    const forceDirectory = await temporaryDirectory();
+    const forceOutput = join(forceDirectory, 'output.sb3');
+    const forceController = new AbortController();
+    await actualFs.writeFile(forceOutput, 'old');
+    hooks.rename = async (from, to) => {
+      await actualFs.rename(from, to);
+      if (resolve(String(to)) === resolve(forceOutput)) {
+        forceController.abort(new Error('cancel during atomic rename'));
+      }
+    };
+    await commitOutput(
+      forceOutput,
+      true,
       path => actualFs.writeFile(path, 'new'),
-      () => Promise.resolve()
-    )).rejects.toThrowError(/EIO/u);
-    expect(await actualFs.readdir(primaryDirectory)).toEqual([]);
+      () => Promise.resolve(),
+      forceController.signal
+    );
+    expect(await actualFs.readFile(forceOutput, 'utf8')).toBe('new');
+    expect(await actualFs.readdir(forceDirectory)).toEqual(['output.sb3']);
   });
 
   it('reports cleanup failures before and after a force installation', async () => {

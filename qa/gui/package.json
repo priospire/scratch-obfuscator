@@ -2,19 +2,12 @@
   "name": "scratch-obfuscator-gui-qa",
   "private": true,
   "version": "1.0.0",
-  "description": "Pinned headless Scratch-compatible browser smoke-test dependencies",
+  "description": "Pinned headless official Scratch GUI smoke-test dependencies",
   "license": "UNLICENSED",
   "scripts": {
     "audit": "npm audit --audit-level=low && npm audit signatures"
   },
   "dependencies": {
-    "@turbowarp/scaffolding": "0.4.0",
-    "@turbowarp/types": "0.0.15",
     "puppeteer-core": "25.8.0"
-  },
-  "overrides": {
-    "@turbowarp/scaffolding": {
-      "@turbowarp/types": "$@turbowarp/types"
-    }
   }
 }

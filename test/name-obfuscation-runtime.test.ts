@@ -130,7 +130,7 @@ describe('precise name obfuscation against the official Scratch runtime', () => 
     expect(declarationNameForListItem(stage, 'list selector')).toBe(selectedTarget.name);
     expect(declarationNameForValue(stage, 'ordinary variable')).toMatch(/^x_/u);
     expect(declarationNameForListItem(stage, 'ordinary list')).toMatch(/^x_/u);
-    expect(transformed.stats.warnings).toContain(
+    expect(transformed.stats.caveats).toContain(
       'Display names were preserved because typed menu fields are used as runtime reporter values.'
     );
   }, 60_000);

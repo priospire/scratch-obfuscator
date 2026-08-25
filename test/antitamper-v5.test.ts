@@ -48,7 +48,6 @@ describe('anti-tamper v5 hardening', () => {
 
     const stage = requireStage(first);
     const sentinelIds = [
-      firstResult.watermarkVariableId,
       ...firstResult.decoyVariableIds,
       firstResult.latchVariableId
     ];
@@ -104,6 +103,7 @@ describe('anti-tamper v5 hardening', () => {
     }
 
     for (const id of sentinelIds) expect(observed.get(id)).toBe(3);
+    expect(countInlineSentinelReads(first, new Set([firstResult.watermarkVariableId]))).toBe(0);
   });
 
   it('selects deterministic balanced and folded integrity-tree shapes across seeds', () => {
@@ -125,12 +125,13 @@ describe('anti-tamper v5 hardening', () => {
     const project = createFixtureProject();
     const result = applyAntiCheatTransform(project, generator(41));
     const sentinelIds = new Set([
-      result.watermarkVariableId,
       ...result.decoyVariableIds,
       result.latchVariableId
     ]);
+    const watermarkIds = new Set([result.watermarkVariableId]);
     const expectedInlineReads = countInlineSentinelReads(project, sentinelIds);
     expect(expectedInlineReads).toBeGreaterThan(0);
+    expect(countInlineSentinelReads(project, watermarkIds)).toBe(0);
     const firstVm = createVm();
     const secondVm = createVm();
     try {
@@ -139,6 +140,7 @@ describe('anti-tamper v5 hardening', () => {
       const firstRoundTrip = projectFromArchive(firstSaved);
       validateProject(firstRoundTrip);
       expect(countInlineSentinelReads(firstRoundTrip, sentinelIds)).toBe(expectedInlineReads);
+      expect(countInlineSentinelReads(firstRoundTrip, watermarkIds)).toBe(0);
       expect(countObjectSentinelReads(firstRoundTrip, sentinelIds)).toBe(0);
 
       await secondVm.loadProject(firstSaved);
@@ -146,6 +148,7 @@ describe('anti-tamper v5 hardening', () => {
       const secondRoundTrip = projectFromArchive(secondSaved);
       validateProject(secondRoundTrip);
       expect(countInlineSentinelReads(secondRoundTrip, sentinelIds)).toBe(expectedInlineReads);
+      expect(countInlineSentinelReads(secondRoundTrip, watermarkIds)).toBe(0);
       expect(countObjectSentinelReads(secondRoundTrip, sentinelIds)).toBe(0);
     } finally {
       firstVm.quit();

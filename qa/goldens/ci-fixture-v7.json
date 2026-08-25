@@ -1,0 +1,18 @@
+{
+  "lossless-anticheat.sb3": "4f531b738ba3905ccae61c1edd4825aef38f8273e3ada5cb3b7c309dbc216fb7",
+  "lossless-antisave.sb3": "88e2798c1bbcd935e6f183486a0efc3d4c896b1793b4175707ddea635c127d35",
+  "lossless.sb3": "48e4dae00abc2b34aa0a1078c1dbe68363da967e016b3233a0c0b9b0cdc42d10",
+  "lossy-allowsize.sb3": "bb945e00bc6e6500cd2d734758882c2d179bb504a4cef8812a1976c6cebe1beb",
+  "lossy-anticheat-allowsize.sb3": "00e3718b0edeaaf9f73bb595839903c5d85e5a2432e113c25922e29e422fb219",
+  "lossy-anticheat.sb3": "fca084c364d8e89a8439732cbc76b6de72f5b1f872b329cc10389756e5255010",
+  "lossy-antisave.sb3": "88329f9ee00250d5839ba48dbca53882b2a0499629600b814d3dc0702f04ee6a",
+  "lossy.sb3": "1e07d34e376540ade2f97d0cefba18a4ca77c5a1408cf340e8e1c669e8f8537a",
+  "no-preserve-allowsize.sb3": "d9ff71f3e1d68987ca1f80219b48170b45886843c4a568ab3fc0f9dbcb94994f",
+  "no-preserve-anticheat-allowsize.sb3": "3bf06cf089da7fefa9b093895400323b0e94f88919abb6d112ca22102e9b3a62",
+  "no-preserve-anticheat-extra-allowsize-antisave.sb3": "4fa8672951f4f5c3a169fc075af8bafde8458a1d1ed61bd7051a7fd6ae0cca8f",
+  "no-preserve-anticheat-extra-allowsize.sb3": "0db0ad32d6829efecacfeebc81bf97bcd538846613bc526b1f9d67911cbb2e9d",
+  "no-preserve-anticheat-extra.sb3": "7e035bff3df494a499fb742ec142a6ae0fbc59df0d78ac6ba7a9d5beb19c7a5e",
+  "no-preserve-anticheat.sb3": "b6e7147e9a4c7cdea096ab7cb609b44ecb8e94975ca29407164a7ea4084330e3",
+  "no-preserve-antisave.sb3": "c3b7060b1ed798207cba51ccbdd7f2aa6b46d914e5513ef4caedb0f0360a4613",
+  "no-preserve.sb3": "3ce70864d8bae9869f0f5858e16378b4de4853195d7fda4aee6ad7b34af34cd9"
+}

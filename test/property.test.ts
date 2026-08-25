@@ -1,5 +1,6 @@
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
+import {aggressiveBlockEquivalentCap} from '../src/growth-policy.js';
 import {isScratchBlock} from '../src/model/blocks.js';
 import {obfuscateProject} from '../src/obfuscation/index.js';
 import type {ObfuscationMode, ScratchBlock, ScratchProject} from '../src/types.js';
@@ -27,7 +28,7 @@ const projectArbitrary = fc.record({
 }));
 
 const extendedFuzz = process.env['SCRATCH_OBFUSCATOR_EXTENDED_FUZZ'] === '1';
-const propertyTimeout = extendedFuzz ? 120_000 : 40_000;
+const propertyTimeout = extendedFuzz ? 300_000 : 40_000;
 
 describe('deterministic valid-project properties', () => {
   it('keeps every generated lossless graph isomorphic and deterministic', () => {
@@ -35,8 +36,11 @@ describe('deterministic valid-project properties', () => {
       const before = orderedOpcodes(project);
       const first = obfuscateProject(project, 'lossless', seed);
       const second = obfuscateProject(project, 'lossless', seed);
+      const expanded = obfuscateProject(project, 'lossless', seed, {allowSize: true});
       validateProject(first.project);
       expect(JSON.stringify(first.project)).toBe(JSON.stringify(second.project));
+      expect(JSON.stringify(expanded.project)).toBe(JSON.stringify(first.project));
+      expect(expanded.stats).toEqual(first.stats);
       expect(orderedOpcodes(first.project)).toEqual(before);
       expect(first.stats.blocksAfter).toBe(first.stats.blocksBefore);
     }), {
@@ -52,14 +56,31 @@ describe('deterministic valid-project properties', () => {
       validateProject(first.project);
       expect(JSON.stringify(first.project)).toBe(JSON.stringify(second.project));
       const cap = mode === 'lossy'
-        ? Math.max(first.stats.blocksBefore, Math.min(first.stats.blocksBefore * 4, 50_000))
-        : Math.max(first.stats.blocksBefore, Math.min((first.stats.blocksBefore * 25) + 512, 100_000));
+        ? Math.max(first.stats.blocksBefore, Math.min(first.stats.blocksBefore * 2, 30_000))
+        : Math.max(first.stats.blocksBefore, Math.min((first.stats.blocksBefore * 3) + 512, 30_000));
       expect(first.stats.blocksAfter).toBeLessThanOrEqual(cap);
     }), {
       seed: mode === 'lossy' ? 0x5b33_0002 : 0x5b33_0003,
       numRuns: extendedFuzz ? (mode === 'lossy' ? 2_000 : 700) : (mode === 'lossy' ? 100 : 35)
     });
   }, propertyTimeout);
+
+  it.each<Exclude<ObfuscationMode, 'lossless'>>(['lossy', 'no-preserve'])(
+    'keeps expanded %s output within its opt-in bound',
+    mode => {
+      fc.assert(fc.property(projectArbitrary, ({project, seed}) => {
+        const first = obfuscateProject(project, mode, seed, {allowSize: true});
+        const second = obfuscateProject(project, mode, seed, {allowSize: true});
+        validateProject(first.project);
+        expect(JSON.stringify(first.project)).toBe(JSON.stringify(second.project));
+        const cap = aggressiveBlockEquivalentCap(first.stats.blocksBefore, mode, true);
+        expect(first.stats.blocksAfter).toBeLessThanOrEqual(cap);
+      }), {
+        seed: mode === 'lossy' ? 0x5b33_0004 : 0x5b33_0005,
+        numRuns: extendedFuzz ? (mode === 'lossy' ? 1_000 : 400) : (mode === 'lossy' ? 60 : 25)
+      });
+    }, propertyTimeout
+  );
 });
 
 function linearProject(opcodes: readonly string[], variableName: string, literal: string, initial: number): ScratchProject {

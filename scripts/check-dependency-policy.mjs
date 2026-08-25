@@ -1,6 +1,18 @@
+import {Buffer} from 'node:buffer';
 import {readFile} from 'node:fs/promises';
 import {dirname, isAbsolute, relative, resolve} from 'node:path';
 import process from 'node:process';
+
+const EXACT_SEMVER_PATTERN = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
+const PACKAGE_LOCATION_PATTERN = /(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)$/u;
+const SHA512_INTEGRITY_PATTERN = /^sha512-[A-Za-z0-9+/]{86}==$/u;
+
+function hasCanonicalSha512Integrity(integrity) {
+  if (typeof integrity !== 'string' || !SHA512_INTEGRITY_PATTERN.test(integrity)) return false;
+  const encodedDigest = integrity.slice('sha512-'.length);
+  const digest = Buffer.from(encodedDigest, 'base64');
+  return digest.length === 64 && digest.toString('base64') === encodedDigest;
+}
 
 const lockfiles = process.argv.slice(2);
 if (lockfiles.length === 0) {
@@ -19,7 +31,11 @@ if (lockfiles.length === 0) {
       continue;
     }
 
-    if (!lock || typeof lock !== 'object' || !lock.packages || typeof lock.packages !== 'object') {
+    if (!lock || typeof lock !== 'object' || lock.lockfileVersion !== 3) {
+      violations.push(`${lockfile}: lockfileVersion must be exactly 3`);
+      continue;
+    }
+    if (!lock.packages || typeof lock.packages !== 'object' || Array.isArray(lock.packages)) {
       violations.push(`${lockfile}: missing the package-lock packages map`);
       continue;
     }
@@ -49,12 +65,24 @@ if (lockfiles.length === 0) {
         }
         continue;
       }
-      if (!descriptor.resolved.startsWith('https://registry.npmjs.org/')) {
-        violations.push(`${label}: dependency is not pinned to the HTTPS npm registry: ${descriptor.resolved}`);
+      if (typeof descriptor.version !== 'string' || !EXACT_SEMVER_PATTERN.test(descriptor.version)) {
+        violations.push(`${label}: registry dependency is missing an exact semantic version`);
         continue;
       }
-      if (typeof descriptor.integrity !== 'string' || !descriptor.integrity.startsWith('sha512-')) {
-        violations.push(`${label}: registry dependency is missing SHA-512 integrity`);
+      const packageMatch = PACKAGE_LOCATION_PATTERN.exec(location);
+      if (!packageMatch) {
+        violations.push(`${label}: registry dependency has an invalid package location`);
+        continue;
+      }
+      const packageName = packageMatch[1];
+      const tarballName = packageName.slice(packageName.lastIndexOf('/') + 1);
+      const expectedResolution = `https://registry.npmjs.org/${packageName}/-/${tarballName}-${descriptor.version}.tgz`;
+      if (descriptor.resolved !== expectedResolution) {
+        violations.push(`${label}: dependency is not pinned to its canonical HTTPS npm tarball: ${descriptor.resolved}`);
+        continue;
+      }
+      if (!hasCanonicalSha512Integrity(descriptor.integrity)) {
+        violations.push(`${label}: registry dependency is missing one canonical SHA-512 digest`);
       }
     }
   }

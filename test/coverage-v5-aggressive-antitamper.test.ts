@@ -3,7 +3,11 @@ import {DeterministicGenerator} from '../src/deterministic.js';
 import {isPrimitive, isScratchBlock} from '../src/model/blocks.js';
 import {applyAggressiveTransforms} from '../src/obfuscation/aggressive.js';
 import {countBlockEquivalents, countObjectBlocks} from '../src/obfuscation/analysis.js';
-import {applyAntiCheatTransform} from '../src/obfuscation/anticheat.js';
+import {
+  ANTI_CHEAT_DECOY_COUNT,
+  ANTI_CHEAT_WATERMARK_NAME,
+  applyAntiCheatTransform
+} from '../src/obfuscation/anticheat.js';
 import type {ObfuscationMode, ObfuscationStats, ScratchBlock, ScratchInput, ScratchProject, ScratchTarget} from '../src/types.js';
 import {validateProject} from '../src/validation/project.js';
 import {createFixtureProject} from './support.js';
@@ -22,25 +26,37 @@ describe('aggressive and anti-tamper validated edge coverage', () => {
     const stage = requireStage(project);
     const joins: ScratchBlock[] = [];
     const subtractions: ScratchBlock[] = [];
+    const encodedExpectationIds = new Set<string>();
+    const encodedExpectationBlocks = new Set<ScratchBlock>();
     for (const value of Object.values(stage.blocks)) {
       if (!isScratchBlock(value)) continue;
       if (value.opcode === 'operator_join') joins.push(value);
       if (value.opcode === 'operator_subtract') subtractions.push(value);
+      if (value.opcode !== 'operator_equals') continue;
+      const sentinel = value.inputs['OPERAND1']?.[1];
+      const expectedId = value.inputs['OPERAND2']?.[1];
+      if (!isPrimitive(sentinel) || sentinel[0] !== 12 || typeof sentinel[2] !== 'string' || typeof expectedId !== 'string') {
+        continue;
+      }
+      const expected = stage.blocks[expectedId];
+      if (!isScratchBlock(expected)) throw new Error('encoded anti-cheat expectation is unavailable');
+      encodedExpectationIds.add(sentinel[2]);
+      encodedExpectationBlocks.add(expected);
     }
-    expect(joins).toHaveLength(7);
-    expect(subtractions).toHaveLength(1);
+    const expectedSentinelIds = new Set([...result.decoyVariableIds, result.latchVariableId]);
+    expect(result.decoyVariableIds).toHaveLength(ANTI_CHEAT_DECOY_COUNT);
+    expect(encodedExpectationIds).toEqual(expectedSentinelIds);
+    expect(encodedExpectationBlocks).toEqual(new Set(joins));
+    expect(joins).toHaveLength(ANTI_CHEAT_DECOY_COUNT + 1);
+    expect(subtractions).toHaveLength(0);
+    expect(stage.variables[result.watermarkVariableId]).toEqual([ANTI_CHEAT_WATERMARK_NAME, 0]);
+    expect(encodedExpectationIds.has(result.watermarkVariableId)).toBe(false);
     for (const join of joins) {
       const left = join.inputs['STRING1']?.[1];
       const right = join.inputs['STRING2']?.[1];
       expect(isPrimitive(left) && left[0] === 10 && typeof left[1] === 'string' && left[1].length > 0).toBe(true);
       expect(isPrimitive(right) && right[0] === 10 && typeof right[1] === 'string' && right[1].length > 0).toBe(true);
     }
-    const subtraction = subtractions[0];
-    if (!subtraction) throw new Error('numeric watermark expectation is unavailable');
-    const minuend = subtraction.inputs['NUM1']?.[1];
-    const subtrahend = subtraction.inputs['NUM2']?.[1];
-    expect(isPrimitive(minuend) && minuend[0] === 4 && Number(minuend[1]) > 0).toBe(true);
-    expect(subtrahend).toEqual(minuend);
     expect(project.targets.filter(target => !target.isStage).every(target => Object.keys(target.blocks).length === 0)).toBe(true);
     validateProject(project);
   });
@@ -48,17 +64,23 @@ describe('aggressive and anti-tamper validated edge coverage', () => {
   it('preserves Scratch defaults while inverting conditions with absent inputs and branches', () => {
     const first = conditionalDefaultsProject();
     const second = conditionalDefaultsProject();
+    const compact = conditionalDefaultsProject();
     validateProject(first);
     const before = countBlockEquivalents(first);
     const firstStats = stats(first, 'lossy');
     const secondStats = stats(second, 'lossy');
 
-    applyAggressiveTransforms(first, 'lossy', generator(13, 'condition-defaults'), firstStats);
-    applyAggressiveTransforms(second, 'lossy', generator(13, 'condition-defaults'), secondStats);
+    applyAggressiveTransforms(compact, 'lossy', generator(13, 'condition-defaults'), stats(compact, 'lossy'));
+    applyAggressiveTransforms(first, 'lossy', generator(13, 'condition-defaults'), firstStats, undefined, true);
+    applyAggressiveTransforms(second, 'lossy', generator(13, 'condition-defaults'), secondStats, undefined, true);
 
+    expect(countBlockEquivalents(compact)).toBe(Math.min(before * 2, 30_000));
     expect(first).toEqual(second);
     expect(firstStats).toEqual(secondStats);
-    expect(countBlockEquivalents(first)).toBe(Math.min(before * 4, 50_000));
+    expect(countBlockEquivalents(first)).toBe(Math.min(
+      Math.max(before * 4, before + 256),
+      50_000
+    ));
     const stage = requireStage(first);
     for (const id of ['missing-if', 'missing-if-else']) {
       const block = stage.blocks[id];

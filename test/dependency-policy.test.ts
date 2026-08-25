@@ -36,12 +36,23 @@ describe('dependency lockfile policy', () => {
     expect(result.stderr).toBe('');
   });
 
-  it('rejects deprecated, unpinned, non-registry, and weak-integrity packages', async () => {
+  it('rejects deprecated, unpinned, noncanonical, and weak-integrity packages', async () => {
     const lockfile = await writeLock({
       '': {name: 'fixture', version: '1.0.0'},
       'node_modules/deprecated': {...registryPackage(), deprecated: 'unsupported'},
       'node_modules/unpinned': {version: '1.0.0'},
       'node_modules/git': {version: '1.0.0', resolved: 'git+https://example.invalid/repository.git'},
+      'node_modules/noncanonical': {
+        version: '1.0.0',
+        resolved: 'https://registry.npmjs.org/noncanonical/-/noncanonical-1.0.0.tgz',
+        integrity: `sha512-${'A'.repeat(85)}B==`
+      },
+      'node_modules/substituted': registryPackage(),
+      'node_modules/truncated': {
+        version: '1.0.0',
+        resolved: 'https://registry.npmjs.org/truncated/-/truncated-1.0.0.tgz',
+        integrity: 'sha512-example'
+      },
       'node_modules/weak': {
         version: '1.0.0',
         resolved: 'https://registry.npmjs.org/weak/-/weak-1.0.0.tgz',
@@ -52,8 +63,26 @@ describe('dependency lockfile policy', () => {
     expect(result.code).toBe(1);
     expect(result.stderr).toContain('deprecated: unsupported');
     expect(result.stderr).toContain('missing a pinned resolution');
-    expect(result.stderr).toContain('not pinned to the HTTPS npm registry');
-    expect(result.stderr).toContain('missing SHA-512 integrity');
+    expect(result.stderr).toContain('not pinned to its canonical HTTPS npm tarball');
+    expect(result.stderr).toContain('missing one canonical SHA-512 digest');
+  });
+
+  it('requires the current lockfile format and exact semantic versions', async () => {
+    const rangeLockfile = await writeLock({
+      '': {name: 'fixture', version: '1.0.0'},
+      'node_modules/ranged': {
+        ...registryPackage(),
+        version: '^1.0.0',
+        resolved: 'https://registry.npmjs.org/ranged/-/ranged-1.0.0.tgz'
+      }
+    });
+    const oldLockfile = await writeLock({
+      '': {name: 'fixture', version: '1.0.0'}
+    }, 2);
+    const result = await runPolicy([rangeLockfile, oldLockfile]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('missing an exact semantic version');
+    expect(result.stderr).toContain('lockfileVersion must be exactly 3');
   });
 
   it('rejects dependency links outside the reviewed shim directory', async () => {
@@ -73,15 +102,15 @@ function registryPackage(): Record<string, unknown> {
   return {
     version: '1.0.0',
     resolved: 'https://registry.npmjs.org/example/-/example-1.0.0.tgz',
-    integrity: 'sha512-example'
+    integrity: `sha512-${Buffer.alloc(64).toString('base64')}`
   };
 }
 
-async function writeLock(packages: Record<string, Record<string, unknown>>): Promise<string> {
+async function writeLock(packages: Record<string, Record<string, unknown>>, lockfileVersion = 3): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), 'scratch-obfuscator-dependency-policy-'));
   directories.push(directory);
   const lockfile = join(directory, 'package-lock.json');
-  await writeFile(lockfile, JSON.stringify({name: 'fixture', lockfileVersion: 3, packages}), 'utf8');
+  await writeFile(lockfile, JSON.stringify({name: 'fixture', lockfileVersion, packages}), 'utf8');
   return lockfile;
 }
 

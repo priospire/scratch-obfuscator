@@ -8,7 +8,7 @@ import {validateProject} from '../src/validation/project.js';
 import {createFixtureProject} from './support.js';
 
 describe('aggressive transform coverage regressions', () => {
-  it('packs unambiguous name-only fixed lists and conservatively retains ambiguous, monitored, and dynamic lists', () => {
+  it('packs unambiguous fixed lists through static or dynamic logical maps and retains ambiguous or observable lists', () => {
     const project = emptyProject();
     const [stage, sprite] = requireTargets(project);
     stage.lists = {
@@ -52,7 +52,7 @@ describe('aggressive transform coverage regressions', () => {
 
     applyAggressiveTransforms(project, 'no-preserve', generator(0x41, 'fixed-list-coverage'), resultStats);
 
-    expect(resultStats.listsVirtualized).toBe(5);
+    expect(resultStats.listsVirtualized).toBe(9);
     expect(stage.lists['stage-only']).toBeUndefined();
     expect(sprite.lists['local-only']).toBeUndefined();
     expect(sprite.lists['empty-last']).toBeUndefined();
@@ -65,12 +65,15 @@ describe('aggressive transform coverage regressions', () => {
     ]) expect(stage.lists[id]).toBeDefined();
     for (const id of [
       'sprite-duplicate',
-      'random',
-      'any',
-      'unsupported',
-      'malformed',
       'shadowed'
     ]) expect(sprite.lists[id]).toBeDefined();
+    for (const id of ['random', 'any', 'unsupported', 'malformed']) {
+      expect(sprite.lists[id]).toBeUndefined();
+      const read = requireBlock(sprite, `read-${id}`);
+      const mapReadId = read.inputs['INDEX']?.[1];
+      expect(typeof mapReadId === 'string' ? requireBlock(sprite, mapReadId).opcode : undefined)
+        .toBe('data_itemoflist');
+    }
 
     const stageRead = requireBlock(sprite, 'read-stage');
     const localRead = requireBlock(sprite, 'read-local');
@@ -110,7 +113,7 @@ describe('aggressive transform coverage regressions', () => {
     validateProject(project);
   });
 
-  it('splits a nine-command run around a native separator and gives both regions keyed dispatch', () => {
+  it('virtualizes the bounded eight-command cohort and leaves the ninth command as a native separator', () => {
     const project = emptyProject();
     const [, sprite] = requireTargets(project);
     sprite.blocks = {flag: block('event_whenflagclicked', 'step-0', null, true)};
@@ -125,24 +128,117 @@ describe('aggressive transform coverage regressions', () => {
     }
     const resultStats = stats(project);
 
-    applyAggressiveTransforms(project, 'no-preserve', generator(0x63, 'nine-block-coverage'), resultStats);
+    applyAggressiveTransforms(
+      project,
+      'no-preserve',
+      generator(0x63, 'nine-block-coverage'),
+      resultStats,
+      undefined,
+      true
+    );
 
     expect(resultStats.virtualizedBlocks).toBe(8);
-    const originalIds = new Set(Array.from({length: 9}, (_, index) => `step-${index}`));
-    for (const id of originalIds) {
-      const transformed = requireBlock(sprite, id);
-      expect(transformed.next === null || !originalIds.has(transformed.next)).toBe(true);
+    const transformedSprite = project.targets.find(target => !target.isStage);
+    if (!transformedSprite) throw new Error('transformed Sprite is unavailable');
+    for (let index = 0; index < 8; index += 1) {
+      expect(transformedSprite.blocks[`step-${index}`]).toBeUndefined();
     }
-    const modulusCounts = new Map<number, number>();
-    for (const value of Object.values(sprite.blocks)) {
-      if (!isScratchBlock(value) || value.opcode !== 'operator_mod') continue;
-      const modulus = Number(primitiveValue(value.inputs['NUM2']));
-      modulusCounts.set(modulus, (modulusCounts.get(modulus) ?? 0) + 1);
-    }
-    for (const modulus of [17, 19, 23]) expect(modulusCounts.get(modulus)).toBeGreaterThanOrEqual(10);
+    const separator = requireBlock(transformedSprite, 'step-8');
+    expect(separator.opcode).toBe('motion_changexby');
+    expect(separator.next).toBeNull();
+    const generatedCommands = Object.entries(transformedSprite.blocks).flatMap(([id, value]) => {
+      if (!isScratchBlock(value) || value.opcode !== 'motion_changexby' || id === 'step-8') return [];
+      const numericValue = evaluateExactNumericInput(transformedSprite, value.inputs['DX']);
+      if (numericValue < 1 || numericValue > 8) return [];
+      const route = value.parent === null ? undefined : transformedSprite.blocks[value.parent];
+      expect(isScratchBlock(route) && route.opcode === 'control_if').toBe(true);
+      return [numericValue];
+    });
+    expect(generatedCommands).toHaveLength(8 * 4);
+    expect(generatedCommands.sort((left, right) => left - right)).toEqual(
+      Array.from({length: 8}, (_, index) => Array.from({length: 4}, () => index + 1)).flat()
+    );
     validateProject(project);
   });
+
+  it.each([
+    ['canonical mutation', 'mutation'],
+    ['noncanonical mutation', 'malformed'],
+    ['cloud variable', 'cloud'],
+    ['monitored variable', 'monitor'],
+    ['same-target shared variable', 'shared']
+  ] as const)('falls back for %s without rewriting the native command cohort', (_label, hazard) => {
+    const project = dispatcherEligibilityProject();
+    const [, sprite] = requireTargets(project);
+    if (hazard === 'mutation' || hazard === 'malformed') {
+      const command = requireBlock(sprite, 'step-1');
+      command.mutation = hazard === 'mutation'
+        ? {tagName: 'mutation', children: []}
+        : {tagName: 'mutation', children: [], unexpected: 'value'};
+    } else if (hazard === 'cloud') {
+      sprite.variables['counter'] = ['counter', 0, true];
+    } else if (hazard === 'monitor') {
+      project.monitors = [{
+        id: 'counter',
+        mode: 'default',
+        opcode: 'data_variable',
+        params: {VARIABLE: 'counter'},
+        spriteName: sprite.name,
+        visible: false
+      }];
+    } else {
+      sprite.blocks['observer'] = block(
+        'looks_say',
+        null,
+        null,
+        true,
+        {MESSAGE: [1, [12, 'counter', 'counter']]}
+      );
+    }
+    const resultStats = stats(project);
+    let virtualizationSnapshot: ScratchProject | undefined;
+
+    applyAggressiveTransforms(
+      project,
+      'no-preserve',
+      generator(0x74, `dispatcher-fallback-${hazard}`),
+      resultStats,
+      event => {
+        if (event.stage === 'virtualizing-control-flow') virtualizationSnapshot = structuredClone(project);
+      },
+      true
+    );
+
+    expect(resultStats.virtualizedBlocks).toBe(0);
+    if (!virtualizationSnapshot) throw new Error('fallback snapshot is unavailable');
+    const snapshotSprite = requireTargets(virtualizationSnapshot)[1];
+    for (let index = 0; index < 4; index += 1) {
+      expect(requireBlock(snapshotSprite, `step-${index}`).opcode).toBe('data_changevariableby');
+    }
+    expect(Object.values(snapshotSprite.blocks).some(value => (
+      isScratchBlock(value) && value.opcode === 'procedures_definition'
+    ))).toBe(false);
+    validateProject(virtualizationSnapshot);
+  });
 });
+
+function dispatcherEligibilityProject(): ScratchProject {
+  const project = emptyProject();
+  const [, sprite] = requireTargets(project);
+  sprite.variables = {counter: ['counter', 0]};
+  sprite.blocks = {flag: block('event_whenflagclicked', 'step-0', null, true)};
+  for (let index = 0; index < 4; index += 1) {
+    sprite.blocks[`step-${index}`] = block(
+      'data_changevariableby',
+      index === 3 ? null : `step-${index + 1}`,
+      index === 0 ? 'flag' : `step-${index - 1}`,
+      false,
+      {VALUE: [1, [4, '1']]},
+      {VARIABLE: ['counter', 'counter']}
+    );
+  }
+  return project;
+}
 
 function emptyProject(): ScratchProject {
   const project = createFixtureProject();
@@ -206,6 +302,17 @@ function requireBlock(target: ScratchTarget, id: string): ScratchBlock {
 function primitiveValue(input: ScratchBlock['inputs'][string] | undefined): unknown {
   const active = input?.[1];
   return Array.isArray(active) ? active[1] : undefined;
+}
+
+function evaluateExactNumericInput(target: ScratchTarget, input: ScratchBlock['inputs'][string] | undefined): number {
+  const active = input?.[1];
+  if (Array.isArray(active)) return Number(active[1]);
+  const reporter = typeof active === 'string' ? target.blocks[active] : undefined;
+  if (!reporter || !isScratchBlock(reporter) || reporter.opcode !== 'operator_multiply') {
+    throw new Error('numeric input is outside the exact equation subset');
+  }
+  return evaluateExactNumericInput(target, reporter.inputs['NUM1'])
+    * evaluateExactNumericInput(target, reporter.inputs['NUM2']);
 }
 
 function generator(fill: number, domain: string): DeterministicGenerator {

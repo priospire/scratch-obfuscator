@@ -16,7 +16,8 @@ permissions:
 
 jobs:
   test:
-    timeout-minutes: 30
+    name: packed CLI / ${{ matrix.os }} / Node ${{ matrix.node }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -42,17 +43,29 @@ jobs:
       - run: node dist/cli.js fixture.sb3 -o lossless-anticheat.sb3 -lossless -anticheat
       - run: node dist/cli.js fixture.sb3 -o lossy-anticheat.sb3 -lossy -anticheat
       - run: node dist/cli.js fixture.sb3 -o no-preserve-anticheat.sb3 -no-preserve -anticheat
-      - run: node scripts/assert-release-outputs.mjs fixture.sb3 lossless.sb3 lossy.sb3 no-preserve.sb3 lossless-anticheat.sb3 lossy-anticheat.sb3 no-preserve-anticheat.sb3
-      - run: node scripts/hash-outputs.mjs ci-hashes.json lossless.sb3 lossy.sb3 no-preserve.sb3 lossless-anticheat.sb3 lossy-anticheat.sb3 no-preserve-anticheat.sb3
-      - run: node scripts/check-golden-hashes.mjs ci-hashes.json qa/goldens/ci-fixture-v6.json
+      - run: node dist/cli.js fixture.sb3 -o no-preserve-anticheat-extra.sb3 -no-preserve -anticheat -extra
+      - run: node dist/cli.js fixture.sb3 -o lossy-allowsize.sb3 -lossy -allowsize
+      - run: node dist/cli.js fixture.sb3 -o no-preserve-allowsize.sb3 -no-preserve -allowsize
+      - run: node dist/cli.js fixture.sb3 -o no-preserve-anticheat-extra-allowsize.sb3 -no-preserve -anticheat -extra -allowsize
+      - run: node dist/cli.js fixture.sb3 -o lossy-anticheat-allowsize.sb3 -lossy -anticheat -allowsize
+      - run: node dist/cli.js fixture.sb3 -o no-preserve-anticheat-allowsize.sb3 -no-preserve -anticheat -allowsize
+      - run: node dist/cli.js fixture.sb3 -o lossless-antisave.sb3 -lossless -antisave
+      - run: node dist/cli.js fixture.sb3 -o lossy-antisave.sb3 -lossy -antisave
+      - run: node dist/cli.js fixture.sb3 -o no-preserve-antisave.sb3 -no-preserve -antisave
+      - run: node dist/cli.js fixture.sb3 -o no-preserve-anticheat-extra-allowsize-antisave.sb3 -no-preserve -anticheat -extra -allowsize -antisave
+      - run: node scripts/assert-release-outputs.mjs fixture.sb3 lossless.sb3 lossy.sb3 no-preserve.sb3 lossless-anticheat.sb3 lossy-anticheat.sb3 no-preserve-anticheat.sb3 no-preserve-anticheat-extra.sb3 lossy-allowsize.sb3 no-preserve-allowsize.sb3 no-preserve-anticheat-extra-allowsize.sb3 lossy-anticheat-allowsize.sb3 no-preserve-anticheat-allowsize.sb3 lossless-antisave.sb3 lossy-antisave.sb3 no-preserve-antisave.sb3 no-preserve-anticheat-extra-allowsize-antisave.sb3
+      - run: node scripts/hash-outputs.mjs ci-hashes.json lossless.sb3 lossy.sb3 no-preserve.sb3 lossless-anticheat.sb3 lossy-anticheat.sb3 no-preserve-anticheat.sb3 no-preserve-anticheat-extra.sb3 lossy-allowsize.sb3 no-preserve-allowsize.sb3 no-preserve-anticheat-extra-allowsize.sb3 lossy-anticheat-allowsize.sb3 no-preserve-anticheat-allowsize.sb3 lossless-antisave.sb3 lossy-antisave.sb3 no-preserve-antisave.sb3 no-preserve-anticheat-extra-allowsize-antisave.sb3
+      - run: node scripts/check-golden-hashes.mjs ci-hashes.json qa/goldens/ci-fixture-v7.json
+      - run: node scripts/hash-outputs.mjs platform-hashes.json lossless.sb3 lossy.sb3 no-preserve.sb3 lossless-anticheat.sb3 lossy-anticheat.sb3 no-preserve-anticheat.sb3 no-preserve-anticheat-extra.sb3 lossy-allowsize.sb3 no-preserve-allowsize.sb3 no-preserve-anticheat-extra-allowsize.sb3 lossy-anticheat-allowsize.sb3 no-preserve-anticheat-allowsize.sb3 lossless-antisave.sb3 lossy-antisave.sb3 no-preserve-antisave.sb3 no-preserve-anticheat-extra-allowsize-antisave.sb3
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hashes-${{ matrix.os }}-${{ matrix.node }}
-          path: ci-hashes.json
+          path: platform-hashes.json
           if-no-files-found: error
           retention-days: 1
 
   compare:
+    name: compare all six platform/runtime manifests
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -70,8 +83,9 @@ jobs:
       - run: node scripts/compare-hashes.mjs artifacts
 
   browser-smoke:
+    name: browser load/save/reload
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -92,14 +106,26 @@ jobs:
       - run: node dist/cli.js fixture.sb3 -o lossless-anticheat.sb3 -lossless -anticheat
       - run: node dist/cli.js fixture.sb3 -o lossy-anticheat.sb3 -lossy -anticheat
       - run: node dist/cli.js fixture.sb3 -o no-preserve-anticheat.sb3 -no-preserve -anticheat
-      - run: node scripts/assert-release-outputs.mjs fixture.sb3 lossless.sb3 lossy.sb3 no-preserve.sb3 lossless-anticheat.sb3 lossy-anticheat.sb3 no-preserve-anticheat.sb3
+      - run: node dist/cli.js fixture.sb3 -o no-preserve-anticheat-extra.sb3 -no-preserve -anticheat -extra
+      - run: node dist/cli.js fixture.sb3 -o lossy-allowsize.sb3 -lossy -allowsize
+      - run: node dist/cli.js fixture.sb3 -o no-preserve-allowsize.sb3 -no-preserve -allowsize
+      - run: node dist/cli.js fixture.sb3 -o no-preserve-anticheat-extra-allowsize.sb3 -no-preserve -anticheat -extra -allowsize
+      - run: node dist/cli.js fixture.sb3 -o lossy-anticheat-allowsize.sb3 -lossy -anticheat -allowsize
+      - run: node dist/cli.js fixture.sb3 -o no-preserve-anticheat-allowsize.sb3 -no-preserve -anticheat -allowsize
+      - run: node dist/cli.js fixture.sb3 -o lossless-antisave.sb3 -lossless -antisave
+      - run: node dist/cli.js fixture.sb3 -o lossy-antisave.sb3 -lossy -antisave
+      - run: node dist/cli.js fixture.sb3 -o no-preserve-antisave.sb3 -no-preserve -antisave
+      - run: node dist/cli.js fixture.sb3 -o no-preserve-anticheat-extra-allowsize-antisave.sb3 -no-preserve -anticheat -extra -allowsize -antisave
+      - run: node scripts/assert-release-outputs.mjs fixture.sb3 lossless.sb3 lossy.sb3 no-preserve.sb3 lossless-anticheat.sb3 lossy-anticheat.sb3 no-preserve-anticheat.sb3 no-preserve-anticheat-extra.sb3 lossy-allowsize.sb3 no-preserve-allowsize.sb3 no-preserve-anticheat-extra-allowsize.sb3 lossy-anticheat-allowsize.sb3 no-preserve-anticheat-allowsize.sb3 lossless-antisave.sb3 lossy-antisave.sb3 no-preserve-antisave.sb3 no-preserve-anticheat-extra-allowsize-antisave.sb3
       - run: npm --prefix qa/gui ci --ignore-scripts
       - run: npm --prefix qa/gui run audit
-      - run: node scripts/gui-smoke.mjs lossless.sb3 lossy.sb3 no-preserve.sb3 lossless-anticheat.sb3 lossy-anticheat.sb3 no-preserve-anticheat.sb3
+      - run: node scripts/prepare-official-gui.mjs qa/.official-scratch-gui
+      - run: node scripts/gui-smoke.mjs lossless.sb3 lossy.sb3 no-preserve.sb3 lossless-anticheat.sb3 lossy-anticheat.sb3 no-preserve-anticheat.sb3 no-preserve-anticheat-extra.sb3 lossy-allowsize.sb3 no-preserve-allowsize.sb3 no-preserve-anticheat-extra-allowsize.sb3 lossy-anticheat-allowsize.sb3 no-preserve-anticheat-allowsize.sb3 lossless-antisave.sb3 lossy-antisave.sb3 no-preserve-antisave.sb3 no-preserve-anticheat-extra-allowsize-antisave.sb3
         env:
           BROWSER_QA_ROOT: qa/gui
 
   extended-fuzz:
+    name: manually requested extended fuzz
     if: github.event_name == 'workflow_dispatch' && inputs.extended_fuzz
     runs-on: ubuntu-latest
     timeout-minutes: 45

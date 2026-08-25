@@ -3,8 +3,14 @@ import {describe, expect, it} from 'vitest';
 import {DeterministicGenerator} from '../src/deterministic.js';
 import {isScratchBlock} from '../src/model/blocks.js';
 import {applyAggressiveTransforms, type AggressiveMode} from '../src/obfuscation/aggressive.js';
-import {collectVariableCandidates, countObjectBlocks, isLossyLiveTransformSafe} from '../src/obfuscation/analysis.js';
+import {
+  collectVariableCandidates,
+  countBlockEquivalents,
+  countObjectBlocks,
+  isLossyLiveTransformSafe
+} from '../src/obfuscation/analysis.js';
 import {ANTI_CHEAT_WATERMARK_NAME} from '../src/obfuscation/anticheat.js';
+import {aggressiveBlockEquivalentCap} from '../src/growth-policy.js';
 import type {ObfuscationStats, ScratchBlock, ScratchInput, ScratchProject, ScratchTarget} from '../src/types.js';
 import {validateProject} from '../src/validation/project.js';
 import {createFixtureArchive, createFixtureProject} from './support.js';
@@ -76,7 +82,9 @@ describe('scalar variable packing', () => {
       project,
       'lossy',
       new DeterministicGenerator(new Uint8Array(32).fill(67), 'packing-structure'),
-      resultStats
+      resultStats,
+      undefined,
+      true
     );
 
     const stage = requireTarget(project, 0);
@@ -98,6 +106,42 @@ describe('scalar variable packing', () => {
     validateProject(project);
   });
 
+  it('reserves staged quota for scalar packing beside an expanded four-command dispatcher', () => {
+    const project = expandedPackingProject();
+    const before = countBlockEquivalents(project);
+    const resultStats = stats(project, 'no-preserve');
+
+    applyAggressiveTransforms(
+      project,
+      'no-preserve',
+      new DeterministicGenerator(new Uint8Array(32).fill(113), 'packing-expanded-budget-reservation'),
+      resultStats,
+      undefined,
+      true
+    );
+
+    expect(resultStats.virtualizedBlocks, resultStats.warnings.join(';')).toBe(4);
+    expect(resultStats.variablesVirtualized, resultStats.warnings.join(';')).toBe(4);
+    const sprite = requireTarget(project, 1);
+    expect(['motion_changexby', 'motion_changeyby', 'looks_changesizeby', 'sound_changevolumeby'].map(opcode => (
+      Object.values(sprite.blocks).filter(value => isScratchBlock(value) && value.opcode === opcode).length
+    ))).toEqual([4, 4, 4, 4]);
+    expect(requireTarget(project, 0).variables['global-value']).toBeUndefined();
+    expect(requireTarget(project, 0).variables['global-unused']).toBeUndefined();
+    expect(sprite.variables['local-value']).toBeUndefined();
+    expect(sprite.variables['local-unused']).toBeUndefined();
+    const storedValues = project.targets.flatMap(target => Object.values(target.lists).flatMap(declaration => (
+      Array.isArray(declaration[1]) ? declaration[1] : []
+    )));
+    for (const expected of [5, 'unused-global', 2, true]) {
+      expect(storedValues.filter(value => value === expected), `packed value ${String(expected)}`).toHaveLength(1);
+    }
+    expect(countBlockEquivalents(project)).toBeLessThanOrEqual(
+      aggressiveBlockEquivalentCap(before, 'no-preserve', true)
+    );
+    validateProject(project);
+  }, 30_000);
+
   it('preserves global and local values in the official VM for both aggressive modes', async () => {
     for (const mode of ['lossy', 'no-preserve'] as const) {
       const project = packingProject();
@@ -106,7 +150,9 @@ describe('scalar variable packing', () => {
         project,
         mode,
         new DeterministicGenerator(new Uint8Array(32).fill(mode === 'lossy' ? 71 : 73), `packing-runtime-${mode}`),
-        resultStats
+        resultStats,
+        undefined,
+        true
       );
       expect(resultStats.variablesVirtualized, `${mode} left an eligible scalar native`).toBe(4);
 
@@ -145,7 +191,9 @@ describe('scalar variable packing', () => {
         project,
         mode,
         new DeterministicGenerator(new Uint8Array(32).fill(mode === 'lossy' ? 107 : 109), `packing-name-only-${mode}`),
-        resultStats
+        resultStats,
+        undefined,
+        true
       );
       expect(resultStats.variablesVirtualized, `${mode} did not pack both eligible same-name scalars`).toBe(2);
       validateProject(project);
@@ -214,6 +262,29 @@ describe('scalar variable packing', () => {
     expect(candidateIds(cloud)).not.toContain('global-value');
   });
 
+  it('accepts only the canonical official stop mutation during packing analysis', () => {
+    const canonical = packingProject();
+    const canonicalSprite = requireTarget(canonical, 1);
+    canonicalSprite.blocks['stop'] = {
+      ...block('control_stop', null, null, true, {}, {STOP_OPTION: ['this script', null]}),
+      mutation: {tagName: 'mutation', children: [], hasnext: 'false'}
+    };
+    expect(candidateIds(canonical).sort()).toEqual([
+      'global-unused',
+      'global-value',
+      'local-unused',
+      'local-value'
+    ]);
+
+    const malformed = structuredClone(canonical);
+    const malformedStop = requireTarget(malformed, 1).blocks['stop'];
+    if (!malformedStop || !isScratchBlock(malformedStop) || !malformedStop.mutation) {
+      throw new Error('canonical stop fixture is unavailable');
+    }
+    malformedStop.mutation['unexpected'] = 'opaque';
+    expect(candidateIds(malformed)).toEqual([]);
+  });
+
   it('excludes a Stage variable selected by a sensing-of monitor from packing candidates', () => {
     const project = packingProject();
     project.monitors = [stageSensingMonitor()];
@@ -266,7 +337,9 @@ describe('scalar variable packing', () => {
         project,
         mode,
         new DeterministicGenerator(new Uint8Array(32).fill(mode === 'lossy' ? 83 : 89), `packing-watermark-${mode}`),
-        resultStats
+        resultStats,
+        undefined,
+        true
       );
 
       expect(stage.variables['existing-watermark']).toEqual([ANTI_CHEAT_WATERMARK_NAME, 'project-owned-value']);
@@ -399,6 +472,79 @@ function packingProject(): ScratchProject {
     )
   };
   project.monitors = [];
+  project.extensions = [];
+  validateProject(project);
+  return project;
+}
+
+function expandedPackingProject(): ScratchProject {
+  const project = createFixtureProject();
+  const stage = requireTarget(project, 0);
+  const sprite = requireTarget(project, 1);
+  stage.variables = {
+    global_score: ['Readable score', 0],
+    'global-value': ['global', 5],
+    'global-unused': ['global unused', 'unused-global']
+  };
+  stage.lists = {};
+  stage.broadcasts = {};
+  stage.blocks = {};
+  stage.comments = {};
+  sprite.variables = {
+    'local-value': ['local', 2],
+    'local-unused': ['local unused', true]
+  };
+  sprite.lists = {};
+  sprite.broadcasts = {};
+  sprite.comments = {};
+  sprite.blocks = {
+    flag: block('event_whenflagclicked', 'blocked-0', null, true),
+    'dispatch-separator': block(
+      'motion_setrotationstyle',
+      'dispatch-x',
+      'blocked-7',
+      false,
+      {},
+      {STYLE: ['left-right', null]}
+    ),
+    'dispatch-x': block('motion_changexby', 'dispatch-y', 'dispatch-separator', false, {DX: [1, [4, '11']]}),
+    'dispatch-y': block('motion_changeyby', 'dispatch-size', 'dispatch-x', false, {DY: [1, [4, '-7']]}),
+    'dispatch-size': block(
+      'looks_changesizeby',
+      'dispatch-volume',
+      'dispatch-y',
+      false,
+      {CHANGE: [1, [4, '13']]}
+    ),
+    'dispatch-volume': block('sound_changevolumeby', null, 'dispatch-size', false, {VOLUME: [1, [4, '-9']]})
+  };
+  for (let index = 0; index < 8; index += 1) {
+    const id = `blocked-${index}`;
+    sprite.blocks[id] = block(
+      'data_setvariableto',
+      index === 7 ? 'dispatch-separator' : `blocked-${index + 1}`,
+      index === 0 ? 'flag' : `blocked-${index - 1}`,
+      false,
+      {VALUE: [1, [4, String(index)]]},
+      {VARIABLE: ['Readable score', 'global_score']}
+    );
+  }
+  project.monitors = [{
+    id: 'global_score',
+    mode: 'default',
+    opcode: 'data_variable',
+    params: {VARIABLE: 'Readable score'},
+    spriteName: null,
+    value: 0,
+    width: 0,
+    height: 0,
+    x: 5,
+    y: 5,
+    visible: true,
+    sliderMin: 0,
+    sliderMax: 100,
+    isDiscrete: true
+  }];
   project.extensions = [];
   validateProject(project);
   return project;

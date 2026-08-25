@@ -96,9 +96,14 @@ describe('deterministic semantic trace', () => {
     expect(actual.at(-1)?.randomCalls).toBe(0);
   }, 60_000);
 
-  it('no-preserve conservatively falls back and remains deterministic for a race-sensitive project', async () => {
+  it('no-preserve falls back for monitored cross-hat state and remains deterministic', async () => {
     const original = createRaceProject();
-    const result = obfuscateProject(original, 'no-preserve', new Uint8Array(32).fill(0x3c));
+    const result = obfuscateProject(
+      original,
+      'no-preserve',
+      new Uint8Array(32).fill(0x3c),
+      {allowSize: true}
+    );
     expect(result.stats.virtualizedBlocks).toBe(0);
     const originalTrace = await executeTrace(createFixtureArchive(original), 2);
     const first = await executeTrace(createFixtureArchive(result.project), 2);

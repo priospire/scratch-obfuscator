@@ -1,4 +1,5 @@
 import {describe, expect, it} from 'vitest';
+import {serializeProjectPayload} from '../src/archive/writer.js';
 import {DeterministicGenerator} from '../src/deterministic.js';
 import {isScratchBlock} from '../src/model/blocks.js';
 import {applyCommonTransforms} from '../src/obfuscation/common.js';
@@ -79,6 +80,28 @@ describe('common lossless transforms', () => {
     validateProject(result.project);
   });
 
+  it('keeps a nontrivial lossless project identical when expanded growth is requested', () => {
+    const source = projectFixture();
+    const seed = new Uint8Array(32).fill(0x2a);
+    const compact = obfuscateProject(source, 'lossless', seed);
+    const expanded = obfuscateProject(source, 'lossless', seed, {allowSize: true});
+
+    expect(expanded.project).toEqual(compact.project);
+    expect(expanded.stats).toEqual(compact.stats);
+    validateProject(expanded.project);
+  });
+
+  it('keeps lossless anti-cheat output byte-identical when expanded growth is requested', () => {
+    const source = projectFixture();
+    const seed = new Uint8Array(32).fill(0x2b);
+    const compact = obfuscateProject(source, 'lossless', seed, {antiCheat: true});
+    const expanded = obfuscateProject(source, 'lossless', seed, {antiCheat: true, allowSize: true});
+
+    expect(expanded.project).toEqual(compact.project);
+    expect(serializeProjectPayload(expanded.project)).toEqual(serializeProjectPayload(compact.project));
+    validateProject(expanded.project);
+  });
+
   it('normalizes an inactive object-shadow with serializer-style null ownership', () => {
     const source = projectFixture();
     const stage = source.targets[0];
@@ -95,6 +118,23 @@ describe('common lossless transforms', () => {
 
     expect(result.project.targets[0]?.blocks['orphanShadow']).toBeUndefined();
     expect(result.stats.inactiveFallbacksRemoved).toBe(1);
+    validateProject(result.project);
+  });
+
+  it('preserves a mode-3 primitive fallback when the active slot is null', () => {
+    const source = projectFixture();
+    const stage = source.targets[0];
+    const say = stage?.blocks['say'];
+    if (!stage || !isScratchBlock(say)) throw new Error('fixture blocks missing');
+    say.inputs['MESSAGE'] = [3, null, [10, 'runtime fallback']];
+
+    const result = obfuscateProject(source, 'lossless', new Uint8Array(32).fill(0x35));
+    const transformedSay = Object.values(result.project.targets[0]?.blocks ?? {})
+      .find(value => isScratchBlock(value) && value.opcode === 'looks_say');
+
+    expect(transformedSay && isScratchBlock(transformedSay)
+      ? transformedSay.inputs['MESSAGE']
+      : undefined).toEqual([3, null, [10, 'runtime fallback']]);
     validateProject(result.project);
   });
 
@@ -141,8 +181,8 @@ describe('common lossless transforms', () => {
     const result = obfuscateProject(source, mode, new Uint8Array(32).fill(29));
     validateProject(result.project);
     const maximum = mode === 'lossy'
-      ? Math.max(result.stats.blocksBefore, Math.min(result.stats.blocksBefore * 4, 50_000))
-      : Math.max(result.stats.blocksBefore, Math.min((result.stats.blocksBefore * 25) + 512, 100_000));
+      ? Math.max(result.stats.blocksBefore, Math.min(result.stats.blocksBefore * 2, 30_000))
+      : Math.max(result.stats.blocksBefore, Math.min((result.stats.blocksBefore * 3) + 512, 30_000));
     expect(result.stats.blocksAfter).toBeLessThanOrEqual(maximum);
     expect(result.stats.blocksAfter).toBeGreaterThanOrEqual(result.stats.blocksBefore);
   });
@@ -304,7 +344,7 @@ describe('common lossless transforms', () => {
     expect(names).not.toContain('Unrelated');
     expect(names.find(name => name !== 'Launch' && name !== '5')).toMatch(/^x_/u);
     expect(Object.values(sprite.blocks).some(value => isScratchBlock(value) && value.opcode === 'operator_add')).toBe(true);
-    expect(resultStats.warnings).toContain('Broadcast display names were preserved because the project computes broadcast names at runtime.');
+    expect(resultStats.caveats).toContain('Broadcast display names were preserved because the project computes broadcast names at runtime.');
   });
 
   it('keeps empty and unmatched fixed selectors inert under generated-name collisions', () => {
@@ -462,6 +502,7 @@ describe('common lossless transforms', () => {
           TEXT: [3, [10, 'active'], [10, 'fallback']],
           SYMBOL: [3, [10, 'active'], [12, 'Score', 'score']],
           REFERENCE: [3, [10, 'active'], 'shadowBlock'],
+          ACTIVE_FALLBACK: [3, null, [10, 'runtime fallback']],
           UNOBSCURED: [1, [10, 'unchanged']]
         },
         fields: {UNRELATED: ['value'], VARIABLE: ['missing', 'missing']}, shadow: false, topLevel: true, x: 1, y: 2
@@ -475,6 +516,7 @@ describe('common lossless transforms', () => {
     expect(inputPrimitive(block, 'COLOR', 2)[1]).toMatch(/^#[0-9a-f]{6}$/);
     expect(inputPrimitive(block, 'TEXT', 2)[1]).toMatch(/^s_/);
     expect(inputPrimitive(block, 'SYMBOL', 2)[2]).toMatch(/^v_/);
+    expect(inputPrimitive(block, 'ACTIVE_FALLBACK', 2)[1]).toBe('runtime fallback');
     expect(inputPrimitive(block, 'UNOBSCURED', 1)[1]).toBe('unchanged');
   });
 

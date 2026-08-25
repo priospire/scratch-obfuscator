@@ -1,7 +1,7 @@
 import {createRequire} from 'node:module';
 import {describe, expect, it} from 'vitest';
 import {DeterministicGenerator} from '../src/deterministic.js';
-import {isScratchBlock} from '../src/model/blocks.js';
+import {isPrimitive, isScratchBlock} from '../src/model/blocks.js';
 import {applyAggressiveTransforms} from '../src/obfuscation/aggressive.js';
 import {countObjectBlocks} from '../src/obfuscation/analysis.js';
 import type {ObfuscationMode, ObfuscationStats, ScratchBlock, ScratchProject} from '../src/types.js';
@@ -45,66 +45,142 @@ const ScratchVm = vmValue as ScratchVmConstructor;
 const ScratchStorage = (storageValue as Record<string, unknown>)['ScratchStorage'] as StorageConstructor;
 
 describe('aggressive dispatcher runtime regressions', () => {
-  it('executes every command in a 26-block run exactly once across shuffled chunk orders', async () => {
-    const dispatcherTemplates = new Set<string>();
+  it('executes every command in a 26-block run exactly once across deterministic dispatcher permutations', async () => {
     for (const seedByte of [0, 1, 2, 3, 4, 5, 17, 255]) {
       const project = makeIncrementProject(26);
       const resultStats = stats(project);
+      let virtualizationSnapshot: ScratchProject | undefined;
       applyAggressiveTransforms(
         project,
         'no-preserve',
         new DeterministicGenerator(new Uint8Array(32).fill(seedByte), 'dispatcher-runtime'),
-        resultStats
+        resultStats,
+        event => {
+          if (event.stage === 'virtualizing-control-flow') virtualizationSnapshot = structuredClone(project);
+        },
+        true
       );
-      expect(resultStats.virtualizedBlocks).toBe(20);
-      for (const template of collectDispatcherTemplates(project)) dispatcherTemplates.add(template);
-      expect(countIndirectTransitions(project)).toBeGreaterThan(resultStats.virtualizedBlocks);
+      expect(resultStats.virtualizedBlocks, `seed ${seedByte} did not retain expanded cohorts`).toBe(24);
+      if (!virtualizationSnapshot) throw new Error('expanded dispatcher snapshot is unavailable');
+      expect(countPacketRoutes(virtualizationSnapshot)).toBe(24);
+      expect(virtualizationSnapshot.targets.flatMap(target => Object.values(target.blocks)).filter(value => (
+        isScratchBlock(value)
+        && value.opcode === 'data_changevariableby'
+        && value.fields['VARIABLE']?.[1] === 'counter-id'
+      ))).toHaveLength(26);
 
       const vm = new ScratchVm();
       vm.attachStorage(new ScratchStorage());
       try {
-        await vm.loadProject(createFixtureArchive(project));
+        await vm.loadProject(createFixtureArchive(virtualizationSnapshot));
         vm.start();
         vm.greenFlag();
-        for (let step = 0; step < 500 && vm.runtime.threads.length > 0; step += 1) vm.runtime._step();
+        let schedulerSteps = 0;
+        for (; schedulerSteps < 500 && vm.runtime.threads.length > 0; schedulerSteps += 1) vm.runtime._step();
         expect(vm.runtime.threads, `seed ${seedByte} did not terminate`).toHaveLength(0);
+        expect(schedulerSteps, `seed ${seedByte} introduced a native yield`).toBe(1);
         const sprite = vm.runtime.targets.find(target => !target.isStage);
         expect(sprite?.variables['counter-id']?.value, `seed ${seedByte} executed a chunk out of order`).toBe(26);
       } finally {
         vm.quit();
       }
     }
-    expect(dispatcherTemplates).toEqual(new Set(['control_if', 'control_if_else']));
-  }, 60_000);
+  }, 120_000);
 
-  for (const [tokenKind, seedByte] of [['state', 73], ['tag', 74]] as const) {
-    it(`rejects encrypted transition ${tokenKind} store tampering`, async () => {
-      const project = makeIncrementProject(5);
+  it('binds packet state to full same-parity post-command witnesses without changing the result', async () => {
+    expect([String(11).length, String(1001).length]).toEqual([2, 4]);
+    expect(String(11).length % 2).toBe(String(1001).length % 2);
+
+    const states: Record<string, unknown>[] = [];
+    for (const initialValue of [10, 1000]) {
+      const project = makeSameParityWitnessProject(initialValue);
+      let virtualizationSnapshot: ScratchProject | undefined;
       const resultStats = stats(project);
       applyAggressiveTransforms(
         project,
         'no-preserve',
-        new DeterministicGenerator(new Uint8Array(32).fill(seedByte), `dispatcher-${tokenKind}-tamper-runtime`),
-        resultStats
+        new DeterministicGenerator(new Uint8Array(32).fill(63), 'dispatcher-full-witness-runtime'),
+        resultStats,
+        event => {
+          if (event.stage === 'virtualizing-control-flow') virtualizationSnapshot = structuredClone(project);
+        }
       );
-
-      expect(resultStats.virtualizedBlocks).toBe(5);
-      expect(countAuthenticatedRoutes(project)).toBeGreaterThan(resultStats.virtualizedBlocks);
-      const tamper = corruptTransitionToken(project, tokenKind);
-      expect(tamper).toBeDefined();
-      if (!tamper) throw new Error(`transition ${tokenKind} is unavailable`);
-      expect(tamper.after - tamper.before).toBe(1);
+      expect(resultStats.virtualizedBlocks).toBe(4);
+      if (!virtualizationSnapshot) throw new Error('full-witness virtualization snapshot is unavailable');
 
       const vm = new ScratchVm();
       vm.attachStorage(new ScratchStorage());
       try {
-        await vm.loadProject(createFixtureArchive(project));
+        await vm.loadProject(createFixtureArchive(virtualizationSnapshot));
         vm.start();
         vm.greenFlag();
         for (let step = 0; step < 500 && vm.runtime.threads.length > 0; step += 1) vm.runtime._step();
         expect(vm.runtime.threads).toHaveLength(0);
         const sprite = vm.runtime.targets.find(target => !target.isStage);
-        expect(sprite?.variables['counter-id']?.value).toBe(0);
+        expect(sprite?.variables['counter-id']?.value).toBe('0');
+        states.push(Object.fromEntries(Object.entries(sprite?.variables ?? {}).flatMap(([id, variable]) => (
+          id === 'counter-id' || Array.isArray(variable.value) ? [] : [[id, variable.value]]
+        ))));
+      } finally {
+        vm.quit();
+      }
+    }
+
+    const first = states[0];
+    const second = states[1];
+    if (!first || !second) throw new Error('full-witness runtime state is unavailable');
+    expect(Object.keys(second).sort()).toEqual(Object.keys(first).sort());
+    expect(Object.keys(first).some(id => !Object.is(first[id], second[id]))).toBe(true);
+  }, 60_000);
+
+  for (const [tokenKind, label, seedByte] of [
+    ['x', 'encoded state', 74],
+    ['x-fraction', 'fractional encoded state', 77],
+    ['y', 'authenticated rail', 81],
+    ['y-fraction', 'fractional authenticated rail', 82],
+    ['key', 'dispatcher key', 73],
+    ['key-fraction', 'fractional dispatcher key', 80],
+    ['witness', 'dispatcher witness', 79],
+    ['witness-fraction', 'fractional dispatcher witness', 83],
+    ['step', 'dispatcher step', 84],
+    ['descriptor-0', 'descriptor word', 85],
+    ['packet-0', 'packet word', 87],
+    ['route-selector', 'dynamic route selector', 91],
+    ['leaf-armed', 'handler armed state', 92],
+    ['checksum-count', 'checksum loop count', 93],
+    ['terminal-phase', 'terminal phase', 94],
+    ['repeat-count', 'missing driver call', 90],
+    ['repeat-count-plus', 'extra driver call', 95]
+  ] as const) {
+    it(`rejects ${label} tampering`, async () => {
+      const project = makeIncrementProject(5);
+      const resultStats = stats(project);
+      let virtualizationSnapshot: ScratchProject | undefined;
+      applyAggressiveTransforms(
+        project,
+        'no-preserve',
+        new DeterministicGenerator(new Uint8Array(32).fill(seedByte), `dispatcher-${tokenKind}-tamper-runtime`),
+        resultStats,
+        event => {
+          if (event.stage === 'virtualizing-control-flow') virtualizationSnapshot = structuredClone(project);
+        }
+      );
+
+      expect(resultStats.virtualizedBlocks).toBe(4);
+      if (!virtualizationSnapshot) throw new Error('dispatcher virtualization snapshot is unavailable');
+      expect(countPacketRoutes(virtualizationSnapshot)).toBe(resultStats.virtualizedBlocks);
+      insertDispatcherTamper(virtualizationSnapshot, tokenKind);
+
+      const vm = new ScratchVm();
+      vm.attachStorage(new ScratchStorage());
+      try {
+        await vm.loadProject(createFixtureArchive(virtualizationSnapshot));
+        vm.start();
+        vm.greenFlag();
+        for (let step = 0; step < 500 && vm.runtime.threads.length > 0; step += 1) vm.runtime._step();
+        expect(vm.runtime.threads).toHaveLength(0);
+        const sprite = vm.runtime.targets.find(target => !target.isStage);
+        expect(sprite?.variables['counter-id']?.value).not.toBe(5);
       } finally {
         vm.quit();
       }
@@ -333,104 +409,184 @@ describe('aggressive dispatcher runtime regressions', () => {
   }, 60_000);
 });
 
-function collectDispatcherTemplates(project: ScratchProject): Set<string> {
-  const templates = new Set<string>();
-  for (const target of project.targets) {
-    for (const value of Object.values(target.blocks)) {
-      if (!isScratchBlock(value) || value.opcode !== 'procedures_definition' || !value.next) continue;
-      const body = target.blocks[value.next];
-      if (body && isScratchBlock(body) && (body.opcode === 'control_if' || body.opcode === 'control_if_else')) {
-        templates.add(body.opcode);
-      }
-    }
-  }
-  return templates;
-}
-
-function countIndirectTransitions(project: ScratchProject): number {
+function countPacketRoutes(project: ScratchProject): number {
   let count = 0;
   for (const target of project.targets) {
     for (const value of Object.values(target.blocks)) {
-      if (!isScratchBlock(value) || value.opcode !== 'data_setvariableto') continue;
-      const reporterId = value.inputs['VALUE']?.[1];
-      const reporter = typeof reporterId === 'string' ? target.blocks[reporterId] : undefined;
-      const indexId = reporter && isScratchBlock(reporter) ? reporter.inputs['INDEX']?.[1] : undefined;
-      const index = typeof indexId === 'string' ? target.blocks[indexId] : undefined;
-      if (reporter && isScratchBlock(reporter) && reporter.opcode === 'data_itemoflist'
-        && index && isScratchBlock(index) && index.opcode === 'operator_mod') count += 1;
+      if (!isScratchBlock(value) || value.opcode !== 'control_if') continue;
+      const commandId = value.inputs['SUBSTACK']?.[1];
+      const command = typeof commandId === 'string' ? target.blocks[commandId] : undefined;
+      const conditionId = value.inputs['CONDITION']?.[1];
+      const condition = typeof conditionId === 'string' ? target.blocks[conditionId] : undefined;
+      if (!isScratchBlock(command) || command.next === null) continue;
+      const witnessSetter = target.blocks[command.next];
+      const armedSetter = isScratchBlock(witnessSetter) && witnessSetter.next !== null
+        ? target.blocks[witnessSetter.next]
+        : undefined;
+      if (
+        !isScratchBlock(witnessSetter)
+        || witnessSetter.opcode !== 'data_setvariableto'
+        || !isScratchBlock(armedSetter)
+        || armedSetter.opcode !== 'data_setvariableto'
+        || armedSetter.next !== null
+      ) continue;
+      if (!isScratchBlock(condition) || condition.opcode !== 'operator_equals') continue;
+      count += 1;
     }
   }
   return count;
 }
 
-function countAuthenticatedRoutes(project: ScratchProject): number {
-  let count = 0;
-  for (const target of project.targets) {
-    for (const value of Object.values(target.blocks)) {
-      if (!isScratchBlock(value) || value.opcode !== 'operator_and') continue;
-      const equalityIds = ['OPERAND1', 'OPERAND2'].map(name => value.inputs[name]?.[1]);
-      const variableIds = equalityIds.flatMap(equalityId => {
-        const equality = typeof equalityId === 'string' ? target.blocks[equalityId] : undefined;
-        if (!equality || !isScratchBlock(equality) || equality.opcode !== 'operator_equals') return [];
-        const reporterId = equality.inputs['OPERAND1']?.[1];
-        const reporter = typeof reporterId === 'string' ? target.blocks[reporterId] : undefined;
-        const variableId = reporter && isScratchBlock(reporter) && reporter.opcode === 'data_variable'
-          ? reporter.fields['VARIABLE']?.[1]
-          : undefined;
-        return typeof variableId === 'string' ? [variableId] : [];
-      });
-      if (variableIds.length === 2 && variableIds[0] !== variableIds[1]) count += 1;
-    }
+function insertDispatcherTamper(project: ScratchProject, kind: string): void {
+  const target = project.targets.find(candidate => candidate.variables['counter-id'] !== undefined);
+  if (!target) throw new Error('dispatcher tamper target is unavailable');
+  const callsByCode = new Map<string, Array<[string, ScratchBlock]>>();
+  for (const [id, value] of Object.entries(target.blocks)) {
+    if (!isScratchBlock(value) || value.opcode !== 'procedures_call') continue;
+    const code = value.mutation?.['proccode'];
+    if (typeof code !== 'string') continue;
+    const calls = callsByCode.get(code) ?? [];
+    calls.push([id, value]);
+    callsByCode.set(code, calls);
   }
-  return count;
-}
+  const calls = [...callsByCode.values()].find(group => group.length === 5);
+  if (!calls) throw new Error('dispatcher call chain is unavailable');
+  const terminalEntry = calls.find(([, call]) => {
+    const parent = call.parent === null ? undefined : target.blocks[call.parent];
+    return isScratchBlock(parent)
+      && parent.opcode === 'data_changevariableby'
+      && isPrimitive(parent.inputs['VALUE']?.[1])
+      && Number(parent.inputs['VALUE']?.[1]?.[1]) === 2;
+  });
+  if (!terminalEntry) throw new Error('dispatcher terminal call is unavailable');
+  const driverEntries = calls.filter(entry => entry !== terminalEntry);
+  const driverIds = new Set(driverEntries.map(([id]) => id));
+  const orderedDrivers: Array<[string, ScratchBlock]> = [];
+  let current = driverEntries.find(([, call]) => call.parent === null || !driverIds.has(call.parent));
+  while (current) {
+    orderedDrivers.push(current);
+    const nextId = current[1].next;
+    current = nextId === null ? undefined : driverEntries.find(([id]) => id === nextId);
+  }
+  if (orderedDrivers.length !== 4) throw new Error('dispatcher driver chain is incomplete');
+  const firstDriver = orderedDrivers[0];
+  const lastDriver = orderedDrivers.at(-1);
+  if (!firstDriver || !lastDriver) throw new Error('dispatcher driver endpoints are unavailable');
+  if (kind === 'repeat-count' || kind === 'repeat-count-plus') {
+    const [lastId, lastCall] = lastDriver;
+    const previous = orderedDrivers.at(-2);
+    const terminalPhaseId = lastCall.next;
+    const terminalPhase = terminalPhaseId === null ? undefined : target.blocks[terminalPhaseId];
+    if (!previous || !isScratchBlock(terminalPhase)) throw new Error('dispatcher driver splice is unavailable');
+    if (kind === 'repeat-count') {
+      previous[1].next = terminalPhaseId;
+      terminalPhase.parent = previous[0];
+      delete target.blocks[lastId];
+    } else {
+      const extraId = 'test-extra-driver-call';
+      lastCall.next = extraId;
+      target.blocks[extraId] = {...structuredClone(lastCall), parent: lastId, next: terminalPhaseId};
+      terminalPhase.parent = extraId;
+    }
+    return;
+  }
+  if (kind === 'terminal-phase') {
+    const phase = terminalEntry[1].parent === null ? undefined : target.blocks[terminalEntry[1].parent];
+    if (!isScratchBlock(phase) || phase.opcode !== 'data_changevariableby') {
+      throw new Error('dispatcher terminal phase setter is unavailable');
+    }
+    phase.inputs['VALUE'] = [1, [4, '1']];
+    return;
+  }
+  if (kind === 'checksum-count') {
+    const checksumRepeat = Object.values(target.blocks).find(value => {
+      if (!isScratchBlock(value) || value.opcode !== 'control_repeat') return false;
+      const times = value.inputs['TIMES']?.[1];
+      const lengthReporter = typeof times === 'string' ? target.blocks[times] : undefined;
+      return isScratchBlock(lengthReporter) && lengthReporter.opcode === 'data_lengthoflist';
+    });
+    if (!isScratchBlock(checksumRepeat)) throw new Error('dispatcher checksum loop is unavailable');
+    checksumRepeat.inputs['TIMES'] = [1, [4, '9']];
+    return;
+  }
+  if (kind === 'leaf-armed') {
+    const command = target.blocks['increment-0'];
+    const witnessSetter = isScratchBlock(command) && command.next !== null ? target.blocks[command.next] : undefined;
+    const armedSetter = isScratchBlock(witnessSetter) && witnessSetter.next !== null
+      ? target.blocks[witnessSetter.next]
+      : undefined;
+    if (!isScratchBlock(armedSetter) || armedSetter.opcode !== 'data_setvariableto') {
+      throw new Error('dispatcher leaf armed setter is unavailable');
+    }
+    armedSetter.inputs['VALUE'] = [1, [4, '0']];
+    return;
+  }
+  if (kind === 'route-selector') {
+    const command = target.blocks['increment-0'];
+    const route = isScratchBlock(command) && command.parent !== null ? target.blocks[command.parent] : undefined;
+    const conditionId = isScratchBlock(route) ? route.inputs['CONDITION']?.[1] : undefined;
+    const condition = typeof conditionId === 'string' ? target.blocks[conditionId] : undefined;
+    if (!isScratchBlock(condition) || condition.opcode !== 'operator_equals') {
+      throw new Error('dispatcher route selector condition is unavailable');
+    }
+    condition.inputs['OPERAND2'] = [1, [4, '0']];
+    return;
+  }
+  const tableKinds = ['descriptor-0', 'packet-0'];
+  const tableOrdinal = tableKinds.indexOf(kind);
+  if (tableOrdinal >= 0) {
+    const tables = Object.entries(target.lists)
+      .filter(([, declaration]) => Array.isArray(declaration[1]) && declaration[1].length === 10)
+      .sort(([left], [right]) => left.localeCompare(right));
+    const table = tables[tableOrdinal];
+    const values = table?.[1][1];
+    if (!Array.isArray(values) || values.length !== 10) throw new Error('dispatcher packet table is unavailable');
+    values[0] = Number(values[0]) + 1;
+    return;
+  }
 
-function corruptTransitionToken(
-  project: ScratchProject,
-  kind: 'state' | 'tag'
-): {readonly before: number; readonly after: number} | undefined {
-  for (const target of project.targets) {
-    const railIds = new Set<string>();
-    for (const value of Object.values(target.blocks)) {
-      if (!isScratchBlock(value) || value.opcode !== 'operator_equals') continue;
-      const reporterId = value.inputs['OPERAND1']?.[1];
-      const expectedId = value.inputs['OPERAND2']?.[1];
-      const reporter = typeof reporterId === 'string' ? target.blocks[reporterId] : undefined;
-      const expected = typeof expectedId === 'string' ? target.blocks[expectedId] : undefined;
-      const expectedOpcode = kind === 'state' ? 'operator_add' : 'operator_subtract';
-      const variableId = reporter && isScratchBlock(reporter) && reporter.opcode === 'data_variable'
-        ? reporter.fields['VARIABLE']?.[1]
-        : undefined;
-      if (typeof variableId === 'string' && expected && isScratchBlock(expected) && expected.opcode === expectedOpcode) {
-        railIds.add(variableId);
-      }
-    }
-    const storeIds = new Set<string>();
-    for (const value of Object.values(target.blocks)) {
-      if (!isScratchBlock(value) || value.opcode !== 'data_setvariableto') continue;
-      const variableId = value.fields['VARIABLE']?.[1];
-      if (typeof variableId !== 'string' || !railIds.has(variableId)) continue;
-      const reporterId = value.inputs['VALUE']?.[1];
-      const reporter = typeof reporterId === 'string' ? target.blocks[reporterId] : undefined;
-      const listId = reporter && isScratchBlock(reporter) && reporter.opcode === 'data_itemoflist'
-        ? reporter.fields['LIST']?.[1]
-        : undefined;
-      if (typeof listId === 'string') storeIds.add(listId);
-    }
-    for (const storeId of storeIds) {
-      const values = target.lists[storeId]?.[1];
-      if (!Array.isArray(values)) continue;
-      let changed: {readonly before: number; readonly after: number} | undefined;
-      for (const [index, value] of values.entries()) {
-        if (typeof value !== 'number') continue;
-        const after = value + 1;
-        values[index] = after;
-        changed ??= {before: value, after};
-      }
-      if (changed) return changed;
-    }
+  const armedSetterId = firstDriver[1].parent;
+  const armedSetter = armedSetterId === null ? undefined : target.blocks[armedSetterId];
+  if (!isScratchBlock(armedSetter) || armedSetter.opcode !== 'data_setvariableto') {
+    throw new Error('dispatcher entry chain is unavailable');
   }
-  return undefined;
+  const entrySetters: ScratchBlock[] = [armedSetter];
+  let predecessor = armedSetter;
+  while (entrySetters.length < 6 && predecessor.parent !== null) {
+    const candidate = target.blocks[predecessor.parent];
+    if (!isScratchBlock(candidate) || candidate.opcode !== 'data_setvariableto') break;
+    entrySetters.unshift(candidate);
+    predecessor = candidate;
+  }
+  if (entrySetters.length !== 6) throw new Error('dispatcher entry setter chain is incomplete');
+  const setterIndex = kind.startsWith('step')
+    ? 0
+    : kind.startsWith('witness')
+      ? 1
+      : kind.startsWith('key')
+        ? 2
+        : kind.startsWith('x')
+          ? 3
+          : kind.startsWith('y')
+            ? 4
+            : -1;
+  const selected = entrySetters[setterIndex];
+  const variableId = selected?.fields['VARIABLE']?.[1];
+  const variableName = typeof variableId === 'string' ? target.variables[variableId]?.[0] : undefined;
+  if (typeof variableId !== 'string' || typeof variableName !== 'string') {
+    throw new Error(`dispatcher ${kind} variable is unavailable`);
+  }
+  const tamperId = `test-${kind}-tamper`;
+  armedSetter.next = tamperId;
+  firstDriver[1].parent = tamperId;
+  target.blocks[tamperId] = block(
+    'data_changevariableby',
+    firstDriver[0],
+    armedSetterId,
+    false,
+    {VALUE: [1, [4, kind.endsWith('fraction') ? '0.5' : '1']]},
+    {VARIABLE: [variableName, variableId]}
+  );
 }
 
 function makeNumericEquationProject(): ScratchProject {
@@ -627,23 +783,24 @@ function makeIncrementProject(length: number): ScratchProject {
       {VARIABLE: ['counter', 'counter-id']}
     );
   }
-  project.monitors = [{
-    id: 'counter-id',
-    mode: 'default',
-    opcode: 'data_variable',
-    params: {VARIABLE: 'counter'},
-    spriteName: sprite.name,
-    value: 0,
-    width: 0,
-    height: 0,
-    x: 0,
-    y: 0,
-    visible: false,
-    sliderMin: 0,
-    sliderMax: 100,
-    isDiscrete: true
-  }];
+  project.monitors = [];
   project.extensions = [];
+  return project;
+}
+
+function makeSameParityWitnessProject(initialValue: number): ScratchProject {
+  const project = makeIncrementProject(5);
+  const sprite = project.targets.find(target => !target.isStage);
+  if (!sprite) throw new Error('full-witness fixture sprite is unavailable');
+  sprite.variables['counter-id'] = ['counter', initialValue];
+  sprite.blocks['increment-4'] = block(
+    'data_setvariableto',
+    null,
+    'increment-3',
+    false,
+    {VALUE: [1, [4, '0']]},
+    {VARIABLE: ['counter', 'counter-id']}
+  );
   return project;
 }
 

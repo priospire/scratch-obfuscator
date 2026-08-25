@@ -17,7 +17,9 @@ afterEach(async () => {
 
 describe('CLI argument contract', () => {
   it('defaults to lossless and accepts requested single-hyphen flags', () => {
-    expect(parseCliArguments(['input.sb3'])).toMatchObject({kind: 'run', input: 'input.sb3', mode: 'lossless', antiCheat: false, force: false});
+    expect(parseCliArguments(['input.sb3'])).toMatchObject({
+      kind: 'run', input: 'input.sb3', mode: 'lossless', antiCheat: false, allowSize: false, force: false
+    });
     expect(parseCliArguments(['input.sb3', '-lossy', '--force'])).toMatchObject({mode: 'lossy', force: true});
     expect(parseCliArguments(['-no-preserve', '-o', 'out.sb3', 'input.sb3'])).toMatchObject({mode: 'no-preserve', output: 'out.sb3'});
   });
@@ -27,6 +29,18 @@ describe('CLI argument contract', () => {
     expect(parseCliArguments(['input.sb3', '--lossy', '--anticheat'])).toMatchObject({mode: 'lossy', antiCheat: true});
     expect(parseCliArguments(['--no-preserve', '-anticheat', 'input.sb3'])).toMatchObject({mode: 'no-preserve', antiCheat: true});
     expect(parseCliArguments(['input.sb3', '--anticheat', '-anticheat'])).toMatchObject({antiCheat: true});
+  });
+
+  it('accepts expanded growth independently of every mode and modifier', () => {
+    expect(parseCliArguments(['input.sb3', '-allowsize'])).toMatchObject({mode: 'lossless', allowSize: true});
+    expect(parseCliArguments(['input.sb3', '--lossy', '--allowsize'])).toMatchObject({
+      mode: 'lossy', allowSize: true
+    });
+    expect(parseCliArguments([
+      '--no-preserve', '-anticheat', '-extra', '-allowsize', 'input.sb3'
+    ])).toMatchObject({mode: 'no-preserve', antiCheat: true, extra: true, allowSize: true});
+    expect(parseCliArguments(['input.sb3', '--allowsize', '-allowsize'])).toMatchObject({allowSize: true});
+    expect(() => parseCliArguments(['input.sb3', '--allowsize=max'])).toThrow(UsageError);
   });
 
   it('rejects mode conflicts, missing values, unknown options, and extra inputs', () => {
@@ -39,6 +53,9 @@ describe('CLI argument contract', () => {
 
   it('supports end-of-options for input names beginning with a hyphen', () => {
     expect(parseCliArguments(['--', '-project.sb3'])).toMatchObject({input: '-project.sb3'});
+    for (const input of ['-lossy', '-no-preserve', '-anticheat', '-allowsize', '-extra', '-verbose=max', '--help']) {
+      expect(parseCliArguments(['--', input])).toMatchObject({input, mode: 'lossless'});
+    }
   });
 
   it('prints help/version and maps usage failures to exit code 2', async () => {
@@ -48,6 +65,7 @@ describe('CLI argument contract', () => {
     expect(await runCli(['--help'], io)).toBe(0);
     expect(stdout.join('')).toContain('Usage: scratch-obfuscator');
     expect(stdout.join('')).toContain('-anticheat, --anticheat');
+    expect(stdout.join('')).toContain('-allowsize, --allowsize');
     stdout.length = 0;
     expect(await runCli(['--version'], io)).toBe(0);
     const packageMetadata = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {version: string};
@@ -64,6 +82,8 @@ describe('CLI archive integration', () => {
     const input = join(directory, 'input.sb3');
     const first = join(directory, 'first.sb3');
     const second = join(directory, 'second.sb3');
+    const expandedFirst = join(directory, 'expanded-first.sb3');
+    const expandedSecond = join(directory, 'expanded-second.sb3');
     const protectedOutput = join(directory, 'protected.sb3');
     const project = {
       targets: [{
@@ -99,6 +119,10 @@ describe('CLI archive integration', () => {
     expect(await runCli([input, '-o', first], io), errors.join('')).toBe(0);
     expect(await runCli([input, '--lossless', '-o', second], io)).toBe(0);
     expect(await readFile(first)).toEqual(await readFile(second));
+    expect(await runCli([input, '-allowsize', '-o', expandedFirst], io)).toBe(0);
+    expect(await runCli([input, '--lossless', '--allowsize', '-o', expandedSecond], io)).toBe(0);
+    expect(await readFile(expandedFirst)).toEqual(await readFile(expandedSecond));
+    expect(await readFile(expandedFirst)).toEqual(await readFile(first));
     const plainArchive = unzipSync(await readFile(first));
     const plainProjectBytes = plainArchive['project.json'];
     if (plainProjectBytes === undefined) throw new Error('plain output is missing project.json');
@@ -119,9 +143,25 @@ describe('CLI archive integration', () => {
     expect(Object.values(protectedStage?.variables ?? {})
       .filter(([name]) => name === 'Obfuscated by PrioSDK Gen 4.')).toHaveLength(1);
     expect(output.join('')).toContain('anticheat=on');
+    expect(output.join('')).toContain('allowsize=on');
     expect(output.join('')).toMatch(/packed=\d+, folded=\d+, fallbacks=\d+/u);
     expect(await runCli([input, '-o', first], io)).toBe(2);
     expect(errors.join('')).toContain('output already exists');
+  });
+
+  it('emits byte-identical expanded lossy output for both flag spellings', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'scratch-obfuscator-cli-allowsize-'));
+    temporaryDirectories.push(directory);
+    const input = join(directory, 'input.sb3');
+    const first = join(directory, 'first.sb3');
+    const second = join(directory, 'second.sb3');
+    await writeFile(input, createFixtureArchive(createFixtureProject()));
+    const firstIo = {stdout: () => undefined, stderr: () => undefined};
+    const secondIo = {stdout: () => undefined, stderr: () => undefined};
+
+    expect(await runCli([input, '-lossy', '-allowsize', '-o', first], firstIo)).toBe(0);
+    expect(await runCli([input, '--lossy', '--allowsize', '-o', second], secondIo)).toBe(0);
+    expect(await readFile(first)).toEqual(await readFile(second));
   });
 
   it('normalizes recoverable editor artifacts before strict no-preserve output validation', async () => {

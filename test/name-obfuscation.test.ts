@@ -187,7 +187,7 @@ describe('precise symbol-name obfuscation', () => {
     const sense = Object.values(sprite.blocks).find(value => isScratchBlock(value) && value.opcode === 'sensing_of');
     expect(sense && isScratchBlock(sense) ? sense.fields['PROPERTY']?.[0] : undefined).toBe(variableNameByValue(sprite, 12));
     expect(Object.values(stage.broadcasts)).toEqual([sprite.name]);
-    expect(resultStats.warnings).toContain('Display names were preserved because typed menu fields are used as runtime reporter values.');
+    expect(resultStats.caveats).toContain('Display names were preserved because typed menu fields are used as runtime reporter values.');
   });
 
   it('does not preserve a typed field which an implemented menu reporter does not return', () => {
@@ -213,7 +213,7 @@ describe('precise symbol-name obfuscation', () => {
     validateProject(project);
 
     expect(variableNames(stage)).not.toContain(sprite.name);
-    expect(resultStats.warnings).not.toContain(
+    expect(resultStats.caveats).not.toContain(
       'Display names were preserved because typed menu fields are used as runtime reporter values.'
     );
   });
@@ -263,7 +263,7 @@ describe('precise symbol-name obfuscation', () => {
 
     expect(variableNameByValue(stage, 'observed')).toBe('Runtime-visible menu value');
     expect(variableNameByValue(stage, 'ignored')).toMatch(/^x_/u);
-    expect(resultStats.warnings).toContain(
+    expect(resultStats.caveats).toContain(
       'Display names were preserved because typed menu fields are used as runtime reporter values.'
     );
   });
@@ -449,7 +449,7 @@ describe('precise symbol-name obfuscation', () => {
     expect(listNames(stage)).not.toContain('Ordinary list');
     const menu = Object.values(sprite.blocks).find(value => isScratchBlock(value) && value.opcode === 'motion_goto_menu');
     expect(menu && isScratchBlock(menu) ? menu.fields[fieldName]?.[0] : undefined).toBe(sprite.name);
-    expect(resultStats.warnings).toContain('Display names were preserved because typed menu fields are used as runtime reporter values.');
+    expect(resultStats.caveats).toContain('Display names were preserved because typed menu fields are used as runtime reporter values.');
   });
 
   it('uses one shared opaque name for all scalars selected by a dynamic OBJECT', () => {
@@ -503,7 +503,7 @@ describe('precise symbol-name obfuscation', () => {
     expect(variableNameByValue(sprite, 2)).toBe('Externally coupled');
     const sense = Object.values(sprite.blocks).find(value => isScratchBlock(value) && value.opcode === 'sensing_of');
     expect(sense && isScratchBlock(sense) ? sense.fields['PROPERTY']?.[0] : undefined).toBe('Externally coupled');
-    expect(resultStats.warnings).toContain('Variable display names were preserved because the project uses name-based sensing.');
+    expect(resultStats.caveats).toContain('Variable display names were preserved because the project uses name-based sensing.');
   });
 
   it('evaluates a nested constant target selector without preserving an unrelated cloud-coupled name', () => {
@@ -567,7 +567,7 @@ describe('precise symbol-name obfuscation', () => {
     const sense = Object.values(sprite.blocks).find(value => isScratchBlock(value) && value.opcode === 'sensing_of');
     expect(sense && isScratchBlock(sense) ? sense.fields['PROPERTY']?.[0] : undefined).toBe(renamed);
     expect(Object.values(stage.broadcasts)).toEqual(['_stage_']);
-    expect(resultStats.warnings).not.toContain(
+    expect(resultStats.caveats).not.toContain(
       'Variable display names were preserved because the project uses name-based sensing.'
     );
   });
@@ -600,7 +600,7 @@ describe('precise symbol-name obfuscation', () => {
 
     expect(variableNameByValue(stage, 'extension selector')).toBe(sprite.name);
     expect(variableNameByValue(stage, 0)).toMatch(/^x_/u);
-    expect(resultStats.warnings).toContain(
+    expect(resultStats.caveats).toContain(
       'Display names were preserved because typed menu fields are used as runtime reporter values.'
     );
   });
@@ -617,7 +617,7 @@ describe('precise symbol-name obfuscation', () => {
     expect(variableNameByValue(sprite, 2)).not.toBe('x position');
     const sense = Object.values(sprite.blocks).find(value => isScratchBlock(value) && value.opcode === 'sensing_of');
     expect(sense && isScratchBlock(sense) ? sense.fields['PROPERTY']?.[0] : undefined).toBe('x position');
-    expect(resultStats.warnings).toHaveLength(1);
+    expect(resultStats.caveats).toHaveLength(1);
   });
 
   it('renames same-named scalars which are hidden by native attributes in every possible target', () => {

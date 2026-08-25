@@ -44,7 +44,7 @@ describe('v5 runtime-name precision', () => {
     const transformedStage = stageOf(result.project);
 
     expect(Object.values(transformedStage.broadcasts)).toContain('go');
-    expect(result.stats.warnings).toContain(
+    expect(result.stats.caveats).toContain(
       'Display names were preserved because typed menu fields are used as runtime reporter values.'
     );
   });
@@ -70,7 +70,7 @@ describe('v5 runtime-name precision', () => {
     expect(broadcastNames).toEqual(new Set(['go', 'Stop']));
     expect(variableNames).not.toContain('Readable score');
     expect(listNames).not.toContain('Readable list');
-    expect(result.stats.warnings).toContain(
+    expect(result.stats.caveats).toContain(
       'Broadcast display names were preserved because the project computes broadcast names at runtime.'
     );
   });
@@ -92,7 +92,7 @@ describe('v5 runtime-name precision', () => {
     const transformedStage = stageOf(result.project);
 
     expect(Object.values(transformedStage.variables).map(tuple => tuple[0])).not.toContain('Readable score');
-    expect(result.stats.warnings).not.toContain(
+    expect(result.stats.caveats).not.toContain(
       'Variable display names were preserved because the project uses name-based sensing.'
     );
   });

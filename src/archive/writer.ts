@@ -19,14 +19,18 @@ interface WritableArchiveEntry {
   readonly uncompressedSize: number;
 }
 
-export function serializeProject(project: ScratchProject, mode: ObfuscationMode): Uint8Array {
+export function serializeProjectPayload(project: ScratchProject): Uint8Array {
   let json: string;
   try {
     json = serializeJsonValue(project, new Set<object>());
   } catch (error) {
     throw new InputError('transformed project cannot be serialized as JSON', {cause: error});
   }
-  const bytes = Buffer.from(json, 'utf8');
+  return Buffer.from(json, 'utf8');
+}
+
+export function serializeProject(project: ScratchProject, mode: ObfuscationMode): Uint8Array {
+  const bytes = serializeProjectPayload(project);
   const limit = mode === 'no-preserve' ? 128 * 1024 * 1024 : 64 * 1024 * 1024;
   if (bytes.length > limit) {
     throw new InputError(`transformed project.json is ${bytes.length} bytes; ${mode} limit is ${limit} bytes`);

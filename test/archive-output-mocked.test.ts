@@ -7,6 +7,8 @@ const fileSystem = vi.hoisted(() => ({
   access: vi.fn(),
   link: vi.fn(),
   lstat: vi.fn(),
+  open: vi.fn(),
+  readFile: vi.fn(),
   realpath: vi.fn(),
   rename: vi.fn(),
   stat: vi.fn(),
@@ -15,7 +17,7 @@ const fileSystem = vi.hoisted(() => ({
 
 vi.mock('node:fs/promises', () => fileSystem);
 
-const {prepareOutput} = await import('../src/archive/output.js');
+const {commitOutput, prepareOutput} = await import('../src/archive/output.js');
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -23,6 +25,11 @@ beforeEach(() => {
   fileSystem.realpath.mockImplementation((value: string) => Promise.resolve(resolve(value)));
   fileSystem.lstat.mockRejectedValue(errno('ENOENT'));
   fileSystem.access.mockResolvedValue(undefined);
+  fileSystem.link.mockResolvedValue(undefined);
+  fileSystem.rename.mockResolvedValue(undefined);
+  fileSystem.unlink.mockResolvedValue(undefined);
+  fileSystem.readFile.mockRejectedValue(errno('ENOENT'));
+  fileSystem.open.mockResolvedValue(fakeHandle());
 });
 
 describe('mocked filesystem edge paths', () => {
@@ -93,6 +100,17 @@ describe('mocked filesystem edge paths', () => {
     });
     await expect(prepareOutput('input.sb3', output, true)).rejects.toThrowError(/not a regular file/);
   });
+
+  it('falls back to a read-only durability handle when write access is denied', async () => {
+    fileSystem.open.mockImplementation((_path: string, flags: string) => flags === 'r+'
+      ? Promise.reject(errno('EACCES'))
+      : Promise.resolve(fakeHandle()));
+
+    await expect(commitOutput('output.sb3', false, () => Promise.resolve(), () => Promise.resolve()))
+      .resolves.toBeUndefined();
+    expect(fileSystem.open).toHaveBeenCalledWith(expect.any(String), 'r+');
+    expect(fileSystem.open).toHaveBeenCalledWith(expect.any(String), 'r');
+  });
 });
 
 function fakeStats(inode: bigint): BigIntStats {
@@ -120,6 +138,16 @@ function fakeSpecialStats(): BigIntStats {
     isFile: () => false,
     isDirectory: () => false
   } as BigIntStats;
+}
+
+function fakeHandle(): {
+  close: () => Promise<void>;
+  sync: () => Promise<void>;
+} {
+  return {
+    close: () => Promise.resolve(),
+    sync: () => Promise.resolve()
+  };
 }
 
 function isReservedPath(value: string): boolean {

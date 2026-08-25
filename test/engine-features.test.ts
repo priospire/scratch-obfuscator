@@ -68,6 +68,15 @@ describe('integrated optimization and protection pipeline', () => {
       {antiCheat: 'yes'} as unknown as {antiCheat: boolean}
     )).toThrow(/antiCheat must be a boolean/u);
   });
+
+  it('rejects an invalid expanded-growth option type', () => {
+    expect(() => obfuscateProject(
+      arithmeticProject(),
+      'lossless',
+      new Uint8Array(32),
+      {allowSize: 'yes'} as unknown as {allowSize: boolean}
+    )).toThrow(/allowSize must be a boolean/u);
+  });
 });
 
 function arithmeticProject(): ScratchProject {

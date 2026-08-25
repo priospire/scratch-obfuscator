@@ -170,6 +170,28 @@ describe('CLI verification and diagnostics', () => {
     expect(reopened.cleanup.mock.calls).toHaveLength(1);
   });
 
+  it('rejects archive serialization drift before committing the verified project', async () => {
+    const project = createFixtureProject();
+    const source = loadedArchive(project, [archiveEntry('project.json', Buffer.from('{}'))]);
+    const reopened = loadedArchive(project, [archiveEntry('project.json', Buffer.from('{}'))]);
+    archiveMocks.loadArchive.mockResolvedValueOnce(source).mockResolvedValueOnce(reopened);
+    archiveMocks.serializeProject
+      .mockReturnValueOnce(Buffer.from('{}'))
+      .mockReturnValueOnce(Buffer.from('{"altered":true}'));
+    obfuscationMocks.obfuscateProject.mockReturnValue({project, stats: baseStats()});
+    const diagnostics: string[] = [];
+
+    expect(await runCli(['input.sb3', '-o', 'output.sb3'], {
+      stdout: () => undefined,
+      stderr: text => diagnostics.push(text)
+    })).toBe(5);
+    expect(diagnostics.join('')).toContain(
+      'archive serialization altered the verified project state during write or reopen'
+    );
+    expect(source.cleanup.mock.calls).toHaveLength(1);
+    expect(reopened.cleanup.mock.calls).toHaveLength(1);
+  });
+
   it('rejects an output whose verified archive loses an asset', async () => {
     const project = createFixtureProject();
     const source = loadedArchive(project, [

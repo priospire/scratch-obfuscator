@@ -17,6 +17,7 @@ import {
   hardenInactiveShadows,
   isLossyLiveTransformSafe
 } from '../src/obfuscation/analysis.js';
+import {aggressivePerSiteBlockEquivalentCap} from '../src/growth-policy.js';
 import type {
   ObfuscationMode,
   ObfuscationStats,
@@ -43,7 +44,7 @@ describe('aggressive transforms', () => {
     expect(firstStats).toEqual(secondStats);
     expect(firstStats.decoysAdded).toBeGreaterThan(0);
     expect(firstStats.virtualizedBlocks).toBe(0);
-    expect(countBlockEquivalents(first)).toBeLessThanOrEqual(Math.min(before * 4, 50_000));
+    expect(countBlockEquivalents(first)).toBeLessThanOrEqual(Math.min(before * 2, 30_000));
     expect(opcodes(first)).toContain('control_if');
     expect(opcodes(first)).toContain('operator_equals');
     expect(opcodes(first)).not.toContain('procedures_definition');
@@ -57,21 +58,45 @@ describe('aggressive transforms', () => {
     expect(hat && isScratchBlock(hat) ? hat.next : undefined).toBe('set-1');
     expect(originalValue && isScratchBlock(originalValue) ? originalValue.inputs['VALUE']?.[1] : undefined).toEqual([10, 'alpha']);
     validateProject(first);
+
+    const expanded = fixtureProject();
+    const expandedBefore = countBlockEquivalents(expanded);
+    applyAggressiveTransforms(expanded, 'lossy', generator(7), stats('lossy', expanded), undefined, true);
+    expect(countBlockEquivalents(expanded)).toBeLessThanOrEqual(Math.min(
+      Math.max(expandedBefore * 4, expandedBefore + 256),
+      50_000
+    ));
+    validateProject(expanded);
   });
 
-  it('fragments eligible runs into shuffled warp handlers in no-preserve mode', () => {
+  it('routes eligible runs through checksum-protected dynamic dispatch in no-preserve mode', () => {
     const project = fixtureProject();
     const before = countBlockEquivalents(project);
     const resultStats = stats('no-preserve', project);
+    const fixtureSprite = project.targets[1];
+    const changeOne = fixtureSprite?.blocks['change-1'];
+    const setTwo = fixtureSprite?.blocks['set-2'];
+    if (!changeOne || !isScratchBlock(changeOne) || !setTwo || !isScratchBlock(setTwo)) {
+      throw new Error('dispatcher fixture run is unavailable');
+    }
+    changeOne.inputs['VALUE'] = [1, [4, '2']];
+    setTwo.inputs['VALUE'] = [1, [10, 'beta']];
+    delete fixtureSprite?.blocks['delta-reporter'];
+    delete fixtureSprite?.blocks['join-original'];
+    delete fixtureSprite?.blocks['variable-reporter'];
+    delete fixtureSprite?.blocks['change-with-default'];
 
-    applyAggressiveTransforms(project, 'no-preserve', generator(91), resultStats);
+    let virtualizationSnapshot: ScratchProject | undefined;
+    applyAggressiveTransforms(project, 'no-preserve', generator(91), resultStats, event => {
+      if (event.stage === 'virtualizing-control-flow') virtualizationSnapshot = structuredClone(project);
+    });
 
     expect(resultStats.virtualizedBlocks).toBeGreaterThanOrEqual(4);
     expect(resultStats.decoysAdded).toBeGreaterThan(0);
-    expect(opcodes(project).filter(opcode => opcode === 'procedures_definition').length).toBeGreaterThanOrEqual(4);
-    expect(opcodes(project).filter(opcode => opcode === 'procedures_call').length).toBeGreaterThanOrEqual(4);
-    expect(dispatcherRouteOpcodes(project).length).toBeGreaterThanOrEqual(5);
-    expect(countBlockEquivalents(project)).toBeLessThanOrEqual(Math.min((before * 25) + 512, 100_000));
+    expect(opcodes(project).filter(opcode => opcode === 'procedures_definition').length).toBeGreaterThanOrEqual(1);
+    expect(opcodes(project).filter(opcode => opcode === 'procedures_call').length).toBeGreaterThanOrEqual(1);
+    expect(dispatcherRouteOpcodes(project).length).toBeGreaterThanOrEqual(4);
+    expect(countBlockEquivalents(project)).toBeLessThanOrEqual(Math.min((before * 3) + 512, 30_000));
 
     const sprite = project.targets[1];
     const firstOriginal = sprite?.blocks['set-1'];
@@ -82,55 +107,40 @@ describe('aggressive transforms', () => {
       const value = sprite?.blocks[id];
       expect(value && isScratchBlock(value) && value.next ? originalIds.has(value.next) : false).toBe(false);
     }
-    const dynamicReads = Object.values(sprite?.blocks ?? {}).flatMap(value => {
-      if (!isScratchBlock(value) || value.opcode !== 'data_itemoflist') return [];
-      const indexId = value.inputs['INDEX']?.[1];
-      const index = typeof indexId === 'string' ? sprite?.blocks[indexId] : undefined;
-      const listId = value.fields['LIST']?.[1];
-      const modulus = index && isScratchBlock(index) && index.opcode === 'operator_mod'
-        ? Number((index.inputs['NUM2']?.[1] as ScratchInput | undefined)?.[1])
-        : Number.NaN;
-      return typeof listId === 'string' && Number.isSafeInteger(modulus) ? [{listId, modulus}] : [];
+    if (!virtualizationSnapshot) throw new Error('dispatcher virtualization snapshot is unavailable');
+    const virtualizedSprite = virtualizationSnapshot.targets[1];
+    if (!virtualizedSprite) throw new Error('virtualized fixture sprite is unavailable');
+    expect(Object.keys(virtualizedSprite.lists)).toHaveLength(2);
+    expect(Object.values(virtualizedSprite.lists).filter(declaration => (
+      Array.isArray(declaration[1]) && declaration[1].length === 10
+    ))).toHaveLength(2);
+    expect(Object.values(virtualizedSprite.blocks).filter(value => (
+      isScratchBlock(value) && value.opcode === 'data_replaceitemoflist'
+    ))).toHaveLength(0);
+    const primeModuli = Object.values(virtualizedSprite.blocks).filter(value => {
+      if (!isScratchBlock(value) || value.opcode !== 'operator_mod') return false;
+      return [251, 257, 263, 269].includes(
+        Number((value.inputs['NUM2']?.[1] as ScratchInput | undefined)?.[1])
+      );
     });
-    const dispatcherStoreIds = new Set(dynamicReads.map(read => read.listId));
-    expect(dispatcherStoreIds.size).toBeGreaterThanOrEqual(3);
-    expect(new Set(dynamicReads.map(read => read.modulus))).toEqual(new Set([17, 19, 23]));
-    for (const storeId of dispatcherStoreIds) {
-      const values = sprite?.lists[storeId]?.[1];
-      expect(Array.isArray(values)).toBe(true);
-      expect(Array.isArray(values) ? values.some(value => typeof value === 'number') : false).toBe(true);
-      expect(Array.isArray(values) ? values.some(value => typeof value === 'string') : false).toBe(true);
+    expect(primeModuli.length).toBeGreaterThanOrEqual(resultStats.virtualizedBlocks);
+    const runtimeWitnesses = Object.values(virtualizedSprite.blocks).filter(value => (
+      isScratchBlock(value) && value.opcode === 'sensing_timer'
+    ));
+    expect(runtimeWitnesses).toHaveLength(0);
+    const driverCallCounts = new Map<string, number>();
+    for (const value of Object.values(virtualizedSprite.blocks)) {
+      if (!isScratchBlock(value) || value.opcode !== 'procedures_call') continue;
+      const code = value.mutation?.['proccode'];
+      if (typeof code === 'string') driverCallCounts.set(code, (driverCallCounts.get(code) ?? 0) + 1);
     }
-    const indirectTransitions = Object.values(sprite?.blocks ?? {}).filter(value => {
-      if (!isScratchBlock(value) || value.opcode !== 'data_setvariableto') return false;
-      const reporterId = value.inputs['VALUE']?.[1];
-      const reporter = typeof reporterId === 'string' ? sprite?.blocks[reporterId] : undefined;
-      const listId = reporter && isScratchBlock(reporter) ? reporter.fields['LIST']?.[1] : undefined;
-      return reporter && isScratchBlock(reporter) && reporter.opcode === 'data_itemoflist'
-        && typeof listId === 'string' && dispatcherStoreIds.has(listId);
-    });
-    expect(indirectTransitions.length).toBeGreaterThan(resultStats.virtualizedBlocks);
-    const indirectKeyUpdates = Object.values(sprite?.blocks ?? {}).filter(value => {
-      if (!isScratchBlock(value) || value.opcode !== 'data_changevariableby') return false;
-      const reporterId = value.inputs['VALUE']?.[1];
-      const reporter = typeof reporterId === 'string' ? sprite?.blocks[reporterId] : undefined;
-      const listId = reporter && isScratchBlock(reporter) ? reporter.fields['LIST']?.[1] : undefined;
-      return reporter && isScratchBlock(reporter) && reporter.opcode === 'data_itemoflist'
-        && typeof listId === 'string' && dispatcherStoreIds.has(listId);
-    });
-    expect(indirectKeyUpdates.length).toBe(resultStats.virtualizedBlocks);
-    expect(countKeyedRouteExpressions(project, 'operator_add')).toBeGreaterThan(resultStats.virtualizedBlocks);
-    expect(countKeyedRouteExpressions(project, 'operator_subtract')).toBeGreaterThan(resultStats.virtualizedBlocks);
+    expect(driverCallCounts.size).toBeGreaterThan(0);
+    expect([...driverCallCounts.values()]).toEqual([5]);
+    expect(countPacketRoutes(virtualizedSprite)).toBe(resultStats.virtualizedBlocks);
     expect(Object.values(sprite?.blocks ?? {}).some(value => isDualRail(sprite, value))).toBe(true);
-    expect(Object.values(sprite?.blocks ?? {}).some(value => {
-      if (!isScratchBlock(value) || value.opcode !== 'procedures_definition' || !value.next) return false;
-      const body = sprite?.blocks[value.next];
-      const listId = body && isScratchBlock(body) ? body.fields['LIST']?.[1] : undefined;
-      return body && isScratchBlock(body) && body.opcode === 'data_deletealloflist'
-        && typeof listId === 'string' && dispatcherStoreIds.has(listId);
-    })).toBe(true);
-    expect(hasFieldReference(project, 'original-variable-id')).toBe(false);
-    expect(sprite?.variables['original-variable-id']).toBeUndefined();
+    expect(hasFieldReference(project, 'original-variable-id')).toBe(
+      sprite?.variables['original-variable-id'] !== undefined
+    );
     validateProject(project);
   });
 
@@ -259,7 +269,7 @@ describe('aggressive transforms', () => {
     expect(collectNumericLiteralSites(project)).toMatchObject([
       {ownerId: 'set-x', inputName: 'X', value: '-0', growth: 3}
     ]);
-    applyAggressiveTransforms(project, 'lossy', generator(79), stats('lossy', project));
+    applyAggressiveTransforms(project, 'lossy', generator(79), stats('lossy', project), undefined, true);
 
     const setX = sprite.blocks['set-x'];
     if (!setX || !isScratchBlock(setX)) throw new Error('numeric owner disappeared');
@@ -282,7 +292,7 @@ describe('aggressive transforms', () => {
       const first = typeof firstId === 'string' ? sprite.blocks[firstId] : undefined;
       const second = typeof secondId === 'string' ? sprite.blocks[secondId] : undefined;
       return first && second && isScratchBlock(first) && isScratchBlock(second)
-        && first.opcode === 'data_setvariableto' && second.opcode === 'data_addtolist';
+        && first.opcode === 'data_setvariableto' && second.opcode === 'data_replaceitemoflist';
     });
     expect(dualRail).toBeDefined();
     validateProject(project);
@@ -311,7 +321,7 @@ describe('aggressive transforms', () => {
       sprite.blocks[`numeric-${index}`] = block('motion_setx', null, null, true, {X: [1, [4, literal]]});
     }
 
-    applyAggressiveTransforms(project, 'lossy', generator(80), stats('lossy', project));
+    applyAggressiveTransforms(project, 'lossy', generator(80), stats('lossy', project), undefined, true);
 
     for (const [index, literal] of literals.entries()) {
       const owner = sprite.blocks[`numeric-${index}`];
@@ -352,9 +362,9 @@ describe('aggressive transforms', () => {
     if (!longSay || !isScratchBlock(longSay)) throw new Error('fixture string block is missing');
     longSay.inputs['MESSAGE'] = [3, [10, 'xy'], [10, 'fallback']];
 
-    applyAggressiveTransforms(pooled, 'no-preserve', generator(81), stats('no-preserve', pooled));
-    applyAggressiveTransforms(split, 'lossy', generator(81), stats('lossy', split));
-    applyAggressiveTransforms(pooledLong, 'no-preserve', generator(81), stats('no-preserve', pooledLong));
+    applyAggressiveTransforms(pooled, 'no-preserve', generator(81), stats('no-preserve', pooled), undefined, true);
+    applyAggressiveTransforms(split, 'lossy', generator(81), stats('lossy', split), undefined, true);
+    applyAggressiveTransforms(pooledLong, 'no-preserve', generator(81), stats('no-preserve', pooledLong), undefined, true);
 
     const pooledSay = pooled.targets[0]?.blocks['say'];
     const pooledReporterId = pooledSay && isScratchBlock(pooledSay) ? pooledSay.inputs['MESSAGE']?.[1] : undefined;
@@ -385,7 +395,7 @@ describe('aggressive transforms', () => {
     delete sprite.blocks['wait-anchor'];
     const resultStats = stats('lossy', project);
 
-    applyAggressiveTransforms(project, 'lossy', generator(33), resultStats);
+    applyAggressiveTransforms(project, 'lossy', generator(33), resultStats, undefined, true);
 
     const hat = sprite.blocks['green-flag'];
     expect(hat && isScratchBlock(hat) ? hat.next : undefined).not.toBe('set-1');
@@ -467,29 +477,58 @@ describe('aggressive transforms', () => {
     validateProject(project);
   });
 
-  it('bounds long dispatcher regions and leaves a native separator between sites', () => {
-    const project = fixtureProject();
+  it('uses a compact default budget while expanded size enables a larger dispatcher cohort', () => {
+    const makeLongProject = (): ScratchProject => {
+      const project = fixtureProject();
+      const sprite = project.targets[1];
+      if (!sprite) throw new Error('fixture is missing its sprite');
+      sprite.blocks = {};
+      for (let index = 0; index < 30; index += 1) {
+        sprite.blocks[`linear-${index}`] = block(
+          'data_setvariableto',
+          index === 29 ? null : `linear-${index + 1}`,
+          index === 0 ? null : `linear-${index - 1}`,
+          index === 0,
+          {VALUE: [1, [10, `value-${index}`]]},
+          {VARIABLE: ['score', 'original-variable-id']}
+        );
+      }
+      return project;
+    };
+    const project = makeLongProject();
     const sprite = project.targets[1];
     if (!sprite) throw new Error('fixture is missing its sprite');
-    sprite.blocks = {};
-    for (let index = 0; index < 30; index += 1) {
-      sprite.blocks[`linear-${index}`] = block(
-        'data_setvariableto',
-        index === 29 ? null : `linear-${index + 1}`,
-        index === 0 ? null : `linear-${index - 1}`,
-        index === 0,
-        {VALUE: [1, [10, `value-${index}`]]},
-        {VARIABLE: ['score', 'original-variable-id']}
-      );
-    }
+    const before = countBlockEquivalents(project);
     const resultStats = stats('no-preserve', project);
 
     applyAggressiveTransforms(project, 'no-preserve', generator(55), resultStats);
 
-    expect(resultStats.virtualizedBlocks).toBe(20);
-    expect(dispatcherRouteOpcodes(project).length).toBeGreaterThanOrEqual(31);
-    expect(Object.values(sprite.variables).filter(tuple => typeof tuple[0] === 'string' && tuple[0].startsWith('\u2063')).length).toBeGreaterThanOrEqual(2);
+    expect(resultStats.virtualizedBlocks).toBeLessThanOrEqual(8);
+    expect(dispatcherRouteOpcodes(project)).toHaveLength(resultStats.virtualizedBlocks);
+    expect(countBlockEquivalents(project)).toBeLessThanOrEqual(Math.min((before * 3) + 512, 30_000));
     validateProject(project);
+
+    const expanded = makeLongProject();
+    const expandedBefore = countBlockEquivalents(expanded);
+    const expandedStats = stats('no-preserve', expanded);
+    applyAggressiveTransforms(expanded, 'no-preserve', generator(55), expandedStats, undefined, true);
+    expect(expandedStats.virtualizedBlocks).toBe(24);
+    expect(expandedStats.virtualizedBlocks).toBeGreaterThan(resultStats.virtualizedBlocks);
+    expect(dispatcherRouteOpcodes(expanded)).toHaveLength(24);
+    expect(expandedStats.variablesVirtualized).toBeGreaterThanOrEqual(1);
+    expect(hasFieldReference(expanded, 'original-variable-id')).toBe(false);
+    expect(countBlockEquivalents(expanded)).toBeLessThanOrEqual(Math.min(
+      Math.max((expandedBefore * 25) + 512, expandedBefore + 2048),
+      100_000
+    ));
+    validateProject(expanded);
+  });
+
+  it('centralizes compact and expanded per-site growth boundaries', () => {
+    expect(aggressivePerSiteBlockEquivalentCap('lossy', false)).toBe(64);
+    expect(aggressivePerSiteBlockEquivalentCap('no-preserve', false)).toBe(256);
+    expect(aggressivePerSiteBlockEquivalentCap('lossy', true)).toBe(256);
+    expect(aggressivePerSiteBlockEquivalentCap('no-preserve', true)).toBe(2048);
   });
 
   it('fills the strongest finite budget even when the source has no blocks', () => {
@@ -536,7 +575,7 @@ describe('aggressive transforms', () => {
 
     applyAggressiveTransforms(project, 'no-preserve', generator(17), stats('no-preserve', project));
 
-    expect(countBlockEquivalents(project)).toBe(Math.min((before * 25) + 512, 100_000));
+    expect(countBlockEquivalents(project)).toBe(Math.min((before * 3) + 512, 30_000));
     validateProject(project);
   });
 
@@ -874,10 +913,10 @@ describe('aggressive transforms', () => {
 
     applyAggressiveTransforms(project, 'lossy', generator(93), resultStats);
 
-    expect(resultStats.listsVirtualized).toBe(2);
+    expect(resultStats.listsVirtualized).toBe(3);
     expect(sprite.lists['fixed-a']).toBeUndefined();
     expect(sprite.lists['fixed-b']).toBeUndefined();
-    expect(sprite.lists['dynamic']).toEqual(['dynamic', ['keep']]);
+    expect(sprite.lists['dynamic']).toBeUndefined();
     const read = sprite.blocks['read-a'];
     const replace = sprite.blocks['replace-b'];
     if (!read || !isScratchBlock(read) || !replace || !isScratchBlock(replace)) {
@@ -1084,22 +1123,6 @@ function hasFieldReference(project: ScratchProject, id: string): boolean {
   return false;
 }
 
-function countKeyedRouteExpressions(
-  project: ScratchProject,
-  opcode: 'operator_add' | 'operator_subtract'
-): number {
-  let count = 0;
-  for (const targetValue of project.targets) {
-    for (const value of Object.values(targetValue.blocks)) {
-      if (!isScratchBlock(value) || value.opcode !== opcode) continue;
-      const reporterId = value.inputs['NUM2']?.[1];
-      const reporter = typeof reporterId === 'string' ? targetValue.blocks[reporterId] : undefined;
-      if (reporter && isScratchBlock(reporter) && reporter.opcode === 'data_variable') count += 1;
-    }
-  }
-  return count;
-}
-
 function isDualRail(targetValue: ScratchTarget | undefined, value: ScratchBlockValue): boolean {
   if (!targetValue || !isScratchBlock(value) || value.opcode !== 'control_if_else') return false;
   const firstId = value.inputs['SUBSTACK']?.[1];
@@ -1108,33 +1131,45 @@ function isDualRail(targetValue: ScratchTarget | undefined, value: ScratchBlockV
   const second = typeof secondId === 'string' ? targetValue.blocks[secondId] : undefined;
   return Boolean(
     first && second && isScratchBlock(first) && isScratchBlock(second)
-    && first.opcode === 'data_setvariableto' && second.opcode === 'data_addtolist'
+    && first.opcode === 'data_setvariableto' && second.opcode === 'data_replaceitemoflist'
   );
 }
 
 function dispatcherRouteOpcodes(project: ScratchProject): string[] {
   const result: string[] = [];
   for (const targetValue of project.targets) {
-    const definitionBodies = Object.values(targetValue.blocks)
-      .filter(value => isScratchBlock(value) && value.opcode === 'procedures_definition' && value.next !== null)
-      .map(value => isScratchBlock(value) ? value.next : null)
-      .filter((value): value is string => value !== null);
-    for (const bodyId of definitionBodies) {
-      const visited = new Set<string>();
-      let routeId: string | null = bodyId;
-      while (routeId !== null && !visited.has(routeId)) {
-        visited.add(routeId);
-        const route: ScratchBlockValue | undefined = targetValue.blocks[routeId];
-        if (!route || !isScratchBlock(route) || (route.opcode !== 'control_if' && route.opcode !== 'control_if_else')) break;
-        result.push(route.opcode);
-        const continuation: ScratchInput[number] | null | undefined = route.opcode === 'control_if_else'
-          ? route.inputs['SUBSTACK2']?.[1]
-          : route.next;
-        routeId = typeof continuation === 'string' ? continuation : null;
-      }
+    for (const value of Object.values(targetValue.blocks)) {
+      if (isScratchBlock(value) && isPacketRouteBranch(targetValue, value)) result.push(value.opcode);
     }
   }
   return result;
+}
+
+function countPacketRoutes(targetValue: ScratchTarget): number {
+  return Object.values(targetValue.blocks).filter(value => (
+    isScratchBlock(value) && isPacketRouteBranch(targetValue, value)
+  )).length;
+}
+
+function isPacketRouteBranch(targetValue: ScratchTarget, branch: ScratchBlock): boolean {
+  if (branch.opcode !== 'control_if') return false;
+  const commandId = branch.inputs['SUBSTACK']?.[1];
+  const command = typeof commandId === 'string' ? targetValue.blocks[commandId] : undefined;
+  const conditionId = branch.inputs['CONDITION']?.[1];
+  const condition = typeof conditionId === 'string' ? targetValue.blocks[conditionId] : undefined;
+  if (!isScratchBlock(condition) || condition.opcode !== 'operator_equals') return false;
+  if (!isScratchBlock(command) || command.next === null) return false;
+  const witnessSetter = targetValue.blocks[command.next];
+  const armedSetter = isScratchBlock(witnessSetter) && witnessSetter.next !== null
+    ? targetValue.blocks[witnessSetter.next]
+    : undefined;
+  return Boolean(
+    isScratchBlock(witnessSetter)
+    && witnessSetter.opcode === 'data_setvariableto'
+    && isScratchBlock(armedSetter)
+    && armedSetter.opcode === 'data_setvariableto'
+    && armedSetter.next === null
+  );
 }
 
 interface SiteMetric {

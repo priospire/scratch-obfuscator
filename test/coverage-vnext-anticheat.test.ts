@@ -15,7 +15,7 @@ import {validateProject} from '../src/validation/project.js';
 import {createFixtureProject} from './support.js';
 
 describe('anti-tamper eligibility and edge coverage', () => {
-  it('prioritizes frequently used gameplay state, caps reservations, and removes only its markers', () => {
+  it('prioritizes frequently used gameplay state without mutating monitor state', () => {
     const project = emptyProject();
     const stage = stageOf(project);
     const permanentMonitor = variableMonitor('permanent', 'permanent');
@@ -47,8 +47,8 @@ describe('anti-tamper eligibility and edge coverage', () => {
 
     expect(reservation.candidateKeys).toHaveLength(16);
     expect(reservation.candidateKeys.has('0\u0000value-16')).toBe(true);
-    expect(reservation.markerMonitors).toHaveLength(16);
-    expect(project.monitors).toHaveLength(17);
+    expect(reservation.markerMonitors).toHaveLength(0);
+    expect(project.monitors).toHaveLength(1);
     expect(project.monitors[0]).toBe(permanentMonitor);
 
     releaseGameplayStateCandidates(project, reservation);
@@ -253,8 +253,10 @@ describe('anti-tamper eligibility and edge coverage', () => {
     const truthPair = gameplay.integrityPairs.find(pair => pair.valueId === 'truth');
     const falsityPair = gameplay.integrityPairs.find(pair => pair.valueId === 'falsity');
     if (!truthPair || !falsityPair) throw new Error('boolean integrity pairs are unavailable');
-    expect(stage.variables[truthPair.tagId]?.[1]).toBe(`${truthPair.secret}true`);
-    expect(stage.variables[falsityPair.tagId]?.[1]).toBe(`${falsityPair.secret}false`);
+    expect(truthPair).toMatchObject({groupSize: 2, groupPosition: 0, nextValueId: 'falsity'});
+    expect(falsityPair).toMatchObject({groupSize: 2, groupPosition: 1, nextValueId: 'truth'});
+    expect(stage.variables[truthPair.tagId]?.[1]).toBe(`${truthPair.secret}4:true${truthPair.linkSecret}false`);
+    expect(stage.variables[falsityPair.tagId]?.[1]).toBe(`${falsityPair.secret}5:false${falsityPair.linkSecret}true`);
 
     const branch = requireBlock(stage, 'branch');
     const guardedEntryId = branch.inputs['SUBSTACK']?.[1];

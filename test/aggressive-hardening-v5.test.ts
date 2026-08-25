@@ -3,6 +3,7 @@ import {DeterministicGenerator} from '../src/deterministic.js';
 import {isPrimitive, isScratchBlock} from '../src/model/blocks.js';
 import {applyAggressiveTransforms} from '../src/obfuscation/aggressive.js';
 import {countBlockEquivalents, countObjectBlocks} from '../src/obfuscation/analysis.js';
+import {aggressiveBlockEquivalentCap} from '../src/growth-policy.js';
 import type {ObfuscationStats, ScratchProject} from '../src/types.js';
 import {validateProject} from '../src/validation/project.js';
 import {createFixtureProject} from './support.js';
@@ -20,7 +21,7 @@ describe('aggressive v5 hardening', () => {
 
     expect(first).toEqual(second);
     expect(firstStats).toEqual(secondStats);
-    expect(countBlockEquivalents(first)).toBeLessThanOrEqual(Math.min(before * 4, 50_000));
+    expect(countBlockEquivalents(first)).toBeLessThanOrEqual(Math.max(before, Math.min(before * 2, 30_000)));
     validateProject(first);
 
     const primitiveStrings = collectPrimitiveStrings(first);
@@ -50,22 +51,42 @@ describe('aggressive v5 hardening', () => {
 
   it('accounts for every block-equivalent within the bounded growth quota', () => {
     for (const mode of ['lossy', 'no-preserve'] as const) {
-      for (const objectCount of [0, 1, 2, 4]) {
-        for (let seed = 0; seed < 4; seed += 1) {
-          const project = tinyProject(objectCount);
-          const before = countBlockEquivalents(project);
-          const resultStats = stats(project, mode);
-          applyAggressiveTransforms(project, mode, quotaGenerator(seed), resultStats);
-          const cap = mode === 'lossy'
-            ? Math.max(before, Math.min(before * 4, 50_000))
-            : Math.max(before, Math.min((before * 25) + 512, 100_000));
-          expect(countBlockEquivalents(project)).toBeGreaterThanOrEqual(before);
-          expect(countBlockEquivalents(project)).toBeLessThanOrEqual(cap);
-          expect(resultStats.blocksAfter).toBe(countObjectBlocks(project));
-          validateProject(project);
+      for (const allowSize of [false, true]) {
+        for (const objectCount of [0, 1, 2, 4]) {
+          for (let seed = 0; seed < 4; seed += 1) {
+            const project = tinyProject(objectCount);
+            const before = countBlockEquivalents(project);
+            const resultStats = stats(project, mode);
+            applyAggressiveTransforms(project, mode, quotaGenerator(seed), resultStats, undefined, allowSize);
+            const cap = aggressiveBlockEquivalentCap(before, mode, allowSize);
+            expect(countBlockEquivalents(project)).toBeGreaterThanOrEqual(before);
+            expect(countBlockEquivalents(project)).toBeLessThanOrEqual(cap);
+            expect(resultStats.blocksAfter).toBe(countObjectBlocks(project));
+            validateProject(project);
+          }
         }
       }
     }
+  });
+
+  it('uses expanded quota for more eligible structural output deterministically', () => {
+    const compact = eligibleLinearProject();
+    const expanded = eligibleLinearProject();
+    const expandedRepeat = eligibleLinearProject();
+    const compactStats = stats(compact, 'no-preserve');
+    const expandedStats = stats(expanded, 'no-preserve');
+    const repeatStats = stats(expandedRepeat, 'no-preserve');
+
+    applyAggressiveTransforms(compact, 'no-preserve', quotaGenerator(0x55), compactStats);
+    applyAggressiveTransforms(expanded, 'no-preserve', quotaGenerator(0x55), expandedStats, undefined, true);
+    applyAggressiveTransforms(expandedRepeat, 'no-preserve', quotaGenerator(0x55), repeatStats, undefined, true);
+
+    expect(expanded).toEqual(expandedRepeat);
+    expect(expandedStats).toEqual(repeatStats);
+    expect(expandedStats.virtualizedBlocks).toBeGreaterThan(compactStats.virtualizedBlocks);
+    expect(countBlockEquivalents(expanded)).toBeGreaterThan(countBlockEquivalents(compact));
+    validateProject(compact);
+    validateProject(expanded);
   });
 });
 
@@ -117,6 +138,29 @@ function tinyProject(objectCount: number): ScratchProject {
       ...(index === 0 ? {x: 0, y: 0} : {})
     };
   }
+  return project;
+}
+
+function eligibleLinearProject(): ScratchProject {
+  const project = createFixtureProject();
+  project.monitors = [];
+  const sprite = project.targets.find(target => !target.isStage);
+  if (!sprite) throw new Error('fixture sprite is unavailable');
+  sprite.blocks = {};
+  for (let index = 0; index < 30; index += 1) {
+    const id = `linear-${index}`;
+    sprite.blocks[id] = {
+      opcode: 'data_setvariableto',
+      next: index === 29 ? null : `linear-${index + 1}`,
+      parent: index === 0 ? null : `linear-${index - 1}`,
+      inputs: {VALUE: [1, [10, `value-${index}`]]},
+      fields: {VARIABLE: ['Readable score', 'local_score']},
+      shadow: false,
+      topLevel: index === 0,
+      ...(index === 0 ? {x: 10, y: 20} : {})
+    };
+  }
+  validateProject(project);
   return project;
 }
 

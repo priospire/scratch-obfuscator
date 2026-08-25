@@ -73,7 +73,7 @@ describe('common and analysis validated edge coverage', () => {
     expect(newName).toMatch(/^x_/u);
     expect(newName).not.toBe('Readable broadcast menu');
     expect(menu && isScratchBlock(menu) ? menu.fields['BROADCAST_OPTION'] : undefined).toEqual([newName, newId]);
-    expect(result.warnings).not.toContain(
+    expect(result.caveats).not.toContain(
       'Broadcast display names were preserved because the project computes broadcast names at runtime.'
     );
   });

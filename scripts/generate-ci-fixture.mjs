@@ -55,19 +55,31 @@ const project = {
           inputs: {}, fields: {}, shadow: false, topLevel: true, x: 160, y: 240
         },
         sprite_set_stage: {
-          opcode: 'data_setvariableto', next: 'sprite_set_local', parent: 'sprite_flag',
+          opcode: 'data_setvariableto', next: 'sprite_set_stage_beta', parent: 'sprite_flag',
           inputs: {VALUE: [1, [10, 'stage-alpha-runtime-v2']]},
           fields: {VARIABLE: ['Readable stage alpha', 'stage_alpha']},
           shadow: false, topLevel: false, comment: 'fixture_comment'
         },
+        sprite_set_stage_beta: {
+          opcode: 'data_setvariableto', next: 'sprite_set_local', parent: 'sprite_set_stage',
+          inputs: {VALUE: [1, [10, 'stage-beta-runtime-v2']]},
+          fields: {VARIABLE: ['Readable stage beta', 'stage_beta']},
+          shadow: false, topLevel: false
+        },
         sprite_set_local: {
-          opcode: 'data_setvariableto', next: 'sprite_set_x', parent: 'sprite_set_stage',
+          opcode: 'data_setvariableto', next: 'sprite_set_local_beta', parent: 'sprite_set_stage_beta',
           inputs: {VALUE: [1, [10, 'sprite-alpha-runtime-v2']]},
           fields: {VARIABLE: ['Readable sprite alpha', 'sprite_alpha']},
           shadow: false, topLevel: false
         },
+        sprite_set_local_beta: {
+          opcode: 'data_setvariableto', next: 'sprite_set_x', parent: 'sprite_set_local',
+          inputs: {VALUE: [1, [10, 'sprite-beta-runtime-v2']]},
+          fields: {VARIABLE: ['Readable sprite beta', 'sprite_beta']},
+          shadow: false, topLevel: false
+        },
         sprite_set_x: {
-          opcode: 'motion_setx', next: 'sprite_set_y', parent: 'sprite_set_local',
+          opcode: 'motion_setx', next: 'sprite_set_y', parent: 'sprite_set_local_beta',
           inputs: {X: [3, 'static_multiply', [4, '999']]}, fields: {},
           shadow: false, topLevel: false
         },
@@ -96,8 +108,28 @@ const project = {
           inputs: {SIZE: [1, [4, '83']]}, fields: {}, shadow: false, topLevel: false
         },
         sprite_set_volume: {
-          opcode: 'sound_setvolumeto', next: null, parent: 'sprite_set_size',
+          opcode: 'sound_setvolumeto', next: 'dispatcher_separator', parent: 'sprite_set_size',
           inputs: {VOLUME: [1, [4, '37']]}, fields: {}, shadow: false, topLevel: false
+        },
+        dispatcher_separator: {
+          opcode: 'motion_setrotationstyle', next: 'dispatcher_change_x', parent: 'sprite_set_volume',
+          inputs: {}, fields: {STYLE: ['left-right', null]}, shadow: false, topLevel: false
+        },
+        dispatcher_change_x: {
+          opcode: 'motion_changexby', next: 'dispatcher_change_y', parent: 'dispatcher_separator',
+          inputs: {DX: [1, [4, '11']]}, fields: {}, shadow: false, topLevel: false
+        },
+        dispatcher_change_y: {
+          opcode: 'motion_changeyby', next: 'dispatcher_change_size', parent: 'dispatcher_change_x',
+          inputs: {DY: [1, [4, '-7']]}, fields: {}, shadow: false, topLevel: false
+        },
+        dispatcher_change_size: {
+          opcode: 'looks_changesizeby', next: 'dispatcher_change_volume', parent: 'dispatcher_change_y',
+          inputs: {CHANGE: [1, [4, '13']]}, fields: {}, shadow: false, topLevel: false
+        },
+        dispatcher_change_volume: {
+          opcode: 'sound_changevolumeby', next: null, parent: 'dispatcher_change_size',
+          inputs: {VOLUME: [1, [4, '-9']]}, fields: {}, shadow: false, topLevel: false
         }
       },
       comments: {

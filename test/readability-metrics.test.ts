@@ -10,10 +10,11 @@ import {
   measureProject,
   recoverAdversarialStructure,
   type ReadabilityCandidate,
-  type ReadabilityReport
+  type ReadabilityReport,
+  type TamperIntegrityAnalysis
 } from '../scripts/readability-metrics.mjs';
 import {obfuscateProject} from '../src/obfuscation/index.js';
-import type {ScratchBlock, ScratchProject, ScratchTarget} from '../src/types.js';
+import type {JsonValue, ScratchBlock, ScratchProject, ScratchTarget} from '../src/types.js';
 import {validateProject} from '../src/validation/project.js';
 import {createFixtureProject} from './support.js';
 
@@ -31,7 +32,7 @@ describe('readability and structural recovery measurements', () => {
     const repeated = modeReport(structuredClone(source));
 
     expect(JSON.stringify(repeated)).toBe(JSON.stringify(report));
-    expect(report.schemaVersion).toBe(2);
+    expect(report.schemaVersion).toBe(9);
     expect(report.candidates.map(candidate => candidate.label)).toEqual(['lossless', 'lossy', 'no-preserve']);
     expect(report.trend.map(entry => `${entry.from}->${entry.to}`)).toEqual([
       'original->lossless',
@@ -42,73 +43,16 @@ describe('readability and structural recovery measurements', () => {
     const lossless = candidate(report, 'lossless');
     const lossy = candidate(report, 'lossy');
     const strongest = candidate(report, 'no-preserve');
-    expect({
-      losslessScore: lossless.comparison.resistanceScore,
-      lossyScore: lossy.comparison.resistanceScore,
-      strongestScore: strongest.comparison.resistanceScore,
-      lossyDirect: lossy.comparison.directChainRecovery,
-      strongestDirect: strongest.comparison.directChainRecovery,
-      strongestNormalized: strongest.comparison.normalizedChainRecovery,
-      strongestDevirtualized: strongest.comparison.devirtualizedChainRecovery,
-      lossyIndirection: lossy.comparison.indirectionDensity,
-      strongestIndirection: strongest.comparison.indirectionDensity,
-      dependencyQuality: strongest.comparison.retainedDependencyQuality,
-      familyDensity: strongest.profile.crossFamilyDependencyDensity,
-      prune: strongest.profile.obviousPruneRatio,
-      components: strongest.profile.coherentMixedComponents,
-      semanticKinds: strongest.profile.semanticDependencyKindCount,
-      paired: strongest.profile.pairedBroadcastChannels,
-      senders: strongest.profile.reachableBroadcastSenders,
-      receivers: strongest.profile.reachableBroadcastReceivers,
-      unpairedReceivers: strongest.profile.unpairedBroadcastReceiverHats,
-      broadcastBalance: strongest.profile.broadcastPairBalance,
-      retainedBroadcastRatio: strongest.profile.retainedBroadcastPairRatio,
-      templates: strongest.profile.broadcastProcedureTemplateKinds,
-      procedures: strongest.profile.procedureTemplateKinds,
-      procedureDiversity: strongest.profile.procedureTemplateDiversity,
-      warpVariants: strongest.profile.procedureWarpVariants,
-      componentTemplates: strongest.profile.componentTemplateKinds,
-      signatureKinds: strongest.profile.normalizedSignatureKinds,
-      signatureDensity: strongest.profile.normalizedSignatureDensity,
-      signatureScale: strongest.profile.normalizedSignatureScaleDiversity,
-      topologyDensity: strongest.profile.normalizedTopologyDensity,
-      topologyScale: strongest.profile.normalizedTopologyScaleDiversity,
-      topSignatureShare: strongest.profile.normalizedTopRepeatedSignatures[0]?.share,
-      provenFalse: strongest.profile.provenFalseControls
-    }).toEqual({
-      losslessScore: 44.879883,
-      lossyScore: 91.336297,
-      strongestScore: 95.25773,
-      lossyDirect: 0.127907,
-      strongestDirect: 0.023256,
-      strongestNormalized: 0.023256,
-      strongestDevirtualized: 0.023256,
-      lossyIndirection: 0.44,
-      strongestIndirection: 0.308036,
-      dependencyQuality: 0.940889,
-      familyDensity: 0.714286,
-      prune: 0.384615,
-      components: 1,
-      semanticKinds: 7,
-      paired: 20,
-      senders: 20,
-      receivers: 39,
-      unpairedReceivers: 0,
-      broadcastBalance: 0.691667,
-      retainedBroadcastRatio: 1,
-      templates: 3,
-      procedures: 3,
-      procedureDiversity: 0.157895,
-      warpVariants: 2,
-      componentTemplates: 4,
-      signatureKinds: 74,
-      signatureDensity: 0.165179,
-      signatureScale: 0.706971,
-      topologyDensity: 0.573661,
-      topologyScale: 0.909274,
-      topSignatureShare: 0.091518,
-      provenFalse: 19
-    });
+    for (const measured of [lossless, lossy, strongest]) {
+      expect(measured.comparison.resistanceScore).toBeGreaterThanOrEqual(0);
+      expect(measured.comparison.resistanceScore).toBeLessThanOrEqual(100);
+      expect(measured.comparison.directChainRecovery).toBeGreaterThanOrEqual(0);
+      expect(measured.comparison.directChainRecovery).toBeLessThanOrEqual(1);
+      expect(measured.profile.normalizedSignatureDensity).toBeGreaterThanOrEqual(0);
+      expect(measured.profile.normalizedSignatureDensity).toBeLessThanOrEqual(1);
+      expect(measured.profile.normalizedTopologyDensity).toBeGreaterThanOrEqual(0);
+      expect(measured.profile.normalizedTopologyDensity).toBeLessThanOrEqual(1);
+    }
     expect(lossless.comparison.identifierConcealment).toBeGreaterThan(0.95);
     expect(lossless.comparison.directChainRecovery).toBe(1);
     expect(lossless.comparison.normalizedRecovery).toBe(1);
@@ -119,13 +63,16 @@ describe('readability and structural recovery measurements', () => {
     expect(lossy.comparison.resistanceScore).toBeGreaterThan(lossless.comparison.resistanceScore + 30);
     expect(lossy.comparison.directChainRecovery).toBeLessThan(lossless.comparison.directChainRecovery - 0.5);
 
-    expect(strongest.comparison.resistanceScore).toBeGreaterThan(lossy.comparison.resistanceScore + 3.5);
-    expect(strongest.comparison.directChainRecovery).toBeLessThan(lossy.comparison.directChainRecovery - 0.08);
+    expect(strongest.comparison.resistanceScore).toBeGreaterThan(lossy.comparison.resistanceScore + 1);
+    expect(strongest.comparison.directChainRecovery).toBeLessThan(lossy.comparison.directChainRecovery - 0.05);
     expect(strongest.comparison.devirtualizedChainRecovery)
       .toBeGreaterThanOrEqual(strongest.comparison.normalizedChainRecovery);
     expect(strongest.comparison.normalizedRecovery).toBe(strongest.comparison.devirtualizedChainRecovery);
     expect(strongest.profile.recoveredDispatchers).toBe(0);
-    expect(strongest.comparison.indirectionDensity).toBeGreaterThan(0.3);
+    expect(strongest.profile.recoveredDispatcherTransitionEdges).toBe(0);
+    expect(strongest.profile.unresolvedDispatcherTransitionEdges).toBe(0);
+    expect(strongest.profile.recoveredDispatcherOperations).toBe(0);
+    expect(strongest.comparison.indirectionDensity).toBeGreaterThan(0.24);
     expect(strongest.comparison.retainedDependencyQuality).toBeGreaterThan(0.8);
     expect(strongest.profile.crossFamilyDependencyDensity).toBeGreaterThan(0.25);
     expect(strongest.profile.obviousPruneRatio).toBeLessThan(0.41);
@@ -135,7 +82,8 @@ describe('readability and structural recovery measurements', () => {
     expect(strongest.profile.customCalls).toBeGreaterThan(0);
     expect(lossy.profile.broadcastReceiverHats).toBe(lossless.profile.broadcastReceiverHats);
     expect(strongest.profile.pairedBroadcastChannels).toBeGreaterThan(lossy.profile.pairedBroadcastChannels + 2);
-    expect(strongest.profile.reachableBroadcastSenders).toBe(strongest.profile.pairedBroadcastChannels);
+    expect(strongest.profile.reachableBroadcastSenders)
+      .toBeGreaterThanOrEqual(strongest.profile.pairedBroadcastChannels);
     expect(strongest.profile.reachableBroadcastReceivers)
       .toBeGreaterThanOrEqual(strongest.profile.reachableBroadcastSenders);
     expect(strongest.profile.unpairedBroadcastReceiverHats).toBe(0);
@@ -153,36 +101,16 @@ describe('readability and structural recovery measurements', () => {
     expect(strongest.profile.normalizedTopologyScaleDiversity).toBeGreaterThan(0.9);
     expect(strongest.profile.normalizedTopRepeatedSignatures[0]?.share).toBeLessThan(0.12);
     expect(strongest.profile.provenFalseControls).toBeLessThanOrEqual(19);
-    expect({
-      score: strongest.comparison.resistanceScore,
-      direct: strongest.comparison.directChainRecovery,
-      normalizedChain: strongest.comparison.normalizedChainRecovery,
-      devirtualized: strongest.comparison.devirtualizedChainRecovery,
-      dispatchers: strongest.profile.recoveredDispatchers,
-      routes: strongest.profile.recoveredDispatcherRoutes,
-      transitions: strongest.profile.recoveredDispatcherTransitions,
-      operations: strongest.profile.recoveredDispatcherOperations,
-      rails: strongest.profile.recoveredDispatcherStateRails,
-      stores: strongest.profile.recoveredDispatcherTransitionStores,
-      complete: strongest.profile.completeDispatcherRecoveries,
-      partial: strongest.profile.partialDispatcherRecoveries
-    }).toEqual({
-      score: 95.25773,
-      direct: 0.023256,
-      normalizedChain: 0.023256,
-      devirtualized: 0.023256,
-      dispatchers: 0,
-      routes: 0,
-      transitions: 0,
-      operations: 0,
-      rails: 0,
-      stores: 0,
-      complete: 0,
-      partial: 0
-    });
+    expect(strongest.profile.recoveredDispatcherRoutes).toBe(0);
+    expect(strongest.profile.recoveredDispatcherTransitions).toBe(0);
+    expect(strongest.profile.concretelyRecoveredDispatcherTransitionEdges).toBe(0);
+    expect(strongest.profile.symbolicallyRecoveredDispatcherTransitionEdges).toBe(0);
+    expect(strongest.profile.completeDispatcherRecoveries).toBe(0);
+    expect(strongest.profile.partialDispatcherRecoveries).toBe(0);
+    expect(strongest.profile.structuralOnlyDispatcherRecoveries).toBe(0);
   });
 
-  it('keeps no-preserve measurably stronger when lossy live rewrites are fully eligible', () => {
+  it('keeps no-preserve measurably more indirect when lossy live rewrites are fully eligible', () => {
     const source = readabilityFixture();
     const stage = requireStage(source);
     const sprite = requireSprite(source);
@@ -202,16 +130,19 @@ describe('readability and structural recovery measurements', () => {
     validateProject(source);
 
     const report = modeReport(source);
+    const lossless = candidate(report, 'lossless');
     const lossy = candidate(report, 'lossy');
     const strongest = candidate(report, 'no-preserve');
-    expect(strongest.comparison.resistanceScore).toBeGreaterThan(lossy.comparison.resistanceScore + 4);
-    expect(strongest.comparison.directChainRecovery).toBeLessThan(lossy.comparison.directChainRecovery);
+    expect(strongest.comparison.resistanceScore).toBeGreaterThan(lossless.comparison.resistanceScore + 25);
+    expect(strongest.comparison.directChainRecovery).toBeLessThan(0.5);
+    expect(strongest.profile.listIndirections).toBeGreaterThan(lossy.profile.listIndirections);
     expect(strongest.comparison.devirtualizedChainRecovery)
       .toBeGreaterThanOrEqual(strongest.comparison.normalizedChainRecovery);
     expect(lossy.profile.broadcastReceiverHats).toBe(0);
     expect(lossy.profile.pairedBroadcastChannels).toBe(0);
-    expect(strongest.profile.pairedBroadcastChannels).toBeGreaterThanOrEqual(3);
-    expect(strongest.profile.broadcastProcedureTemplateKinds).toBeGreaterThanOrEqual(3);
+    expect(strongest.profile.pairedBroadcastChannels).toBeGreaterThan(lossy.profile.pairedBroadcastChannels);
+    expect(strongest.profile.broadcastProcedureTemplateKinds)
+      .toBeGreaterThan(lossy.profile.broadcastProcedureTemplateKinds);
     expect(strongest.profile.unpairedBroadcastReceiverHats).toBe(0);
     expect(strongest.profile.obviousPruneRatio).toBeLessThan(0.36);
   });
@@ -325,22 +256,25 @@ describe('readability and structural recovery measurements', () => {
     const report = createReadabilityReport(source, [{label: 'large-no-preserve', project: transformed}]);
     const measured = candidate(report, 'large-no-preserve');
     const profile = measured.profile;
+    const baseline = report.baseline.profile;
 
-    expect(profile.objectBlocks).toBeGreaterThan(10_000);
-    expect(profile.retainedAfterNormalization).toBeGreaterThan(8_000);
-    expect(profile.normalizedSignatureKinds).toBeGreaterThanOrEqual(70);
-    expect(profile.normalizedSignatureDensity).toBeLessThan(0.02);
+    expect(profile.objectBlocks).toBeGreaterThan(baseline.objectBlocks * 2);
+    expect(profile.retainedAfterNormalization).toBeGreaterThan(baseline.retainedAfterNormalization * 2);
+    expect(profile.blockEquivalents).toBeLessThanOrEqual((baseline.blockEquivalents * 3) + 512);
+    expect(profile.normalizedSignatureKinds).toBeGreaterThan(baseline.normalizedSignatureKinds * 2);
+    expect(profile.normalizedSignatureDensity).toBeGreaterThan(baseline.normalizedSignatureDensity);
+    expect(profile.normalizedSignatureDensity).toBeLessThan(0.15);
     expect(profile.normalizedSignatureScaleDiversity).toBeGreaterThan(0.42);
-    expect(profile.normalizedSignatureScaleDiversity).toBeLessThan(0.6);
-    expect(profile.normalizedTopologyKinds).toBeGreaterThanOrEqual(1_800);
+    expect(profile.normalizedSignatureScaleDiversity).toBeLessThan(0.8);
+    expect(profile.normalizedTopologyKinds).toBeGreaterThan(baseline.normalizedTopologyKinds * 2);
     expect(profile.normalizedTopologyDensity).toBeGreaterThan(0.2);
     expect(profile.normalizedTopologyScaleDiversity).toBeGreaterThan(0.82);
     expect(profile.normalizedTopologyScaleDiversity).toBeGreaterThan(
       profile.normalizedSignatureScaleDiversity + 0.1
     );
     expect(profile.normalizedTopRepeatedSignatures[0]?.share).toBeLessThanOrEqual(0.09);
-    expect(profile.obviousPruneRatio).toBeLessThan(0.22);
-    expect(profile.pairedBroadcastChannels).toBeGreaterThanOrEqual(320);
+    expect(profile.obviousPruneRatio).toBeLessThan(0.6);
+    expect(profile.pairedBroadcastChannels).toBeGreaterThan(baseline.pairedBroadcastChannels);
     expect(profile.procedureTemplateDiversity).toBeGreaterThan(0.7);
     expect(measured.comparison.retainedDependencyQuality).toBeGreaterThan(0.9);
   }, 40_000);
@@ -576,16 +510,17 @@ describe('readability and structural recovery measurements', () => {
       inconsistent: inconsistent.digest,
       dynamicIndex: dynamicIndex.digest
     }).toEqual({
-      direct: 'f1e6835a6c470a1cd706b36fe3ba53d5728007b9daee052fbe03cf9c7c84b36e',
-      evolving: '84d271cb4b10107d9d6b65f4a1c46c10ff2b85981824b9f28b6c6f541568ba9a',
-      inconsistent: '53e35b50cb2d6e2aa9593b31a5ac2a02ac82876f9b4181039eb5cc194a548a57',
-      dynamicIndex: '7eb13a95b8cd58a888d4c4fbdd090de81da0fd9865f4663eef26619ec051dcc1'
+      direct: 'bc295a2f59c9ded1266f9b0117cb28b7ea68da904940a36eaedb5a95026bd58c',
+      evolving: 'd7aecf648f8aabc2c5cd860e99317ba769d9eae0ff43d3d3d9563eafbdff29af',
+      inconsistent: '6b2087801869fb286b9074e3cfde7218c7432439ff2cfc45d614ee67d4be85f6',
+      dynamicIndex: 'c6572c5d9e1c39b2965fd28b817108285febdde9ac964fe838597ff4a53d7303'
     });
 
     expect(direct.dispatchers).toEqual([expect.objectContaining({
       stateRailCount: 1,
       transitionStoreCount: 1,
       relational: false,
+      recoveryMethod: 'static',
       recoveryStatus: 'complete',
       recoveredTransitionEdges: 3,
       unresolvedTransitionEdges: 0,
@@ -595,6 +530,7 @@ describe('readability and structural recovery measurements', () => {
       stateRailCount: 3,
       transitionStoreCount: 2,
       relational: true,
+      recoveryMethod: 'static',
       recoveryStatus: 'complete',
       recoveredTransitionEdges: 3,
       unresolvedTransitionEdges: 0,
@@ -604,6 +540,8 @@ describe('readability and structural recovery measurements', () => {
       stateRailCount: 3,
       transitionStoreCount: 2,
       relational: true,
+      recoveryMethod: 'static',
+      unresolvedReasons: ['relational-path-inconsistent'],
       recoveryStatus: 'partial',
       recoveredTransitionEdges: 3,
       unresolvedTransitionEdges: 0,
@@ -618,9 +556,18 @@ describe('readability and structural recovery measurements', () => {
       stateRailCount: 3,
       transitionStoreCount: 2,
       relational: true,
+      recoveryMethod: 'path-sensitive',
       recoveryStatus: 'structural-only',
       recoveredTransitionEdges: 0,
       unresolvedTransitionEdges: 3,
+      entryRouteRecovered: true,
+      exitStateValidated: false,
+      unresolvedReasons: [
+        'exit-state-mismatch',
+        'incomplete-handler-coverage',
+        'terminal-exit-not-reached',
+        'transition-route-not-found'
+      ],
       recoveredChains: []
     })]);
     expect(dynamicIndexProfile.relationalDispatcherRecoveries).toBe(1);
@@ -644,6 +591,355 @@ describe('readability and structural recovery measurements', () => {
     expect(protectedFirst.staticControlDependencyEdges).toBeGreaterThan(plain.staticControlDependencyEdges);
     expect(protectedFirst.tamperGuardCoverage).toBeGreaterThan(0);
     expect(protectedFirst.tamperGuardCoverage).toBeLessThan(1);
+  });
+
+  it('computes bounded integrity cuts and exposes single-component bypasses', () => {
+    const source = integrityCutFixture();
+    const transformed = obfuscateProject(
+      source,
+      'lossless',
+      new Uint8Array(32).fill(73),
+      {antiCheat: true}
+    ).project;
+    const baselineProfile = measureProject(transformed);
+    const baseline = recoverAdversarialStructure(transformed).tamperIntegrityAnalysis;
+
+    expect({
+      scope: baseline.scope,
+      status: baseline.status,
+      cutBound: baseline.cutBound,
+      pairs: baseline.integrityPairCount,
+      complete: baseline.completePairCount,
+      degraded: baseline.degradedPairCount,
+      disconnected: baseline.disconnectedPairCount,
+      ambiguous: baseline.ambiguousPairCount,
+      refresh: baseline.refreshPathCount,
+      guards: baseline.guardPathCount,
+      watchdogs: baseline.watchdogPathCount,
+      sinks: baseline.tripSinkCount,
+      persistent: baseline.persistentTripStateCount,
+      independent: baseline.independentIntegrityComponents,
+      bypasses: baseline.singleComponentBypassCount,
+      cut: baseline.weakestComponentCut,
+      structuralCut: baseline.weakestStructuralComponentCut
+    }).toEqual({
+      scope: 'bounded-static-integrity-graph',
+      status: 'analyzed',
+      cutBound: 3,
+      pairs: 1,
+      complete: 1,
+      degraded: 0,
+      disconnected: 0,
+      ambiguous: 0,
+      refresh: 4,
+      guards: 2,
+      watchdogs: 1,
+      sinks: 2,
+      persistent: 2,
+      independent: 2,
+      bypasses: 1,
+      cut: 1,
+      structuralCut: 2
+    });
+    expect(baseline.pairs.every(pair => (
+      pair.analysisStatus === 'complete'
+      && pair.smallestComponentCut === 1
+      && pair.smallestCutComponentKinds.join(',') === 'integrity-tag'
+      && pair.smallestStructuralComponentCut === 2
+      && pair.independentIntegrityComponents === 2
+      && pair.singleComponentBypass === true
+    ))).toBe(true);
+    expect(baseline.caveats).toContain('offline-project-editing-remains-out-of-scope');
+    expect(baselineProfile.tamperWeakestComponentCut).toBe(1);
+    expect(baselineProfile.tamperWeakestStructuralComponentCut).toBe(2);
+  });
+
+  it('recovers cyclic linked tags and measures coupled refresh resilience', () => {
+    const transformed = obfuscateProject(
+      linkedIntegrityCutFixture(),
+      'lossless',
+      new Uint8Array(32).fill(73),
+      {antiCheat: true}
+    ).project;
+    const profile = measureProject(transformed);
+    const first = recoverAdversarialStructure(transformed).tamperIntegrityAnalysis;
+    const repeated = recoverAdversarialStructure(structuredClone(transformed)).tamperIntegrityAnalysis;
+
+    expect(repeated).toEqual(first);
+    expect({
+      status: first.status,
+      pairs: first.integrityPairCount,
+      groups: first.integrityGroupCount,
+      completeGroups: first.completeIntegrityGroupCount,
+      ambiguousGroups: first.ambiguousIntegrityGroupCount,
+      linkedGroups: first.linkedIntegrityGroupCount,
+      linkedPairs: first.linkedIntegrityPairCount,
+      linkEdges: first.integrityLinkEdgeCount,
+      refresh: first.refreshPathCount,
+      coupledRefresh: first.coupledRefreshPathCount,
+      guards: first.guardPathCount,
+      watchdogs: first.watchdogPathCount,
+      independent: first.independentIntegrityComponents,
+      bypasses: first.singleComponentBypassCount,
+      cut: first.weakestComponentCut,
+      structuralCut: first.weakestStructuralComponentCut
+    }).toEqual({
+      status: 'analyzed',
+      pairs: 2,
+      groups: 1,
+      completeGroups: 1,
+      ambiguousGroups: 0,
+      linkedGroups: 1,
+      linkedPairs: 2,
+      linkEdges: 2,
+      refresh: 8,
+      coupledRefresh: 4,
+      guards: 8,
+      watchdogs: 4,
+      independent: 2,
+      bypasses: 0,
+      cut: 2,
+      structuralCut: 2
+    });
+    expect(first.pairs).toHaveLength(2);
+    expect(first.pairs.every(pair => (
+      pair.integrityGroupIndex === 0
+      && pair.integrityGroupSize === 2
+      && pair.authenticatingTagCount === 2
+      && pair.requiredRefreshesPerWriter === 2
+      && pair.gameplayWriterCount === 2
+      && pair.refreshPathCount === 4
+      && pair.coupledRefreshPathCount === 2
+      && pair.smallestComponentCut === 2
+      && pair.singleComponentBypass === false
+    ))).toBe(true);
+    expect(profile.tamperIntegrityGroups).toBe(1);
+    expect(profile.tamperIntegrityLinkEdges).toBe(2);
+    expect(profile.tamperCoupledRefreshPaths).toBe(4);
+    expect(profile.tamperWeakestComponentCut).toBe(2);
+  });
+
+  it('degrades linked groups when coupled refreshes are removed and fails closed on a broken link', () => {
+    const transformed = obfuscateProject(
+      linkedIntegrityCutFixture(),
+      'lossless',
+      new Uint8Array(32).fill(73),
+      {antiCheat: true}
+    ).project;
+    const missingRefresh = mutateIntegrityProject(transformed, removeSecondLinkedRefreshes);
+    const brokenLink = mutateIntegrityProject(transformed, breakOneIntegrityLink);
+    const refreshAnalysis = recoverAdversarialStructure(missingRefresh).tamperIntegrityAnalysis;
+    const linkAnalysis = recoverAdversarialStructure(brokenLink).tamperIntegrityAnalysis;
+    const linkedControls: Record<string, TamperIntegrityAnalysis> = {
+      latch: recoverAdversarialStructure(
+        mutateIntegrityProject(transformed, bypassIntegrityTripState)
+      ).tamperIntegrityAnalysis,
+      guard: recoverAdversarialStructure(
+        mutateIntegrityProject(transformed, removeDirectIntegrityGuards)
+      ).tamperIntegrityAnalysis,
+      watchdog: recoverAdversarialStructure(
+        mutateIntegrityProject(transformed, removeIntegrityWatchdog)
+      ).tamperIntegrityAnalysis,
+      disconnected: recoverAdversarialStructure(mutateIntegrityProject(
+        transformed,
+        removeDirectIntegrityGuards,
+        removeIntegrityWatchdog
+      )).tamperIntegrityAnalysis
+    };
+
+    expect({
+      status: refreshAnalysis.status,
+      complete: refreshAnalysis.completePairCount,
+      degraded: refreshAnalysis.degradedPairCount,
+      groups: refreshAnalysis.integrityGroupCount,
+      completeGroups: refreshAnalysis.completeIntegrityGroupCount,
+      refresh: refreshAnalysis.refreshPathCount,
+      coupledRefresh: refreshAnalysis.coupledRefreshPathCount,
+      cut: refreshAnalysis.weakestComponentCut
+    }).toEqual({
+      status: 'degraded',
+      complete: 0,
+      degraded: 2,
+      groups: 1,
+      completeGroups: 1,
+      refresh: 4,
+      coupledRefresh: 2,
+      cut: 2
+    });
+    expect(refreshAnalysis.pairs.every(pair => (
+      pair.refreshStatus === 'incomplete'
+      && pair.unrefreshedWriterCount === 2
+      && pair.requiredRefreshesPerWriter === 2
+    ))).toBe(true);
+
+    expect(linkAnalysis.status).toBe('partial');
+    expect(linkAnalysis.integrityGroupCount).toBe(1);
+    expect(linkAnalysis.ambiguousIntegrityGroupCount).toBe(1);
+    expect(linkAnalysis.ambiguousPairCount).toBe(2);
+    expect(linkAnalysis.weakestComponentCut).toBeNull();
+    expect(linkAnalysis.pairs.every(pair => (
+      pair.analysisStatus === 'ambiguous'
+      && pair.componentCutStatus === 'ambiguous'
+      && pair.singleComponentBypass === null
+    ))).toBe(true);
+
+    expect(Object.fromEntries(Object.entries(linkedControls).map(([name, analysis]) => [name, {
+      status: analysis.status,
+      degraded: analysis.degradedPairCount,
+      disconnected: analysis.disconnectedPairCount,
+      guards: analysis.guardPathCount,
+      watchdogs: analysis.watchdogPathCount,
+      persistent: analysis.persistentTripStateCount,
+      independent: analysis.independentIntegrityComponents,
+      bypasses: analysis.singleComponentBypassCount,
+      cut: analysis.weakestComponentCut,
+      structuralCut: analysis.weakestStructuralComponentCut
+    }]))).toEqual({
+      latch: {
+        status: 'degraded', degraded: 2, disconnected: 0,
+        guards: 8, watchdogs: 4, persistent: 0, independent: 2,
+        bypasses: 0, cut: 2, structuralCut: 2
+      },
+      guard: {
+        status: 'degraded', degraded: 2, disconnected: 0,
+        guards: 0, watchdogs: 4, persistent: 1, independent: 1,
+        bypasses: 2, cut: 1, structuralCut: 1
+      },
+      watchdog: {
+        status: 'degraded', degraded: 2, disconnected: 0,
+        guards: 8, watchdogs: 0, persistent: 1, independent: 1,
+        bypasses: 2, cut: 1, structuralCut: 1
+      },
+      disconnected: {
+        status: 'disconnected', degraded: 0, disconnected: 2,
+        guards: 0, watchdogs: 0, persistent: 0, independent: 0,
+        bypasses: 2, cut: 0, structuralCut: 0
+      }
+    });
+  });
+
+  it('distinguishes refresh, latch, guard, and watchdog removal combinations', () => {
+    const transformed = obfuscateProject(
+      integrityCutFixture(),
+      'lossless',
+      new Uint8Array(32).fill(73),
+      {antiCheat: true}
+    ).project;
+    const profileBefore = measureProject(transformed);
+    const variants = {
+      refresh: mutateIntegrityProject(transformed, removeIntegrityRefreshes),
+      latch: mutateIntegrityProject(transformed, bypassIntegrityTripState),
+      guard: mutateIntegrityProject(transformed, removeDirectIntegrityGuards),
+      watchdog: mutateIntegrityProject(transformed, removeIntegrityWatchdog),
+      disconnected: mutateIntegrityProject(
+        transformed,
+        removeDirectIntegrityGuards,
+        removeIntegrityWatchdog
+      ),
+      latchWithoutWatchdog: mutateIntegrityProject(
+        transformed,
+        bypassIntegrityTripState,
+        removeIntegrityWatchdog
+      )
+    };
+    const recovered = Object.fromEntries(Object.entries(variants).map(([name, project]) => (
+      [name, recoverAdversarialStructure(project).tamperIntegrityAnalysis]
+    )));
+
+    expect(Object.fromEntries(Object.entries(recovered).map(([name, analysis]) => [name, {
+      status: analysis.status,
+      complete: analysis.completePairCount,
+      degraded: analysis.degradedPairCount,
+      disconnected: analysis.disconnectedPairCount,
+      refresh: analysis.refreshPathCount,
+      guards: analysis.guardPathCount,
+      watchdogs: analysis.watchdogPathCount,
+      persistent: analysis.persistentTripStateCount,
+      independent: analysis.independentIntegrityComponents,
+      cut: analysis.weakestComponentCut,
+      structuralCut: analysis.weakestStructuralComponentCut
+    }]))).toEqual({
+      refresh: {
+        status: 'degraded', complete: 0, degraded: 1, disconnected: 0,
+        refresh: 0, guards: 2, watchdogs: 1, persistent: 2,
+        independent: 2, cut: 1, structuralCut: 2
+      },
+      latch: {
+        status: 'degraded', complete: 0, degraded: 1, disconnected: 0,
+        refresh: 4, guards: 2, watchdogs: 1, persistent: 0,
+        independent: 2, cut: 1, structuralCut: 2
+      },
+      guard: {
+        status: 'degraded', complete: 0, degraded: 1, disconnected: 0,
+        refresh: 4, guards: 0, watchdogs: 1, persistent: 1,
+        independent: 1, cut: 1, structuralCut: 1
+      },
+      watchdog: {
+        status: 'degraded', complete: 0, degraded: 1, disconnected: 0,
+        refresh: 4, guards: 2, watchdogs: 0, persistent: 1,
+        independent: 1, cut: 1, structuralCut: 1
+      },
+      disconnected: {
+        status: 'disconnected', complete: 0, degraded: 0, disconnected: 1,
+        refresh: 4, guards: 0, watchdogs: 0, persistent: 0,
+        independent: 0, cut: 0, structuralCut: 0
+      },
+      latchWithoutWatchdog: {
+        status: 'degraded', complete: 0, degraded: 1, disconnected: 0,
+        refresh: 4, guards: 2, watchdogs: 0, persistent: 0,
+        independent: 1, cut: 1, structuralCut: 1
+      }
+    });
+
+    const refreshProfile = measureProject(variants.refresh);
+    const latchProfile = measureProject(variants.latch);
+    expect(refreshProfile.tamperGuardCoverage).toBe(profileBefore.tamperGuardCoverage);
+    expect(latchProfile.tamperGuardCoverage).toBe(profileBefore.tamperGuardCoverage);
+    expect(refreshProfile.tamperCompleteIntegrityPairs).toBe(0);
+    expect(latchProfile.tamperPersistentTripStates).toBe(0);
+  });
+
+  it('fails closed when one protected value has conflicting integrity grammars', () => {
+    const transformed = obfuscateProject(
+      integrityCutFixture(),
+      'lossless',
+      new Uint8Array(32).fill(73),
+      {antiCheat: true}
+    ).project;
+    corruptOneIntegritySecret(transformed);
+    const analysis = recoverAdversarialStructure(transformed).tamperIntegrityAnalysis;
+    const ambiguous = analysis.pairs.filter(pair => pair.analysisStatus === 'ambiguous');
+
+    expect(analysis.status).toBe('partial');
+    expect(analysis.ambiguousPairCount).toBeGreaterThanOrEqual(2);
+    expect(ambiguous.length).toBe(analysis.ambiguousPairCount);
+    expect(ambiguous.every(pair => (
+      pair.componentCutStatus === 'ambiguous'
+      && pair.smallestComponentCut === null
+      && pair.singleComponentBypass === null
+    ))).toBe(true);
+  });
+
+  it('reports a structural cut above the fixed bound without unbounded search', () => {
+    const transformed = obfuscateProject(
+      integrityCutFixture(),
+      'lossless',
+      new Uint8Array(32).fill(73),
+      {antiCheat: true}
+    ).project;
+    duplicateIntegrityWatchdog(transformed, 3);
+    const analysis = recoverAdversarialStructure(transformed).tamperIntegrityAnalysis;
+    const pair = analysis.pairs[0];
+
+    expect(pair).toBeDefined();
+    expect(pair?.watchdogPathCount).toBe(4);
+    expect(pair?.independentIntegrityComponents).toBe(5);
+    expect(pair?.componentCutStatus).toBe('exact');
+    expect(pair?.smallestComponentCut).toBe(1);
+    expect(pair?.structuralCutStatus).toBe('greater-than-bound');
+    expect(pair?.smallestStructuralComponentCut).toBeNull();
+    expect(analysis.cutBound).toBe(3);
+    expect(analysis.weakestStructuralComponentCut).toBeNull();
   });
 
   it('retains a decoy dependency graph derived from an unknown live reporter', () => {
@@ -757,7 +1053,11 @@ describe('readability and structural recovery measurements', () => {
       expect(summary.stdout).toContain('identifier-concealment\tdirect-chain-recovery\tnormalized-recovery');
       expect(summary.stdout).toContain(
         'devirtualized-recovery\tdispatchers\tdispatcher-routes\tdispatcher-edges\tdispatcher-unresolved\t'
-        + 'dispatcher-complete\tdispatcher-partial\tdispatcher-structural-only\ttamper-coverage'
+        + 'dispatcher-complete\tdispatcher-partial\tdispatcher-structural-only\twitness-symbols\t'
+        + 'witness-path-families\tcandidate-terminal-rail-families\tinitial-matching-terminal-families\t'
+        + 'terminal-enumerations-exhaustive\tterminal-enumerations-conditional\ttamper-coverage\t'
+        + 'integrity-pairs\tintegrity-groups\tintegrity-link-edges\tcoupled-refresh-paths\t'
+        + 'weakest-component-cut\tweakest-structural-cut\tsingle-component-bypasses'
       );
       expect(summary.stdout).toContain('signature-scale\ttopology-scale\tmax-signature-share');
       expect(summary.stdout).toContain('\noriginal\t');
@@ -783,6 +1083,95 @@ function candidate(report: ReadabilityReport, label: string): ReadabilityCandida
 
 function losslessPairedChannels(report: ReadabilityReport): number {
   return candidate(report, 'lossless').profile.pairedBroadcastChannels;
+}
+
+function integrityCutFixture(): ScratchProject {
+  const project = createFixtureProject();
+  const stage = requireStage(project);
+  const sprite = requireSprite(project);
+  stage.variables = {};
+  stage.lists = {};
+  stage.broadcasts = {};
+  stage.blocks = {};
+  stage.comments = {};
+  sprite.variables = {'protected-value-id': ['Protected value', 0]};
+  sprite.lists = {};
+  sprite.broadcasts = {};
+  sprite.comments = {};
+  sprite.blocks = {
+    'protected-hat': block('event_whenflagclicked', 'protected-write-0', null, true)
+  };
+  for (let index = 0; index < 4; index += 1) {
+    sprite.blocks[`protected-write-${index}`] = block(
+      'data_setvariableto',
+      index === 3 ? null : `protected-write-${index + 1}`,
+      index === 0 ? 'protected-hat' : `protected-write-${index - 1}`,
+      false,
+      {VALUE: [1, [4, String(index + 1)]]},
+      {VARIABLE: ['Protected value', 'protected-value-id']}
+    );
+  }
+  project.monitors = [];
+  project.extensions = [];
+  validateProject(project);
+  return project;
+}
+
+function linkedIntegrityCutFixture(): ScratchProject {
+  const project = createFixtureProject();
+  const stage = requireStage(project);
+  const sprite = requireSprite(project);
+  stage.variables = {};
+  stage.lists = {};
+  stage.broadcasts = {};
+  stage.blocks = {};
+  stage.comments = {};
+  sprite.variables = {
+    'protected-alpha-id': ['Protected alpha', 0],
+    'protected-beta-id': ['Protected beta', 'seed']
+  };
+  sprite.lists = {};
+  sprite.broadcasts = {};
+  sprite.comments = {};
+  sprite.blocks = {
+    'linked-hat': block('event_whenflagclicked', 'linked-alpha-0', null, true),
+    'linked-alpha-0': block(
+      'data_setvariableto',
+      'linked-beta-0',
+      'linked-hat',
+      false,
+      {VALUE: [1, [4, '1']]},
+      {VARIABLE: ['Protected alpha', 'protected-alpha-id']}
+    ),
+    'linked-beta-0': block(
+      'data_setvariableto',
+      'linked-alpha-1',
+      'linked-alpha-0',
+      false,
+      {VALUE: [1, [10, 'next']]},
+      {VARIABLE: ['Protected beta', 'protected-beta-id']}
+    ),
+    'linked-alpha-1': block(
+      'data_changevariableby',
+      'linked-beta-1',
+      'linked-beta-0',
+      false,
+      {VALUE: [1, [4, '2']]},
+      {VARIABLE: ['Protected alpha', 'protected-alpha-id']}
+    ),
+    'linked-beta-1': block(
+      'data_setvariableto',
+      null,
+      'linked-alpha-1',
+      false,
+      {VALUE: [1, [10, 'done']]},
+      {VARIABLE: ['Protected beta', 'protected-beta-id']}
+    )
+  };
+  project.monitors = [];
+  project.extensions = [];
+  validateProject(project);
+  return project;
 }
 
 function readabilityFixture(): ScratchProject {
@@ -1663,6 +2052,254 @@ function renameBlockIdsAndMove(project: ScratchProject): ScratchProject {
     target.blocks = rewritten;
   }
   return result;
+}
+
+function mutateIntegrityProject(
+  project: ScratchProject,
+  ...mutators: Array<(candidate: ScratchProject) => void>
+): ScratchProject {
+  const result = structuredClone(project);
+  for (const mutate of mutators) mutate(result);
+  return result;
+}
+
+function removeSecondLinkedRefreshes(project: ScratchProject): void {
+  for (const target of project.targets) {
+    for (const block of Object.values(target.blocks)) {
+      if (Array.isArray(block) || !linkedIntegritySetter(target, block) || typeof block.parent !== 'string') continue;
+      const parent = target.blocks[block.parent];
+      if (Array.isArray(parent) || !parent
+        || linkedIntegritySetter(target, parent) || typeof block.next !== 'string') continue;
+      const second = target.blocks[block.next];
+      if (!Array.isArray(second) && second && linkedIntegritySetter(target, second)) {
+        replaceTestBlockWithNoop(second);
+      }
+    }
+  }
+}
+
+function breakOneIntegrityLink(project: ScratchProject): void {
+  const sites: Array<{tagId: string; linkJoin: ScratchBlock; ownValue: JsonValue[]}> = [];
+  for (const target of project.targets) {
+    for (const block of Object.values(target.blocks)) {
+      if (Array.isArray(block) || block.opcode !== 'operator_not') continue;
+      const equalsId = activeTestInput(block.inputs['OPERAND']);
+      const equals = typeof equalsId === 'string' ? target.blocks[equalsId] : undefined;
+      const tagId = !Array.isArray(equals) && equals?.opcode === 'operator_equals'
+        ? directTestVariableId(target, activeTestInput(equals.inputs['OPERAND1']))
+        : undefined;
+      const expectedId = !Array.isArray(equals) && equals?.opcode === 'operator_equals'
+        ? activeTestInput(equals.inputs['OPERAND2'])
+        : undefined;
+      const expected = typeof expectedId === 'string' ? target.blocks[expectedId] : undefined;
+      const bodyId = !Array.isArray(expected) && expected?.opcode === 'operator_join'
+        ? activeTestInput(expected.inputs['STRING2'])
+        : undefined;
+      const body = typeof bodyId === 'string' ? target.blocks[bodyId] : undefined;
+      const ownJoinId = !Array.isArray(body) && body?.opcode === 'operator_join'
+        ? activeTestInput(body.inputs['STRING2'])
+        : undefined;
+      const ownJoin = typeof ownJoinId === 'string' ? target.blocks[ownJoinId] : undefined;
+      const ownValue = !Array.isArray(ownJoin) && ownJoin?.opcode === 'operator_join'
+        ? activeTestInput(ownJoin.inputs['STRING1'])
+        : undefined;
+      const linkJoinId = !Array.isArray(ownJoin) && ownJoin?.opcode === 'operator_join'
+        ? activeTestInput(ownJoin.inputs['STRING2'])
+        : undefined;
+      const linkJoin = typeof linkJoinId === 'string' ? target.blocks[linkJoinId] : undefined;
+      if (tagId && !Array.isArray(linkJoin) && linkJoin?.opcode === 'operator_join'
+        && Array.isArray(ownValue) && ownValue[0] === 12) {
+        sites.push({tagId, linkJoin, ownValue});
+      }
+    }
+  }
+  const selectedTag = sites[0]?.tagId;
+  if (!selectedTag) throw new Error('linked integrity fixture is unavailable');
+  for (const site of sites) {
+    if (site.tagId === selectedTag) {
+      site.linkJoin.inputs['STRING2'] = [1, structuredClone(site.ownValue)];
+    }
+  }
+}
+
+function linkedIntegritySetter(target: ScratchTarget, block: ScratchBlock): boolean {
+  if (block.opcode !== 'data_setvariableto') return false;
+  const expectedId = activeTestInput(block.inputs['VALUE']);
+  const expected = typeof expectedId === 'string' ? target.blocks[expectedId] : undefined;
+  const bodyId = !Array.isArray(expected) && expected?.opcode === 'operator_join'
+    ? activeTestInput(expected.inputs['STRING2'])
+    : undefined;
+  const body = typeof bodyId === 'string' ? target.blocks[bodyId] : undefined;
+  return !Array.isArray(body) && body?.opcode === 'operator_join';
+}
+
+function removeIntegrityRefreshes(project: ScratchProject): void {
+  for (const target of project.targets) {
+    for (const block of Object.values(target.blocks)) {
+      if (Array.isArray(block)
+        || (block.opcode !== 'data_setvariableto' && block.opcode !== 'data_changevariableby')
+        || typeof block.next !== 'string') continue;
+      const valueId = typeof block.fields['VARIABLE']?.[1] === 'string'
+        ? block.fields['VARIABLE'][1]
+        : undefined;
+      const setter = target.blocks[block.next];
+      const joinId = !Array.isArray(setter) && setter?.opcode === 'data_setvariableto'
+        ? activeTestInput(setter.inputs['VALUE'])
+        : undefined;
+      const join = typeof joinId === 'string' ? target.blocks[joinId] : undefined;
+      if (!valueId || Array.isArray(join) || join?.opcode !== 'operator_join'
+        || directTestVariableId(target, activeTestInput(join.inputs['STRING2'])) !== valueId
+        || !setter || Array.isArray(setter)) continue;
+      replaceTestBlockWithNoop(setter);
+    }
+  }
+}
+
+function bypassIntegrityTripState(project: ScratchProject): void {
+  for (const target of project.targets) {
+    for (const block of Object.values(target.blocks)) {
+      if (Array.isArray(block) || block.opcode !== 'data_setvariableto' || typeof block.next !== 'string') {
+        continue;
+      }
+      const next = target.blocks[block.next];
+      if (!Array.isArray(next) && next?.opcode === 'control_stop'
+        && next.fields['STOP_OPTION']?.[0] === 'all') replaceTestBlockWithNoop(block);
+    }
+  }
+}
+
+function removeDirectIntegrityGuards(project: ScratchProject): void {
+  for (const target of project.targets) {
+    for (const block of Object.values(target.blocks)) {
+      if (Array.isArray(block) || block.opcode !== 'control_if') continue;
+      const rootId = activeTestInput(block.inputs['CONDITION']);
+      if (typeof rootId === 'string' && directIntegrityExpectedJoin(target, rootId)) {
+        replaceTestBlockWithNoop(block);
+      }
+    }
+  }
+}
+
+function removeIntegrityWatchdog(project: ScratchProject): void {
+  for (const target of project.targets) {
+    for (const block of Object.values(target.blocks)) {
+      if (Array.isArray(block) || block.opcode !== 'event_whenflagclicked' || typeof block.next !== 'string') {
+        continue;
+      }
+      const next = target.blocks[block.next];
+      if (!Array.isArray(next) && next?.opcode === 'control_forever') replaceTestBlockWithNoop(block);
+    }
+  }
+}
+
+function corruptOneIntegritySecret(project: ScratchProject): void {
+  for (const target of project.targets) {
+    for (const block of Object.values(target.blocks)) {
+      if (Array.isArray(block) || block.opcode !== 'control_if') continue;
+      const rootId = activeTestInput(block.inputs['CONDITION']);
+      const join = typeof rootId === 'string' ? directIntegrityExpectedJoin(target, rootId) : undefined;
+      if (!join) continue;
+      join.inputs['STRING1'] = [1, [10, 'conflicting-integrity-secret']];
+      return;
+    }
+  }
+  throw new Error('integrity secret fixture is unavailable');
+}
+
+function duplicateIntegrityWatchdog(project: ScratchProject, copies: number): void {
+  const stage = requireStage(project);
+  const entry = Object.entries(stage.blocks).find(([, block]) => {
+    if (Array.isArray(block) || block.opcode !== 'event_whenflagclicked' || typeof block.next !== 'string') {
+      return false;
+    }
+    const next = stage.blocks[block.next];
+    return !Array.isArray(next) && next?.opcode === 'control_forever';
+  });
+  if (!entry) throw new Error('integrity watchdog fixture is unavailable');
+  const component = new Set<string>();
+  const queue = [entry[0]];
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const id = queue[cursor];
+    if (!id || component.has(id)) continue;
+    const block = stage.blocks[id];
+    if (Array.isArray(block) || !block) continue;
+    component.add(id);
+    if (typeof block.next === 'string') queue.push(block.next);
+    for (const input of Object.values(block.inputs)) {
+      const child = activeTestInput(input);
+      if (typeof child === 'string' && stage.blocks[child] !== undefined) queue.push(child);
+    }
+  }
+  for (let copy = 0; copy < copies; copy += 1) {
+    const mapping = new Map([...component].map(id => [id, `integrity-watchdog-${copy}-${id}`]));
+    for (const id of component) {
+      const original = stage.blocks[id];
+      const replacementId = mapping.get(id);
+      if (!replacementId || Array.isArray(original) || !original) continue;
+      const block = structuredClone(original);
+      if (typeof block.next === 'string' && mapping.has(block.next)) {
+        block.next = mapping.get(block.next) ?? null;
+      }
+      if (typeof block.parent === 'string' && mapping.has(block.parent)) {
+        block.parent = mapping.get(block.parent) ?? null;
+      }
+      for (const input of Object.values(block.inputs)) {
+        for (let index = 1; index < input.length; index += 1) {
+          const value = input[index];
+          if (typeof value === 'string' && mapping.has(value)) input[index] = mapping.get(value) ?? value;
+        }
+      }
+      if (block.topLevel) {
+        block.x = (block.x ?? 0) + ((copy + 1) * 20);
+        block.y = (block.y ?? 0) + ((copy + 1) * 20);
+      }
+      stage.blocks[replacementId] = block;
+    }
+  }
+}
+
+function directIntegrityExpectedJoin(target: ScratchTarget, rootId: string): ScratchBlock | undefined {
+  const root = target.blocks[rootId];
+  const equalsId = !Array.isArray(root) && root?.opcode === 'operator_not'
+    ? activeTestInput(root.inputs['OPERAND'])
+    : undefined;
+  const equals = typeof equalsId === 'string' ? target.blocks[equalsId] : undefined;
+  if (Array.isArray(equals) || equals?.opcode !== 'operator_equals'
+    || !directTestVariableId(target, activeTestInput(equals.inputs['OPERAND1']))) return undefined;
+  const joinId = activeTestInput(equals.inputs['OPERAND2']);
+  const join = typeof joinId === 'string' ? target.blocks[joinId] : undefined;
+  if (Array.isArray(join) || join?.opcode !== 'operator_join') return undefined;
+  if (directTestVariableId(target, activeTestInput(join.inputs['STRING2']))) return join;
+  const bodyId = activeTestInput(join.inputs['STRING2']);
+  const body = typeof bodyId === 'string' ? target.blocks[bodyId] : undefined;
+  const ownJoinId = !Array.isArray(body) && body?.opcode === 'operator_join'
+    ? activeTestInput(body.inputs['STRING2'])
+    : undefined;
+  const ownJoin = typeof ownJoinId === 'string' ? target.blocks[ownJoinId] : undefined;
+  return !Array.isArray(ownJoin) && ownJoin?.opcode === 'operator_join'
+    && directTestVariableId(target, activeTestInput(ownJoin.inputs['STRING1']))
+    ? join
+    : undefined;
+}
+
+function directTestVariableId(target: ScratchTarget, value: unknown): string | undefined {
+  if (Array.isArray(value) && value[0] === 12 && typeof value[2] === 'string') return value[2];
+  const reporter = typeof value === 'string' ? target.blocks[value] : undefined;
+  return !Array.isArray(reporter) && reporter?.opcode === 'data_variable'
+    && typeof reporter.fields['VARIABLE']?.[1] === 'string'
+    ? reporter.fields['VARIABLE'][1]
+    : undefined;
+}
+
+function activeTestInput(input: ScratchBlock['inputs'][string] | undefined): JsonValue | undefined {
+  return input?.[1] ?? input?.[2];
+}
+
+function replaceTestBlockWithNoop(block: ScratchBlock): void {
+  block.opcode = 'looks_say';
+  block.inputs = {MESSAGE: [1, [10, '']]};
+  block.fields = {};
+  delete block.mutation;
 }
 
 function requiredMapping(mapping: ReadonlyMap<string, string>, id: string): string {

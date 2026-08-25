@@ -1,6 +1,13 @@
 import {Buffer} from 'node:buffer';
 import {readFile} from 'node:fs/promises';
 import {unzipSync} from 'fflate';
+import {deriveModeSeed, loadArchiveBuffer} from '../dist/archive/index.js';
+import {serializeProjectPayload} from '../dist/archive/writer.js';
+import {
+  getAntiCheatReleaseCheckpoint,
+  obfuscateProject
+} from '../dist/obfuscation/index.js';
+import {isOfficialHatOpcode} from '../dist/obfuscation/analysis.js';
 import {recoverAdversarialStructure} from './readability-metrics.mjs';
 
 const WATERMARK = 'Obfuscated by PrioSDK Gen 4.';
@@ -10,6 +17,7 @@ const OPAQUE_ALPHABET = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ234567
 const ASCII_OPAQUE = new RegExp(`^x_[${OPAQUE_ALPHABET}](?:[${OPAQUE_ALPHABET}]{27}|[${OPAQUE_ALPHABET}]{35})$`, 'u');
 const INVISIBLE_OPAQUE = /^\u2063[\u200b\u2060]{32,}$/u;
 const PRIVATE_USE_OPAQUE = new RegExp(`^\\ue000[0-9a-z]+_x_[${OPAQUE_ALPHABET}]{18}$`, 'u');
+const PRIVACY_OPAQUE = /^[dksmt]_[a-z]{24}$/u;
 const SENTINEL_TOKEN = /^[!#$%*+\-./:;=?@^_~]{32}$/u;
 const LIVE_SENSING_OPCODES = new Set(['sensing_answer', 'sensing_mousex', 'sensing_mousey', 'sensing_timer']);
 const LIVE_CONDITION_OPCODES = new Set(['operator_contains', 'operator_equals', 'operator_gt', 'operator_lt']);
@@ -21,29 +29,101 @@ const [
   noPreservePath,
   losslessAntiPath,
   lossyAntiPath,
-  noPreserveAntiPath
+  noPreserveAntiPath,
+  noPreserveAntiExtraPath,
+  lossyAllowSizePath,
+  noPreserveAllowSizePath,
+  noPreserveAntiExtraAllowSizePath,
+  lossyAntiAllowSizePath,
+  noPreserveAntiAllowSizePath,
+  losslessAntiSavePath,
+  lossyAntiSavePath,
+  noPreserveAntiSavePath,
+  noPreserveAntiExtraAllowSizeAntiSavePath
 ] = process.argv.slice(2);
 if (!fixturePath || !losslessPath || !lossyPath || !noPreservePath ||
-    !losslessAntiPath || !lossyAntiPath || !noPreserveAntiPath) {
+    !losslessAntiPath || !lossyAntiPath || !noPreserveAntiPath || !noPreserveAntiExtraPath ||
+    !lossyAllowSizePath || !noPreserveAllowSizePath || !noPreserveAntiExtraAllowSizePath ||
+    !lossyAntiAllowSizePath || !noPreserveAntiAllowSizePath || !losslessAntiSavePath ||
+    !lossyAntiSavePath || !noPreserveAntiSavePath || !noPreserveAntiExtraAllowSizeAntiSavePath) {
   throw new Error(
     'usage: assert-release-outputs.mjs <fixture.sb3> <lossless.sb3> <lossy.sb3> <no-preserve.sb3> ' +
-    '<lossless-anticheat.sb3> <lossy-anticheat.sb3> <no-preserve-anticheat.sb3>'
+    '<lossless-anticheat.sb3> <lossy-anticheat.sb3> <no-preserve-anticheat.sb3> ' +
+    '<no-preserve-anticheat-extra.sb3> <lossy-allowsize.sb3> <no-preserve-allowsize.sb3> ' +
+    '<no-preserve-anticheat-extra-allowsize.sb3> <lossy-anticheat-allowsize.sb3> ' +
+    '<no-preserve-anticheat-allowsize.sb3> <lossless-antisave.sb3> <lossy-antisave.sb3> ' +
+    '<no-preserve-antisave.sb3> <no-preserve-anticheat-extra-allowsize-antisave.sb3>'
   );
 }
 
-const fixture = await loadArchive(fixturePath);
+const fixtureBuffer = await readFile(fixturePath);
+const fixture = await loadArchive(fixturePath, fixtureBuffer);
+const strictFixture = await loadArchiveBuffer(fixtureBuffer);
 const specifications = [
-  {label: 'lossless', mode: 'lossless', antiCheat: false, path: losslessPath},
-  {label: 'lossy', mode: 'lossy', antiCheat: false, path: lossyPath},
-  {label: 'no-preserve', mode: 'no-preserve', antiCheat: false, path: noPreservePath},
-  {label: 'lossless + anti-cheat', mode: 'lossless', antiCheat: true, path: losslessAntiPath},
-  {label: 'lossy + anti-cheat', mode: 'lossy', antiCheat: true, path: lossyAntiPath},
-  {label: 'no-preserve + anti-cheat', mode: 'no-preserve', antiCheat: true, path: noPreserveAntiPath}
+  {
+    label: 'lossless + antisave',
+    mode: 'lossless',
+    antiCheat: false,
+    antiSave: true,
+    allowSize: false,
+    path: losslessAntiSavePath
+  },
+  {
+    label: 'lossy + antisave',
+    mode: 'lossy',
+    antiCheat: false,
+    antiSave: true,
+    allowSize: false,
+    path: lossyAntiSavePath
+  },
+  {
+    label: 'no-preserve + antisave',
+    mode: 'no-preserve',
+    antiCheat: false,
+    antiSave: true,
+    allowSize: false,
+    path: noPreserveAntiSavePath
+  },
+  {label: 'lossless', mode: 'lossless', antiCheat: false, antiSave: false, allowSize: false, path: losslessPath},
+  {label: 'lossy', mode: 'lossy', antiCheat: false, antiSave: false, allowSize: false, path: lossyPath},
+  {label: 'no-preserve', mode: 'no-preserve', antiCheat: false, antiSave: false, allowSize: false, path: noPreservePath},
+  {label: 'lossless + anti-cheat', mode: 'lossless', antiCheat: true, antiSave: false, allowSize: false, path: losslessAntiPath},
+  {label: 'lossy + anti-cheat', mode: 'lossy', antiCheat: true, antiSave: false, allowSize: false, path: lossyAntiPath},
+  {label: 'no-preserve + anti-cheat', mode: 'no-preserve', antiCheat: true, antiSave: false, allowSize: false, path: noPreserveAntiPath},
+  {label: 'lossy + allow size', mode: 'lossy', antiCheat: false, antiSave: false, allowSize: true, path: lossyAllowSizePath},
+  {
+    label: 'no-preserve + allow size',
+    mode: 'no-preserve',
+    antiCheat: false,
+    antiSave: false,
+    allowSize: true,
+    path: noPreserveAllowSizePath
+  },
+  {
+    label: 'lossy + anti-cheat + allow size',
+    mode: 'lossy',
+    antiCheat: true,
+    antiSave: false,
+    allowSize: true,
+    path: lossyAntiAllowSizePath
+  },
+  {
+    label: 'no-preserve + anti-cheat + allow size',
+    mode: 'no-preserve',
+    antiCheat: true,
+    antiSave: false,
+    allowSize: true,
+    path: noPreserveAntiAllowSizePath
+  }
 ];
 const outputs = await Promise.all(specifications.map(async specification => ({
   ...specification,
   archive: await loadArchive(specification.path)
 })));
+const extraArchive = await loadArchive(noPreserveAntiExtraPath);
+const extraAllowSizeArchive = await loadArchive(noPreserveAntiExtraAllowSizePath);
+const extraAllowSizeAntiSaveArchive = await loadArchive(noPreserveAntiExtraAllowSizeAntiSavePath);
+const antiCheatCheckpoints = new Map();
 
 assertFixtureContract(fixture.project);
 const originalIds = collectOriginalIds(fixture.project);
@@ -57,7 +137,7 @@ const originalRenamableNames = new Set([
 ]);
 
 for (const output of outputs) {
-  const {archive, label, mode, antiCheat} = output;
+  const {archive, label, mode, antiCheat, antiSave, allowSize} = output;
   assertAssetsEqual(fixture.entries, archive.entries, label);
   assertOutputContract(fixture.project, archive.project, label);
   const strings = collectStrings(archive.project);
@@ -71,31 +151,210 @@ for (const output of outputs) {
   assertOpaqueSymbolNames(archive.project, label);
   assertStaticOptimization(archive.project, mode, label);
   assertVariablePacking(archive.project, mode, antiCheat, label);
+  const antiSaveAudit = antiSave
+    ? assertAntiSave(archive.project, label, antiCheat)
+    : assertNoAntiSave(archive.project, label);
+  if (antiSave && !antiCheat) {
+    replayDeterministicOutput(strictFixture, archive, {mode, allowSize, extra: false, antiCheat: false, antiSave, label});
+  }
   if (mode === 'lossy') assertLossyEventSurface(fixture.project, archive.project, antiCheat, label);
   if (mode === 'no-preserve') {
-    assertNoPreserveVirtualization(archive.project, label);
-    assertNoPreserveCoherentSystems(archive.project, label);
-    if (!antiCheat) assertNoPreserveSiteCaps(archive.project, label);
+    assertNoPreserveVirtualization(archive.project, label, allowSize);
+    assertNoPreserveCoherentSystems(archive.project, label, allowSize);
+    if (!antiCheat) assertNoPreserveSiteCaps(archive.project, label, allowSize);
   }
-  let antiCheatGrowth = 0;
+  let antiCheatCheckpoint;
   if (antiCheat) {
-    antiCheatGrowth = assertAntiCheat(archive.project, label);
+    assertAntiCheat(archive.project, label);
+    antiCheatCheckpoint = replayAntiCheatCheckpoint(strictFixture, archive, {
+      mode,
+      allowSize,
+      extra: false,
+      antiSave,
+      label
+    });
+    antiCheatCheckpoints.set(label, antiCheatCheckpoint);
   } else {
     assertNoAntiCheat(archive.project, label);
   }
-  assertGrowthCap(fixture.project, archive.project, mode, antiCheatGrowth, label);
+  assertGrowthCap(
+    fixture.project,
+    archive.project,
+    mode,
+    allowSize,
+    label,
+    antiCheatCheckpoint,
+    antiSaveAudit
+  );
+  assertSerializedGrowth(
+    fixture.project,
+    archive.project,
+    mode,
+    allowSize,
+    label,
+    antiCheatCheckpoint
+  );
 }
 
-process.stdout.write('Release fixture assertions passed for all six mode and anti-cheat combinations.\n');
+const extraCheckpoint = replayAntiCheatCheckpoint(strictFixture, extraArchive, {
+  mode: 'no-preserve',
+  allowSize: false,
+  extra: true,
+  antiSave: false,
+  label: 'no-preserve + anti-cheat + extra'
+});
+const extraAllowSizeCheckpoint = replayAntiCheatCheckpoint(strictFixture, extraAllowSizeArchive, {
+  mode: 'no-preserve',
+  allowSize: true,
+  extra: true,
+  antiSave: false,
+  label: 'no-preserve + anti-cheat + extra + allow size'
+});
+const extraAllowSizeAntiSaveCheckpoint = replayAntiCheatCheckpoint(strictFixture, extraAllowSizeAntiSaveArchive, {
+  mode: 'no-preserve',
+  allowSize: true,
+  extra: true,
+  antiSave: true,
+  label: 'no-preserve + anti-cheat + extra + allow size + antisave'
+});
+assertExtraPrivacy(fixture, extraArchive, originalIds, originalRenamableNames, false, extraCheckpoint);
+assertExtraPrivacy(
+  fixture,
+  extraAllowSizeArchive,
+  originalIds,
+  originalRenamableNames,
+  true,
+  extraAllowSizeCheckpoint
+);
+assertExtraPrivacy(
+  fixture,
+  extraAllowSizeAntiSaveArchive,
+  originalIds,
+  originalRenamableNames,
+  true,
+  extraAllowSizeAntiSaveCheckpoint,
+  true
+);
+assertExpandedPolicyEffective(
+  outputs,
+  antiCheatCheckpoints,
+  extraCheckpoint,
+  extraAllowSizeCheckpoint
+);
+await strictFixture.cleanup();
 
-async function loadArchive(path) {
-  const archive = unzipSync(await readFile(path));
+process.stdout.write('Release fixture assertions passed for all 16 mode, protection, privacy, and size-policy outputs.\n');
+
+function assertExpandedPolicyEffective(outputs, antiCheatCheckpoints, extraCheckpoint, extraAllowSizeCheckpoint) {
+  const byLabel = new Map(outputs.map(output => [output.label, output]));
+  assertExpandedPair(
+    requireOutput(byLabel, 'lossy'),
+    requireOutput(byLabel, 'lossy + allow size')
+  );
+  assertExpandedPair(
+    requireOutput(byLabel, 'no-preserve'),
+    requireOutput(byLabel, 'no-preserve + allow size')
+  );
+  assertExpandedCheckpointPair(
+    requireCheckpoint(antiCheatCheckpoints, 'lossy + anti-cheat'),
+    requireCheckpoint(antiCheatCheckpoints, 'lossy + anti-cheat + allow size'),
+    'lossy + anti-cheat'
+  );
+  assertExpandedCheckpointPair(
+    requireCheckpoint(antiCheatCheckpoints, 'no-preserve + anti-cheat'),
+    requireCheckpoint(antiCheatCheckpoints, 'no-preserve + anti-cheat + allow size'),
+    'no-preserve + anti-cheat'
+  );
+  assertExpandedCheckpointPair(
+    extraCheckpoint,
+    extraAllowSizeCheckpoint,
+    'no-preserve + anti-cheat + extra'
+  );
+}
+
+function assertExpandedPair(compact, expanded) {
+  const compactBlocks = countBlockEquivalents(compact.archive.project);
+  const expandedBlocks = countBlockEquivalents(expanded.archive.project);
+  assert(
+    expandedBlocks > compactBlocks,
+    `${expanded.label} did not increase the exercised block-equivalent allowance (${expandedBlocks} <= ${compactBlocks})`
+  );
+  assert(
+    expanded.archive.projectBytes.byteLength > compact.archive.projectBytes.byteLength,
+    `${expanded.label} did not increase the exercised serialized-size allowance`
+  );
+}
+
+function assertExpandedCheckpointPair(compact, expanded, label) {
+  assert(
+    expanded.before.blockEquivalents > compact.before.blockEquivalents,
+    `${label} + allow size did not increase the pre-anti-cheat block allowance`
+  );
+  assert(
+    expanded.before.serializedUtf8Bytes > compact.before.serializedUtf8Bytes,
+    `${label} + allow size did not increase the pre-anti-cheat serialized allowance`
+  );
+}
+
+function requireOutput(outputs, label) {
+  const output = outputs.get(label);
+  assert(output !== undefined, `release output ${label} is missing`);
+  return output;
+}
+
+function requireCheckpoint(checkpoints, label) {
+  const checkpoint = checkpoints.get(label);
+  assert(checkpoint !== undefined, `release checkpoint ${label} is missing`);
+  return checkpoint;
+}
+
+async function loadArchive(path, providedBytes) {
+  const archive = unzipSync(providedBytes ?? await readFile(path));
   const projectBytes = archive['project.json'];
   assert(projectBytes, `${path} has no project.json`);
   return {
     entries: archive,
-    project: JSON.parse(Buffer.from(projectBytes).toString('utf8'))
+    project: JSON.parse(Buffer.from(projectBytes).toString('utf8')),
+    projectBytes
   };
+}
+
+function replayAntiCheatCheckpoint(fixtureArchive, suppliedArchive, options) {
+  const replay = replayDeterministicOutput(fixtureArchive, suppliedArchive, {
+    ...options,
+    antiCheat: true
+  });
+  const checkpoint = getAntiCheatReleaseCheckpoint(replay);
+  assert(checkpoint !== undefined, `${options.label} has no accepted anti-cheat checkpoint`);
+  assert(
+    checkpoint.after.serializedUtf8Bytes === suppliedArchive.projectBytes.byteLength,
+    `${options.label} checkpoint has the wrong final serialized size`
+  );
+  assert(
+    checkpoint.after.blockEquivalents === countBlockEquivalents(suppliedArchive.project),
+    `${options.label} checkpoint has the wrong final block-equivalent count`
+  );
+  return checkpoint;
+}
+
+function replayDeterministicOutput(fixtureArchive, suppliedArchive, options) {
+  const replay = obfuscateProject(
+    fixtureArchive.project,
+    options.mode,
+    deriveModeSeed(fixtureArchive.seed, options.mode),
+    {
+      antiCheat: options.antiCheat,
+      antiSave: options.antiSave,
+      allowSize: options.allowSize,
+      extra: options.extra
+    }
+  );
+  const replayedBytes = serializeProjectPayload(replay.project);
+  assert(
+    Buffer.compare(Buffer.from(replayedBytes), Buffer.from(suppliedArchive.projectBytes)) === 0,
+    `${options.label} does not match its deterministic in-memory replay`
+  );
+  return replay;
 }
 
 function assertFixtureContract(project) {
@@ -115,11 +374,18 @@ function assertFixtureContract(project) {
 
   const directIds = [
     'sprite_set_stage',
+    'sprite_set_stage_beta',
     'sprite_set_local',
+    'sprite_set_local_beta',
     'sprite_set_x',
     'sprite_set_y',
     'sprite_set_size',
-    'sprite_set_volume'
+    'sprite_set_volume',
+    'dispatcher_separator',
+    'dispatcher_change_x',
+    'dispatcher_change_y',
+    'dispatcher_change_size',
+    'dispatcher_change_volume'
   ];
   assert(sprite.blocks.sprite_flag?.next === directIds[0], 'fixture marker chain has no runnable entry');
   for (let index = 0; index < directIds.length - 1; index += 1) {
@@ -191,9 +457,8 @@ function assertVariablePacking(project, mode, antiCheat, label) {
   }
 
   if (antiCheat) {
-    const packed = assertMarkersProtectedOrPacked(stage, STAGE_MARKERS, `${label} Stage`)
-      + assertMarkersProtectedOrPacked(sprite, SPRITE_MARKERS, `${label} sprite`);
-    assert(packed > 0, `${label} did not pack any eligible unreserved gameplay scalar`);
+    assertMarkersProtectedOrPacked(stage, STAGE_MARKERS, `${label} Stage`);
+    assertMarkersProtectedOrPacked(sprite, SPRITE_MARKERS, `${label} sprite`);
     return;
   }
 
@@ -284,19 +549,72 @@ function assertLossyEventSurface(original, transformed, antiCheat, label) {
   `${label} added a lossy broadcast command`);
 }
 
-function assertGrowthCap(original, transformed, mode, antiCheatGrowth, label) {
+function assertGrowthCap(original, transformed, mode, allowSize, label, antiCheatCheckpoint, antiSaveAudit) {
   const initial = mode === 'lossless'
     ? countBlockEquivalents(original)
     : countPreAggressiveEquivalents(original);
   const transformedCount = countBlockEquivalents(transformed);
-  const aggressiveCount = transformedCount - antiCheatGrowth;
-  assert(Number.isInteger(aggressiveCount) && aggressiveCount >= 0, `${label} has invalid anti-cheat cap accounting`);
+  const instrumentedCount = antiCheatCheckpoint?.before.blockEquivalents ?? transformedCount;
+  const aggressiveCount = instrumentedCount - (antiSaveAudit?.generatedBlockEquivalents ?? 0);
+  assert(Number.isInteger(aggressiveCount) && aggressiveCount >= 0, `${label} has invalid pre-anti-cheat cap accounting`);
+  const expandedGrowth = allowSize && mode !== 'lossless';
+  if (antiCheatCheckpoint !== undefined) {
+    const antiCheatGrowth = transformedCount - instrumentedCount;
+    assert(antiCheatGrowth >= 0, `${label} has negative anti-cheat block-growth accounting`);
+    const antiCheatCap = Math.max(4096, Math.min((aggressiveCount * 8) + 4096, 30_000));
+    if (!expandedGrowth) {
+      assert(
+        antiCheatGrowth <= antiCheatCap,
+        `${label} exceeded its compact anti-cheat block-growth cap (${antiCheatGrowth} > ${antiCheatCap})`
+      );
+    }
+  }
   const cap = mode === 'lossless'
     ? initial
     : mode === 'lossy'
-      ? Math.max(initial, Math.min(initial * 4, 50_000))
-      : Math.max(initial, Math.min((initial * 25) + 512, 100_000));
+      ? Math.max(initial, Math.min(
+          allowSize ? Math.max(initial * 4, initial + 256) : initial * 2,
+          allowSize ? 50_000 : 30_000
+        ))
+      : Math.max(
+          initial,
+          Math.min(
+            allowSize
+              ? Math.max((initial * 25) + 512, initial + 2048)
+              : (initial * 3) + 512,
+            allowSize ? 100_000 : 30_000
+          )
+        );
   assert(aggressiveCount <= cap, `${label} exceeded its block-equivalent cap (${aggressiveCount} > ${cap})`);
+}
+
+function assertSerializedGrowth(original, transformed, mode, allowSize, label, antiCheatCheckpoint) {
+  const initialBytes = serializeProjectPayload(original).byteLength;
+  const transformedBytes = serializeProjectPayload(transformed).byteLength;
+  const hardLimit = mode === 'no-preserve' ? 128 * 1024 * 1024 : 64 * 1024 * 1024;
+  assert(transformedBytes <= hardLimit, `${label} exceeded its transformed-JSON safety cap`);
+  const expandedGrowth = allowSize && mode !== 'lossless';
+  const preAntiBytes = antiCheatCheckpoint?.before.serializedUtf8Bytes ?? transformedBytes;
+  if (antiCheatCheckpoint !== undefined) {
+    const antiCheatByteGrowth = transformedBytes - preAntiBytes;
+    assert(antiCheatByteGrowth >= 0, `${label} has invalid anti-cheat serialized-growth accounting`);
+    if (!expandedGrowth) {
+      assert(
+        antiCheatByteGrowth <= 2 * 1024 * 1024,
+        `${label} exceeded its compact anti-cheat serialized-growth cap ` +
+          `(${antiCheatByteGrowth} > ${2 * 1024 * 1024})`
+      );
+    }
+  }
+  if (mode === 'lossless' || expandedGrowth) return;
+  const compactLimit = mode === 'lossy'
+    ? (initialBytes * 4) + (512 * 1024)
+    : (initialBytes * 8) + (1024 * 1024);
+  assert(
+    preAntiBytes <= compactLimit,
+    `${label} exceeded its compact serialized-growth cap ` +
+      `(${preAntiBytes} > ${compactLimit})`
+  );
 }
 
 function countPreAggressiveEquivalents(project) {
@@ -331,20 +649,116 @@ function countPreAggressiveEquivalents(project) {
 }
 
 function isOpaqueName(name) {
-  return ASCII_OPAQUE.test(name) || INVISIBLE_OPAQUE.test(name) || PRIVATE_USE_OPAQUE.test(name);
+  return ASCII_OPAQUE.test(name)
+    || INVISIBLE_OPAQUE.test(name)
+    || PRIVATE_USE_OPAQUE.test(name)
+    || PRIVACY_OPAQUE.test(name)
+    || isAntiSaveCanaryText(name);
 }
 
-function assertNoPreserveVirtualization(project, label) {
+function assertExtraPrivacy(
+  fixtureArchive,
+  extraArchive,
+  originalIds,
+  originalRenamableNames,
+  allowSize,
+  antiCheatCheckpoint,
+  antiSave = false
+) {
+  const label = antiSave
+    ? 'no-preserve + anti-cheat + extra + allow size + antisave'
+    : allowSize
+      ? 'no-preserve + anti-cheat + extra + allow size'
+    : 'no-preserve + anti-cheat + extra';
+  const original = fixtureArchive.project;
+  const transformed = extraArchive.project;
+  assertAssetsEqual(fixtureArchive.entries, extraArchive.entries, label);
+  assert(transformed.targets.length === original.targets.length, `${label} changed target count`);
+  assert(JSON.stringify(transformed.extensions) === JSON.stringify(original.extensions), `${label} changed declared extensions`);
+  assert(JSON.stringify(transformed.meta) === JSON.stringify({semver: original.meta?.semver}),
+    `${label} did not reduce metadata to the preserved semver`);
+
+  for (let targetIndex = 0; targetIndex < original.targets.length; targetIndex += 1) {
+    const before = original.targets[targetIndex];
+    const after = transformed.targets[targetIndex];
+    assert(before && after, `${label} has a missing target`);
+    assert(after.isStage === before.isStage, `${label} changed target order`);
+    if (before.isStage) assert(after.name === 'Stage', `${label} changed the Stage identity`);
+    else assert(PRIVACY_OPAQUE.test(after.name), `${label} retained a readable sprite name`);
+    assert(after?.costumes.length === before?.costumes.length, `${label} changed costume count`);
+    assert(after?.sounds.length === before?.sounds.length, `${label} changed sound count`);
+    for (let index = 0; index < before.costumes.length; index += 1) {
+      const beforeDescriptor = before.costumes[index];
+      const afterDescriptor = after.costumes[index];
+      assert(PRIVACY_OPAQUE.test(String(afterDescriptor?.name)), `${label} retained a readable costume/backdrop name`);
+      assert(JSON.stringify(withoutDisplayName(afterDescriptor)) === JSON.stringify(withoutDisplayName(beforeDescriptor)),
+        `${label} changed a costume descriptor beyond its display name`);
+    }
+    for (let index = 0; index < before.sounds.length; index += 1) {
+      const beforeDescriptor = before.sounds[index];
+      const afterDescriptor = after.sounds[index];
+      assert(PRIVACY_OPAQUE.test(String(afterDescriptor?.name)), `${label} retained a readable sound name`);
+      assert(JSON.stringify(withoutDisplayName(afterDescriptor)) === JSON.stringify(withoutDisplayName(beforeDescriptor)),
+        `${label} changed a sound descriptor beyond its display name`);
+    }
+    for (const broadcastName of Object.values(after?.broadcasts ?? {})) {
+      assert(PRIVACY_OPAQUE.test(String(broadcastName)), `${label} retained a readable broadcast name`);
+    }
+  }
+
+  assert(transformed.monitors.length === original.monitors.length, `${label} changed monitor count`);
+  for (const monitor of transformed.monitors) {
+    assert(monitor.visible === false && monitor.x === 0 && monitor.y === 0,
+      `${label} did not hide and canonicalize monitor presentation`);
+  }
+
+  const strings = collectStrings(transformed);
+  for (const id of originalIds) assert(!strings.has(id), `${label} retained original identifier ${JSON.stringify(id)}`);
+  for (const name of originalRenamableNames) {
+    assert(!strings.has(name), `${label} retained renamable name ${JSON.stringify(name)}`);
+  }
+  for (const readableName of ['Visible Sprite', 'backdrop1', 'costume1']) {
+    assert(!strings.has(readableName), `${label} retained privacy-sensitive name ${JSON.stringify(readableName)}`);
+  }
+
+  assertNoInactiveFallbacks(transformed, label);
+  assertWatermark(transformed, label);
+  assertOpaqueSymbolNames(transformed, label);
+  assertStaticOptimization(transformed, 'no-preserve', label);
+  assertVariablePacking(transformed, 'no-preserve', true, label);
+  assertNoPreserveVirtualization(transformed, label, allowSize);
+  assertNoPreserveCoherentSystems(transformed, label, allowSize);
+  assertNoPreserveSiteCaps(transformed, label, allowSize);
+  assertAntiCheat(transformed, label);
+  const antiSaveAudit = antiSave
+    ? assertAntiSave(transformed, label, true)
+    : assertNoAntiSave(transformed, label);
+  assertGrowthCap(original, transformed, 'no-preserve', allowSize, label, antiCheatCheckpoint, antiSaveAudit);
+  assertSerializedGrowth(original, transformed, 'no-preserve', allowSize, label, antiCheatCheckpoint);
+}
+
+function withoutDisplayName(descriptor) {
+  if (descriptor === null || typeof descriptor !== 'object' || Array.isArray(descriptor)) return descriptor;
+  const copy = {...descriptor};
+  delete copy.name;
+  return copy;
+}
+
+function assertNoPreserveVirtualization(project, label, allowSize = false) {
+  if (allowSize) {
+    assertExpandedNoPreserveVirtualization(project, label);
+    return;
+  }
   const blocks = objectBlocks(project);
   const opcodes = blocks.map(entry => entry.block.opcode);
   assert(opcodes.includes('control_if_else'), `${label} has no dispatcher branch`);
   assert(opcodes.filter(opcode => opcode === 'procedures_definition').length > 1, `${label} has no generated handler procedures`);
 
   const markers = [
-    findUniqueMarker(blocks, 'motion_setx', label),
-    findUniqueMarker(blocks, 'motion_sety', label),
-    findUniqueMarker(blocks, 'looks_setsizeto', label),
-    findUniqueMarker(blocks, 'sound_setvolumeto', label)
+    findUniqueMarker(blocks, 'motion_changexby', label),
+    findUniqueMarker(blocks, 'motion_changeyby', label),
+    findUniqueMarker(blocks, 'looks_changesizeby', label),
+    findUniqueMarker(blocks, 'sound_changevolumeby', label)
   ];
   for (let index = 0; index < markers.length - 1; index += 1) {
     const current = markers[index];
@@ -353,26 +767,753 @@ function assertNoPreserveVirtualization(project, label) {
     assert(successor.block.parent !== current.id, `${label} retained direct marker parent ${current.block.opcode} -> ${successor.block.opcode}`);
   }
 
-  const recovered = recoverAdversarialStructure(project);
-  assert(recovered.dispatchers.length > 0, `${label} has no recognized encoded dispatcher`);
-  assert(recovered.dispatchers.some(dispatcher => (
-    dispatcher.stateRailCount >= 3
-    && dispatcher.transitionStoreCount >= 3
-    && dispatcher.routeCount >= 5
-    && dispatcher.relational
-    && dispatcher.recoveryStatus === 'structural-only'
-    && dispatcher.recoveredTransitionEdges === 0
-    && dispatcher.unresolvedTransitionEdges > 0
-  )), `${label} dispatcher did not retain its three-rail indexed-store structure`);
-  assert(recovered.recoveredDispatcherChains.length === 0,
-    `${label} evaluator recovered a dispatcher opcode chain`);
+  const markerInputNames = ['DX', 'DY', 'CHANGE', 'VOLUME'];
+  const expectedMarkerValues = [11, -7, 13, -9];
+  const targetIndex = markers[0]?.targetIndex;
+  assert(typeof targetIndex === 'number' && markers.every(marker => marker.targetIndex === targetIndex),
+    `${label} compact dispatcher markers are split across targets`);
+  const target = project.targets[targetIndex];
+  assert(target !== undefined, `${label} compact dispatcher target is unavailable`);
+  const branchIds = new Set();
+  const suffixIds = new Set();
+  const witnessVariableIds = new Set();
+  const armedVariableIds = new Set();
+  const routeVariableIds = new Set();
+  const routeExpressionIds = new Set();
+  for (let index = 0; index < markers.length; index += 1) {
+    const marker = markers[index];
+    const inputName = markerInputNames[index];
+    const input = marker.block.inputs?.[inputName];
+    assert(evaluateNumericInput(target, input, new Set()) === expectedMarkerValues[index],
+      `${label} ${marker.block.opcode} changed its compact marker operand`);
+    assert(collectInlineVariableIds(target, input).length === 0,
+      `${label} ${marker.block.opcode} retained the retired inline-register frame`);
+    const inputRootId = activeReference(input);
+    const inputRoot = inputRootId === undefined ? undefined : target.blocks[inputRootId];
+    assert(isObjectBlock(inputRoot)
+      && inputRoot.opcode === 'operator_multiply'
+      && primitiveNumber(inputRoot.inputs?.NUM1) !== undefined
+      && primitiveNumber(inputRoot.inputs?.NUM2) !== undefined,
+    `${label} ${marker.block.opcode} no longer uses the current encoded numeric reporter`);
+
+    const branch = typeof marker.block.parent === 'string' ? target.blocks[marker.block.parent] : undefined;
+    assert(isObjectBlock(branch)
+      && branch.opcode === 'control_if'
+      && activeReference(branch.inputs?.SUBSTACK) === marker.id,
+    `${label} ${marker.block.opcode} is not owned by a compact dispatcher branch`);
+    assert(!branchIds.has(marker.block.parent), `${label} compact dispatcher branch owns multiple marker commands`);
+    branchIds.add(marker.block.parent);
+    const conditionId = activeReference(branch.inputs?.CONDITION);
+    const condition = conditionId === undefined ? undefined : target.blocks[conditionId];
+    assert(isObjectBlock(condition) && condition.opcode === 'operator_equals',
+      `${label} compact dispatcher marker condition is malformed`);
+    const routeVariableId = [
+      inlineVariable(condition.inputs?.OPERAND1)?.id,
+      inlineVariable(condition.inputs?.OPERAND2)?.id
+    ].find(value => value !== undefined);
+    const routeExpressionId = [
+      activeReference(condition.inputs?.OPERAND1),
+      activeReference(condition.inputs?.OPERAND2)
+    ].find(value => value !== undefined);
+    assert(typeof routeVariableId === 'string'
+      && typeof routeExpressionId === 'string'
+      && routeVariableId !== routeExpressionId,
+    `${label} compact dispatcher marker condition is not dynamically keyed`);
+    routeVariableIds.add(routeVariableId);
+    routeExpressionIds.add(routeExpressionId);
+
+    const witnessId = marker.block.next;
+    const witness = typeof witnessId === 'string' ? target.blocks[witnessId] : undefined;
+    assert(isObjectBlock(witness)
+      && witness.opcode === 'data_setvariableto'
+      && witness.parent === marker.id,
+    `${label} ${marker.block.opcode} has no inline post-effect witness capture`);
+    const armedId = witness.next;
+    const armed = typeof armedId === 'string' ? target.blocks[armedId] : undefined;
+    assert(isObjectBlock(armed)
+      && armed.opcode === 'data_setvariableto'
+      && armed.parent === witnessId
+      && armed.next === null
+      && inlineVariable(armed.inputs?.VALUE)?.id === routeVariableId,
+    `${label} ${marker.block.opcode} has no armed-last leaf commit`);
+    assert(!suffixIds.has(witnessId) && !suffixIds.has(armedId),
+      `${label} compact dispatcher marker leaves share a mutable suffix`);
+    suffixIds.add(witnessId);
+    suffixIds.add(armedId);
+    const witnessVariableId = witness.fields?.VARIABLE?.[1];
+    const armedVariableId = armed.fields?.VARIABLE?.[1];
+    assert(typeof witnessVariableId === 'string' && typeof armedVariableId === 'string',
+      `${label} compact dispatcher leaf state is unavailable`);
+    witnessVariableIds.add(witnessVariableId);
+    armedVariableIds.add(armedVariableId);
+  }
+  assert(branchIds.size === markers.length && suffixIds.size === markers.length * 2,
+    `${label} compact dispatcher marker ownership is incomplete`);
+  assert(witnessVariableIds.size === 1 && armedVariableIds.size === 1,
+    `${label} compact dispatcher leaves do not converge on one witness/latch pair`);
+  assert(routeVariableIds.size === 1 && routeExpressionIds.size === markers.length,
+    `${label} compact dispatcher does not use one live identity with distinct route expressions`);
+  assertCompactPacketStore(target, markers.length, label);
 }
 
-function assertNoPreserveCoherentSystems(project, label) {
+function assertCompactPacketStore(target, routeCount, label) {
+  const packedLists = Object.entries(target.lists).flatMap(([id, declaration]) => {
+    const values = declaration?.[1];
+    return Array.isArray(values)
+      && values.length === 2 * (routeCount + 1)
+      && values.every(value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
+      ? [{id, values}]
+      : [];
+  });
+  assert(packedLists.length === 2, `${label} does not contain exactly two compact packet banks`);
+  const packetIds = new Set(packedLists.map(record => record.id));
+  const modulusCandidates = [251, 257, 263, 269].filter(modulus => {
+    const decodeCount = Object.values(target.blocks).filter(block => (
+      isObjectBlock(block)
+      && block.opcode === 'operator_mod'
+      && primitiveNumber(block.inputs?.NUM2) === modulus
+    )).length;
+    return decodeCount >= routeCount && packedLists.every(record => (
+      record.values.every(value => value < modulus ** 4)
+    ));
+  });
+  assert(modulusCandidates.length === 1, `${label} compact packet digit field is ambiguous`);
+  for (const record of packedLists) {
+    assert(listBlocks(target, 'data_itemoflist', record.id).length >= 3,
+      `${label} compact packet bank ${record.id} is not actively decoded`);
+    assert(listBlocks(target, 'data_lengthoflist', record.id).length >= 1,
+      `${label} compact packet bank ${record.id} has no length guard`);
+    assert([
+      'data_replaceitemoflist',
+      'data_addtolist',
+      'data_deleteoflist',
+      'data_deletealloflist',
+      'data_insertatlist'
+    ].every(opcode => listBlocks(target, opcode, record.id).length === 0),
+    `${label} compact packet bank ${record.id} is mutable`);
+  }
+  const checksumSetters = Object.values(target.blocks).filter(block => {
+    if (!isObjectBlock(block) || block.opcode !== 'data_setvariableto') return false;
+    const expressionId = activeReference(block.inputs?.VALUE);
+    if (expressionId === undefined) return false;
+    const references = collectExpressionListIds(target, expressionId);
+    return references.size === packetIds.size && [...packetIds].every(id => references.has(id));
+  });
+  assert(checksumSetters.length === 1, `${label} compact packet banks do not share one checksum fold`);
+  const checksumId = activeReference(checksumSetters[0]?.inputs?.VALUE);
+  const checksum = checksumId === undefined ? undefined : target.blocks[checksumId];
+  assert(isObjectBlock(checksum)
+    && checksum.opcode === 'operator_mod'
+    && primitiveNumber(checksum.inputs?.NUM2) === 2_147_483_647,
+  `${label} compact packet checksum does not use the full exact prime field`);
+  const scanLoops = Object.values(target.blocks).filter(block => {
+    if (!isObjectBlock(block) || block.opcode !== 'control_repeat') return false;
+    const lengthId = activeReference(block.inputs?.TIMES);
+    const length = lengthId === undefined ? undefined : target.blocks[lengthId];
+    return isObjectBlock(length)
+      && length.opcode === 'data_lengthoflist'
+      && packetIds.has(length.fields?.LIST?.[1]);
+  });
+  assert(scanLoops.length === 1, `${label} compact packet dispatcher does not scan one complete bank`);
+}
+
+function assertExpandedNoPreserveVirtualization(project, label) {
+  const markerOpcodes = [
+    'motion_changexby',
+    'motion_changeyby',
+    'looks_changesizeby',
+    'sound_changevolumeby'
+  ];
+  const expectedMarkerValues = [11, -7, 13, -9];
+  const handlerCount = 4;
+  const targetCandidates = project.targets.flatMap((target, targetIndex) => {
+    const aliasesByCommand = markerOpcodes.map(opcode => Object.entries(target.blocks).flatMap(([id, block]) => (
+      isObjectBlock(block) && block.opcode === opcode ? [{id, block}] : []
+    )));
+    return aliasesByCommand.every(aliases => aliases.length === handlerCount)
+      ? [{target, targetIndex, aliasesByCommand}]
+      : [];
+  });
+  assert(targetCandidates.length === 1, `${label} does not contain exactly one expanded universal dispatcher target`);
+  const candidate = targetCandidates[0];
+  assert(candidate !== undefined, `${label} expanded universal dispatcher target is unavailable`);
+  const {target, aliasesByCommand} = candidate;
+  const commandCount = aliasesByCommand.length;
+  const aliasOwners = new Map();
+  const suffixIds = new Set();
+  const witnessVariableIds = new Set();
+  const armedVariableIds = new Set();
+  for (const [commandIndex, aliases] of aliasesByCommand.entries()) {
+    for (const alias of aliases) {
+      assert(!aliasOwners.has(alias.id), `${label} expanded command alias ${alias.id} is reused`);
+      aliasOwners.set(alias.id, {commandIndex, alias});
+      const inputName = ['DX', 'DY', 'CHANGE', 'VOLUME'][commandIndex];
+      assert(evaluateNumericInput(target, alias.block.inputs?.[inputName], new Set()) === expectedMarkerValues[commandIndex],
+        `${label} expanded command alias changed its marker operand`);
+      const witnessId = alias.block.next;
+      const witness = typeof witnessId === 'string' ? target.blocks[witnessId] : undefined;
+      assert(isObjectBlock(witness)
+        && witness.opcode === 'data_setvariableto'
+        && witness.parent === alias.id,
+      `${label} expanded command alias has no inline post-effect witness capture`);
+      const armedId = witness.next;
+      const armed = typeof armedId === 'string' ? target.blocks[armedId] : undefined;
+      assert(isObjectBlock(armed)
+        && armed.opcode === 'data_setvariableto'
+        && armed.parent === witnessId
+        && armed.next === null
+        && primitiveNumber(armed.inputs?.VALUE) === 1,
+      `${label} expanded command alias has no armed-last leaf commit`);
+      assert(!suffixIds.has(witnessId) && !suffixIds.has(armedId),
+        `${label} expanded command aliases share a post-effect suffix`);
+      suffixIds.add(witnessId);
+      suffixIds.add(armedId);
+      const witnessVariableId = witness.fields?.VARIABLE?.[1];
+      const armedVariableId = armed.fields?.VARIABLE?.[1];
+      assert(typeof witnessVariableId === 'string' && typeof armedVariableId === 'string',
+        `${label} expanded command alias state is unavailable`);
+      witnessVariableIds.add(witnessVariableId);
+      armedVariableIds.add(armedVariableId);
+    }
+  }
+  assert(suffixIds.size === commandCount * handlerCount * 2,
+    `${label} expanded command aliases do not have disjoint inline suffixes`);
+  assert(witnessVariableIds.size === 1 && armedVariableIds.size === 1,
+    `${label} expanded command aliases do not converge on one witness/latch pair`);
+  assert([...aliasOwners.values()].every(({alias}) => {
+    const suffix = typeof alias.block.next === 'string' ? target.blocks[alias.block.next] : undefined;
+    return isObjectBlock(suffix) && suffix.opcode !== 'procedures_call';
+  }), `${label} expanded command aliases retained shared logical suffix ownership`);
+
+  const tables = findExpandedRuntimeTables(target, commandCount, handlerCount, label);
+
+  const claimedAliases = new Set();
+  const handlers = Object.entries(target.blocks).flatMap(([outerId, outer]) => {
+    if (!isObjectBlock(outer) || outer.opcode !== 'control_if') return [];
+    const firstInnerId = activeReference(outer.inputs?.SUBSTACK);
+    const firstInner = firstInnerId === undefined ? undefined : target.blocks[firstInnerId];
+    if (!isObjectBlock(firstInner) || firstInner.opcode !== 'control_if') return [];
+    const firstAliasId = activeReference(firstInner.inputs?.SUBSTACK);
+    if (firstAliasId === undefined || !aliasOwners.has(firstAliasId)) return [];
+
+    const owned = [];
+    let innerId = firstInnerId;
+    let expectedParent = outerId;
+    const visited = new Set();
+    while (innerId !== null) {
+      assert(!visited.has(innerId), `${label} expanded universal handler contains a branch cycle`);
+      visited.add(innerId);
+      const inner = target.blocks[innerId];
+      assert(isObjectBlock(inner) && inner.opcode === 'control_if',
+        `${label} expanded universal handler branch is malformed`);
+      assert(inner.parent === expectedParent, `${label} expanded universal handler branch parent is malformed`);
+      const aliasId = activeReference(inner.inputs?.SUBSTACK);
+      const owner = aliasId === undefined ? undefined : aliasOwners.get(aliasId);
+      assert(owner !== undefined, `${label} expanded universal handler owns an unexpected command`);
+      assert(owner.alias.block.parent === innerId, `${label} expanded command alias parent is malformed`);
+      assert(!claimedAliases.has(aliasId), `${label} expanded command alias is claimed more than once`);
+      claimedAliases.add(aliasId);
+      const conditionId = activeReference(inner.inputs?.CONDITION);
+      const condition = conditionId === undefined ? undefined : target.blocks[conditionId];
+      assert(isObjectBlock(condition) && condition.opcode === 'operator_equals',
+        `${label} expanded command branch condition is malformed`);
+      const comparedVariableId = [
+        inlineVariable(condition.inputs?.OPERAND1)?.id,
+        inlineVariable(condition.inputs?.OPERAND2)?.id
+      ].find(value => value !== undefined);
+      assert(typeof comparedVariableId === 'string',
+        `${label} expanded command branch does not compare the live slot`);
+      owned.push({
+        commandIndex: owner.commandIndex,
+        slot: equalityNumericLiteral(target, inner, label),
+        comparedVariableId
+      });
+      expectedParent = innerId;
+      innerId = inner.next;
+    }
+
+    const conditionId = activeReference(outer.inputs?.CONDITION);
+    const condition = conditionId === undefined ? undefined : target.blocks[conditionId];
+    assert(isObjectBlock(condition) && condition.opcode === 'operator_equals',
+      `${label} expanded universal handler condition is malformed`);
+    const comparedVariableId = [
+      inlineVariable(condition.inputs?.OPERAND1)?.id,
+      inlineVariable(condition.inputs?.OPERAND2)?.id
+    ].find(value => value !== undefined);
+    const handlerIndex = [
+      primitiveNumber(condition.inputs?.OPERAND1),
+      primitiveNumber(condition.inputs?.OPERAND2)
+    ].find(value => value !== undefined);
+    assert(typeof comparedVariableId === 'string'
+      && Number.isInteger(handlerIndex)
+      && handlerIndex >= 0
+      && handlerIndex < handlerCount,
+    `${label} expanded universal handler selector is malformed`);
+    return [{id: outerId, block: outer, comparedVariableId, handlerIndex, owned}];
+  });
+
+  assert(handlers.length === handlerCount, `${label} does not contain exactly four universal handlers`);
+  assert(claimedAliases.size === commandCount * handlerCount,
+    `${label} universal handlers do not own every command alias`);
+  const handlerById = new Map(handlers.map(handler => [handler.id, handler]));
+  const firstHandlers = handlers.filter(handler => {
+    return handler.block.parent === null || !handlerById.has(handler.block.parent);
+  });
+  assert(firstHandlers.length === 1, `${label} expanded handler scan entry is not unique`);
+  const firstHandler = firstHandlers[0];
+  assert(firstHandler !== undefined, `${label} expanded handler scan entry is unavailable`);
+  const orderedHandlers = [firstHandler];
+  while (orderedHandlers.length < handlerCount) {
+    const current = orderedHandlers[orderedHandlers.length - 1];
+    assert(current !== undefined && typeof current.block.next === 'string',
+      `${label} expanded handler scan ended early`);
+    const nextHandler = handlerById.get(current.block.next);
+    assert(nextHandler !== undefined
+      && nextHandler.block.parent === current.id
+      && !orderedHandlers.some(handler => handler.id === nextHandler.id),
+    `${label} expanded universal handler scan linkage is malformed`);
+    orderedHandlers.push(nextHandler);
+  }
+  assert(new Set(orderedHandlers.map(handler => handler.id)).size === handlerCount,
+    `${label} expanded universal handler scan repeats a handler`);
+  assert(new Set(orderedHandlers.map(handler => handler.handlerIndex)).size === handlerCount
+    && orderedHandlers.every(handler => Number.isInteger(handler.handlerIndex)),
+  `${label} expanded universal handler domain is incomplete`);
+  assert(new Set(orderedHandlers.map(handler => handler.comparedVariableId)).size === 1,
+    `${label} expanded universal handlers do not share one live handler selector`);
+  const handlerVariableId = orderedHandlers[0]?.comparedVariableId;
+  assert(typeof handlerVariableId === 'string', `${label} expanded handler variable is unavailable`);
+
+  const expectedSlots = Array.from({length: commandCount}, (_, index) => index);
+  const liveSlots = new Set();
+  const slotVariableIds = new Set();
+  for (const handler of orderedHandlers) {
+    assert(handler.owned.length === commandCount, `${label} expanded universal handler has incomplete command coverage`);
+    assert(JSON.stringify(handler.owned.map(entry => entry.commandIndex).sort((left, right) => left - right))
+      === JSON.stringify(expectedSlots), `${label} expanded universal handler has duplicate command ownership`);
+    for (const owned of handler.owned) {
+      assert(Number.isInteger(owned.slot) && owned.slot > 0 && owned.slot < 67_108_859,
+        `${label} expanded command slot is outside the threaded field`);
+      assert(!liveSlots.has(owned.slot), `${label} expanded command slots are not globally unique`);
+      liveSlots.add(owned.slot);
+      slotVariableIds.add(owned.comparedVariableId);
+    }
+  }
+  assert(slotVariableIds.size === 1, `${label} expanded command branches do not share one live slot selector`);
+  const slotVariableId = [...slotVariableIds][0];
+  assert(typeof slotVariableId === 'string' && slotVariableId !== handlerVariableId,
+    `${label} expanded handler and slot selectors are not separated`);
+  const allSlots = numericEqualityLiteralsForVariable(target, slotVariableId);
+  assert(allSlots.length === (commandCount + 1) * handlerCount
+    && new Set(allSlots).size === allSlots.length
+    && allSlots.every(value => Number.isInteger(value) && value > 0 && value < 67_108_859),
+  `${label} expanded live/terminal slots are not globally unique nonzero field values`);
+  const handlerLiterals = numericEqualityLiteralsForVariable(target, handlerVariableId);
+  assert(handlerLiterals.length === handlerCount * 2
+    && Array.from({length: handlerCount}, (_, value) => (
+      handlerLiterals.filter(candidateValue => candidateValue === value).length === 2
+    )).every(Boolean),
+  `${label} expanded live/terminal handler domains are incomplete`);
+
+  const armedVariableId = [...armedVariableIds][0];
+  assert(typeof armedVariableId === 'string', `${label} expanded armed variable is unavailable`);
+  assertExpandedRuntimeTableShape(target, tables, label, {
+    aliasIds: new Set(aliasOwners.keys()),
+    handlerVariableId,
+    slotVariableId,
+    slotLiterals: allSlots,
+    armedVariableId,
+    routeCount: commandCount,
+    handlerCount
+  });
+  assertTwoWordThreadedEvaluator(project, label);
+}
+
+function assertTwoWordThreadedEvaluator(project, label) {
+  const recovered = recoverAdversarialStructure(project);
+  const dispatchers = recovered.dispatchers.filter(dispatcher => (
+    dispatcher.threadedProgramSchema?.recordWordCount === 2
+  ));
+  assert(dispatchers.length === 1, `${label} evaluator did not recognize exactly one two-word threaded dispatcher`);
+  const schema = dispatchers[0]?.threadedProgramSchema;
+  assert(schema?.status === 'entry-rooted-complete'
+    && schema.handlerCount === 4
+    && schema.commandCount === 4
+    && schema.stateCellCount === 7
+    && schema.encryptedRecordCount === 64
+    && schema.encryptedRecordWordCount === 128,
+  `${label} evaluator recovered the wrong K=4 two-word program dimensions`);
+  assert(schema.selectorRecordWordPresent === false
+    && schema.markerRecordWordPresent === false
+    && schema.directlyKnownPlaintextRecordWordCount === 0
+    && schema.fullyKnownPlaintextWordCount === 0
+    && schema.smallDomainPlaintextRailCount === 0
+    && schema.knownPlaintextMarkerGrammarValidated === false
+    && schema.knownPlaintextKeyRecoveryStatus === 'not-applicable-no-known-plaintext',
+  `${label} evaluator found a retired selector/marker or known-plaintext record surface`);
+  assert(schema.staticDirectTableRecoveryStatus === 'unresolved'
+    && schema.staticAffineRecoveryStatus === 'unresolved'
+    && schema.staticPolynomialRecoveryStatus === 'unresolved'
+    && schema.randomAccessValidNonEntryRecordDecrypts === 0,
+  `${label} evaluator recovered a direct shortcut or a non-entry record with entry-key reuse`);
+  assert(schema.entryRootedRecoveryStatus === 'complete'
+    && schema.entryRootedRecoveredTransitionEdges === 3
+    && schema.entryRootedRouteCount === 4
+    && schema.originalDirectChainAbsent === true
+    && schema.terminalValidated === true,
+  `${label} evaluator did not complete the expected entry-rooted execution boundary`);
+}
+
+function findExpandedRuntimeTables(target, commandCount, handlerCount, label) {
+  const numericLists = Object.entries(target.lists).flatMap(([id, declaration]) => {
+    const values = declaration?.[1];
+    return Array.isArray(values) && values.every(value => typeof value === 'number' && Number.isSafeInteger(value))
+      ? [{id, values}]
+      : [];
+  });
+  const stateCandidates = numericLists.filter(record => (
+    record.values.length === 7 && record.values.every(value => value === 0)
+  ));
+  const recordWordCount = commandCount * handlerCount * handlerCount * 2;
+  const recordCandidates = numericLists.filter(record => (
+    record.values.length === recordWordCount
+    && record.values.every(value => value >= 67_108_859 && value < 67_108_859 ** 2)
+  ));
+  assert(stateCandidates.length === 1, `${label} does not contain exactly one seven-cell threaded state list`);
+  assert(recordCandidates.length === 1, `${label} does not contain exactly one two-word threaded record store`);
+  const state = stateCandidates[0];
+  const records = recordCandidates[0];
+  assert(state !== undefined && records !== undefined, `${label} expanded threaded tables are unavailable`);
+  assert(new Set(records.values).size === records.values.length,
+    `${label} expanded threaded record ciphertext tuples contain duplicate words`);
+  assert(!numericLists.some(record => record.values.length === commandCount * handlerCount * handlerCount * 4),
+    `${label} retained the four-word selector/marker record layout`);
+  assert(!numericLists.some(record => record.values.length === 257),
+    `${label} retained the retired 257-cell expanded program`);
+  return {state, records};
+}
+
+function assertExpandedRuntimeTableShape(target, tables, label, topology) {
+  const stateWrites = listBlocks(target, 'data_replaceitemoflist', tables.state.id);
+  assert(stateWrites.length === 14, `${label} expanded state list does not have entry and commit writers`);
+  const stateWriteIndices = stateWrites.map(write => primitiveNumber(write.inputs?.INDEX));
+  assert(Array.from({length: 7}, (_, index) => (
+    stateWriteIndices.filter(value => value === index + 1).length === 2
+  )).every(Boolean), `${label} expanded state writers do not cover every cell exactly twice`);
+  assert([
+    'data_replaceitemoflist',
+    'data_addtolist',
+    'data_deleteoflist',
+    'data_deletealloflist',
+    'data_insertatlist'
+  ].every(opcode => listBlocks(target, opcode, tables.records.id).length === 0),
+  `${label} expanded encrypted record store is mutable`);
+  for (const table of [tables.state, tables.records]) {
+    assert(listBlocks(target, 'data_itemoflist', table.id).length > 0,
+      `${label} expanded runtime table ${table.id} has no active item reads`);
+    assert(listBlocks(target, 'data_lengthoflist', table.id).length > 0,
+      `${label} expanded runtime table ${table.id} has no active length reads`);
+  }
+  const repeats = Object.entries(target.blocks).filter(([, block]) => (
+    isObjectBlock(block) && block.opcode === 'control_repeat'
+  ));
+  const checksumLoops = repeats.filter(([, block]) => (
+    primitiveNumber(block.inputs?.TIMES) === tables.records.values.length
+  ));
+  const scanLoops = repeats.filter(([, block]) => (
+    primitiveNumber(block.inputs?.TIMES) === tables.records.values.length / 2
+  ));
+  const roundLoops = repeats.filter(([, block]) => primitiveNumber(block.inputs?.TIMES) === 8);
+  assert(checksumLoops.length === 1 && scanLoops.length === 1 && roundLoops.length === 1,
+    `${label} expanded checksum/record/Feistel loop dimensions are malformed`);
+  assert(Object.values(target.blocks).filter(block => (
+    isObjectBlock(block)
+    && block.opcode === 'operator_divide'
+    && primitiveNumber(block.inputs?.NUM2) === 67_108_859
+  )).length === 3, `${label} expanded packed-rail decoder dimensions are malformed`);
+  assert(Object.values(target.blocks).some(block => (
+    isObjectBlock(block)
+    && block.opcode === 'operator_mod'
+    && primitiveNumber(block.inputs?.NUM2) === 67_108_859
+  )), `${label} expanded field arithmetic does not reduce modulo 67,108,859`);
+
+  const procedures = expandedProcedureTopology(target);
+  const decrypt = procedures.filter(record => (
+    record.callIds.length === 2 && record.repeatLiterals.includes(8)
+  ));
+  const dispatcher = procedures.filter(record => (
+    record.callIds.length === topology.routeCount + 1
+    && record.repeatLiterals.includes(tables.records.values.length / 2)
+  ));
+  assert(decrypt.length === 1, `${label} does not contain exactly one shared eight-round decrypt procedure`);
+  assert(dispatcher.length === 1, `${label} does not contain exactly one threaded dispatcher procedure`);
+  const decryptProcedure = decrypt[0];
+  const dispatcherProcedure = dispatcher[0];
+  assert(decryptProcedure !== undefined && dispatcherProcedure !== undefined,
+    `${label} expanded procedure topology is unavailable`);
+  assert([...dispatcherProcedure.reachableIds].filter(id => (
+    target.blocks[id]?.opcode === 'sensing_timer'
+  )).length === 1, `${label} expanded dispatcher does not cache exactly one timer reporter per invocation`);
+  assert(decryptProcedure.warp && dispatcherProcedure.warp,
+    `${label} expanded decrypt/dispatcher procedures are not warp procedures`);
+  assert(topology.aliasIds.size === topology.routeCount * topology.handlerCount
+    && [...topology.aliasIds].every(id => dispatcherProcedure.reachableIds.has(id)),
+  `${label} expanded aliases are not owned by the threaded dispatcher procedure`);
+
+  const scanLoop = scanLoops[0];
+  assert(scanLoop !== undefined, `${label} expanded record scan loop is unavailable`);
+  assertExpandedScanAndCommitTopology(
+    target,
+    scanLoop,
+    tables,
+    topology,
+    decryptProcedure.code,
+    label
+  );
+  assert(topology.slotLiterals.every(value => !tables.records.values.includes(value)),
+    `${label} expanded record store exposes a visible selector/terminal slot word`);
+}
+
+function expandedProcedureTopology(target) {
+  const callsByCode = new Map();
+  for (const [id, block] of Object.entries(target.blocks)) {
+    if (!isObjectBlock(block) || block.opcode !== 'procedures_call') continue;
+    const code = block.mutation?.proccode;
+    if (typeof code !== 'string') continue;
+    const calls = callsByCode.get(code) ?? [];
+    calls.push(id);
+    callsByCode.set(code, calls);
+  }
+  return Object.entries(target.blocks).flatMap(([prototypeId, prototype]) => {
+    if (!isObjectBlock(prototype) || prototype.opcode !== 'procedures_prototype') return [];
+    const code = prototype.mutation?.proccode;
+    const definitionId = prototype.parent;
+    const definition = typeof definitionId === 'string' ? target.blocks[definitionId] : undefined;
+    if (typeof code !== 'string'
+      || !isObjectBlock(definition)
+      || definition.opcode !== 'procedures_definition'
+      || activeReference(definition.inputs?.custom_block) !== prototypeId) return [];
+    const reachableIds = new Set();
+    collectReferencedBlockIds(target, definitionId, reachableIds);
+    const repeatLiterals = [...reachableIds].flatMap(id => {
+      const block = target.blocks[id];
+      const literal = isObjectBlock(block) && block.opcode === 'control_repeat'
+        ? primitiveNumber(block.inputs?.TIMES)
+        : undefined;
+      return literal === undefined ? [] : [literal];
+    });
+    return [{
+      code,
+      warp: prototype.mutation?.warp === 'true',
+      callIds: callsByCode.get(code) ?? [],
+      reachableIds,
+      repeatLiterals
+    }];
+  });
+}
+
+function assertExpandedScanAndCommitTopology(target, scanLoop, tables, topology, decryptCode, label) {
+  const [scanLoopId, scanRepeat] = scanLoop;
+  const scanRootId = activeReference(scanRepeat.inputs?.SUBSTACK);
+  assert(typeof scanRootId === 'string', `${label} expanded record scan body is unavailable`);
+  const scanIds = new Set();
+  collectReferencedBlockIds(target, scanRootId, scanIds);
+  const recordReads = [...scanIds].filter(id => {
+    const block = target.blocks[id];
+    return isObjectBlock(block)
+      && block.opcode === 'data_itemoflist'
+      && block.fields?.LIST?.[1] === tables.records.id;
+  });
+  assert(recordReads.length === 2, `${label} expanded scan does not read exactly two encrypted words per record`);
+  const decryptCalls = [...scanIds].flatMap(id => {
+    const block = target.blocks[id];
+    return isObjectBlock(block)
+      && block.opcode === 'procedures_call'
+      && block.mutation?.proccode === decryptCode
+      ? [{id, block}]
+      : [];
+  });
+  assert(decryptCalls.length === 2, `${label} expanded scan does not decrypt exactly two word domains`);
+  const wordDomainSetters = decryptCalls.map(call => {
+    const setter = typeof call.block.parent === 'string' ? target.blocks[call.block.parent] : undefined;
+    assert(isObjectBlock(setter) && setter.opcode === 'data_setvariableto',
+      `${label} expanded decrypt call has no word-domain setter`);
+    return setter;
+  });
+  assert(new Set(wordDomainSetters.map(setter => setter.fields?.VARIABLE?.[1])).size === 1
+    && JSON.stringify(wordDomainSetters.map(setter => primitiveNumber(setter.inputs?.VALUE)).sort()) === '[1,2]',
+  `${label} expanded decrypt calls do not use exactly word domains one and two`);
+  assert([...scanIds].some(id => {
+    const block = target.blocks[id];
+    return isObjectBlock(block)
+      && block.opcode === 'operator_multiply'
+      && [primitiveNumber(block.inputs?.NUM1), primitiveNumber(block.inputs?.NUM2)].includes(2);
+  }), `${label} expanded record index does not advance in two-word units`);
+
+  const scanFailureId = scanRepeat.next;
+  const scanFailure = typeof scanFailureId === 'string' ? target.blocks[scanFailureId] : undefined;
+  assert(isObjectBlock(scanFailure) && scanFailure.opcode === 'control_if' && scanFailure.parent === scanLoopId,
+    `${label} expanded exact-one scan gate is unavailable`);
+  const notId = activeReference(scanFailure.inputs?.CONDITION);
+  const not = notId === undefined ? undefined : target.blocks[notId];
+  const equalsId = isObjectBlock(not) ? activeReference(not.inputs?.OPERAND) : undefined;
+  const equals = equalsId === undefined ? undefined : target.blocks[equalsId];
+  assert(isObjectBlock(not)
+    && not.opcode === 'operator_not'
+    && isObjectBlock(equals)
+    && equals.opcode === 'operator_equals',
+  `${label} expanded scan does not reject a non-one match count`);
+  const matchVariableId = [
+    inlineVariable(equals.inputs?.OPERAND1)?.id,
+    inlineVariable(equals.inputs?.OPERAND2)?.id
+  ].find(value => value !== undefined);
+  const matchLiteral = [
+    primitiveNumber(equals.inputs?.OPERAND1),
+    primitiveNumber(equals.inputs?.OPERAND2)
+  ].find(value => value !== undefined);
+  assert(typeof matchVariableId === 'string' && matchLiteral === 1,
+    `${label} expanded scan exact-one comparison is malformed`);
+  const stopId = activeReference(scanFailure.inputs?.SUBSTACK);
+  const stop = stopId === undefined ? undefined : target.blocks[stopId];
+  assert(isObjectBlock(stop)
+    && stop.opcode === 'control_stop'
+    && stop.fields?.STOP_OPTION?.[0] === 'this script',
+  `${label} expanded scan failure does not stop the dispatcher`);
+  const matchIncrements = [...scanIds].flatMap(id => {
+    const block = target.blocks[id];
+    return isObjectBlock(block)
+      && block.opcode === 'data_changevariableby'
+      && block.fields?.VARIABLE?.[1] === matchVariableId
+      && primitiveNumber(block.inputs?.VALUE) === 1
+      ? [{id, block}]
+      : [];
+  });
+  assert(matchIncrements.length === 1, `${label} expanded scan has an invalid authenticated-match counter`);
+  const matchIncrement = matchIncrements[0];
+  const matchBranch = matchIncrement === undefined || typeof matchIncrement.block.parent !== 'string'
+    ? undefined
+    : target.blocks[matchIncrement.block.parent];
+  assert(isObjectBlock(matchBranch) && matchBranch.opcode === 'control_if',
+    `${label} expanded authenticated record branch is unavailable`);
+  const authenticationOpcodes = collectReporterOpcodes(target, matchBranch.inputs?.CONDITION);
+  assert(authenticationOpcodes.filter(opcode => opcode === 'operator_equals').length === 2
+    && authenticationOpcodes.filter(opcode => opcode === 'operator_gt').length === 2,
+  `${label} expanded record match does not validate two key rails and two tag rails`);
+  const selectedLeftId = matchIncrement?.block.next;
+  const selectedLeft = typeof selectedLeftId === 'string' ? target.blocks[selectedLeftId] : undefined;
+  const selectedRightId = isObjectBlock(selectedLeft) ? selectedLeft.next : undefined;
+  const selectedRight = typeof selectedRightId === 'string' ? target.blocks[selectedRightId] : undefined;
+  assert(isObjectBlock(selectedLeft)
+    && selectedLeft.opcode === 'data_setvariableto'
+    && isObjectBlock(selectedRight)
+    && selectedRight.opcode === 'data_setvariableto'
+    && selectedRight.next === null,
+  `${label} expanded authenticated match does not capture exactly one next-key pair`);
+
+  const commitBlocks = [];
+  const visited = new Set();
+  let commitId = scanFailure.next;
+  while (typeof commitId === 'string' && !visited.has(commitId)) {
+    visited.add(commitId);
+    const block = target.blocks[commitId];
+    assert(isObjectBlock(block), `${label} expanded post-scan commit references a missing block`);
+    commitBlocks.push(block);
+    commitId = block.next;
+  }
+  const expectedCommitOpcodes = [
+    'data_setvariableto',
+    'data_changevariableby',
+    ...Array.from({length: 6}, () => 'data_setvariableto'),
+    ...Array.from({length: 7}, () => 'data_replaceitemoflist'),
+    ...Array.from({length: 3}, () => 'data_setvariableto')
+  ];
+  assert(JSON.stringify(commitBlocks.map(block => block.opcode)) === JSON.stringify(expectedCommitOpcodes),
+    `${label} expanded post-scan commit ordering is malformed`);
+  assert(primitiveNumber(commitBlocks[1]?.inputs?.VALUE) === 1,
+    `${label} expanded post-scan commit does not advance the logical step once`);
+  assert(commitBlocks[3]?.fields?.VARIABLE?.[1] === topology.handlerVariableId
+    && commitBlocks[4]?.fields?.VARIABLE?.[1] === topology.slotVariableId,
+  `${label} expanded post-scan commit does not install handler then derived slot`);
+  const stateCommit = commitBlocks.slice(8, 15);
+  assert(stateCommit.every(block => block.fields?.LIST?.[1] === tables.state.id)
+    && JSON.stringify(stateCommit.map(block => primitiveNumber(block.inputs?.INDEX))) === '[1,2,3,4,5,6,7]',
+  `${label} expanded post-scan state commit is incomplete or out of order`);
+  const armedCommit = commitBlocks.at(-1);
+  assert(armedCommit?.fields?.VARIABLE?.[1] === topology.armedVariableId
+    && primitiveNumber(armedCommit.inputs?.VALUE) === 0
+    && armedCommit.next === null,
+  `${label} expanded post-scan commit does not leave armed=0 last`);
+}
+
+function numericEqualityLiteralsForVariable(target, variableId) {
+  return Object.values(target.blocks).flatMap(block => {
+    if (!isObjectBlock(block) || block.opcode !== 'operator_equals') return [];
+    for (const [variableInput, literalInput] of [
+      [block.inputs?.OPERAND1, block.inputs?.OPERAND2],
+      [block.inputs?.OPERAND2, block.inputs?.OPERAND1]
+    ]) {
+      if (inlineVariable(variableInput)?.id !== variableId) continue;
+      const literal = primitiveNumber(literalInput);
+      if (literal !== undefined) return [literal];
+    }
+    return [];
+  });
+}
+
+function listBlocks(target, opcode, listId) {
+  return Object.values(target.blocks).filter(block => (
+    isObjectBlock(block)
+    && block.opcode === opcode
+    && block.fields?.LIST?.[1] === listId
+  ));
+}
+
+function collectExpressionListIds(target, rootId) {
+  const listIds = new Set();
+  const pending = [rootId];
+  const visited = new Set();
+  while (pending.length > 0) {
+    const id = pending.pop();
+    if (id === undefined || visited.has(id)) continue;
+    visited.add(id);
+    const block = target.blocks[id];
+    if (!isObjectBlock(block)) continue;
+    if (block.opcode === 'data_itemoflist') {
+      const listId = block.fields?.LIST?.[1];
+      if (typeof listId === 'string') listIds.add(listId);
+    }
+    for (const input of Object.values(block.inputs ?? {})) {
+      const childId = activeReference(input);
+      if (childId !== undefined) pending.push(childId);
+    }
+  }
+  return listIds;
+}
+
+function equalityNumericLiteral(target, branch, label) {
+  const conditionId = activeReference(branch.inputs?.CONDITION);
+  const condition = conditionId === undefined ? undefined : target.blocks[conditionId];
+  assert(isObjectBlock(condition) && condition.opcode === 'operator_equals',
+    `${label} expanded branch condition is not an equality`);
+  const literals = [
+    primitiveNumber(condition.inputs?.OPERAND1),
+    primitiveNumber(condition.inputs?.OPERAND2)
+  ].filter(value => value !== undefined);
+  assert(literals.length === 1, `${label} expanded branch condition does not contain exactly one slot literal`);
+  const literal = literals[0];
+  assert(typeof literal === 'number', `${label} expanded branch slot literal is unavailable`);
+  return literal;
+}
+
+function assertNoPreserveCoherentSystems(project, label, allowSize) {
   const stage = project.targets.find(target => target.isStage);
   assert(stage, `${label} has no Stage`);
   const channelIds = new Set(Object.keys(stage.broadcasts));
-  assert(channelIds.size > 0, `${label} has no coherent broadcast channels`);
+  if (channelIds.size === 0) {
+    assert(allowSize && hasTwoWordExpandedRecordStore(project),
+      `${label} omitted coherent broadcast systems without spending the explicit size waiver on K=4 records`);
+    return;
+  }
 
   const references = broadcastReferenceCounts(project);
   for (const id of channelIds) {
@@ -491,7 +1632,7 @@ function linearProcedureCodes(target, rootId) {
   return codes;
 }
 
-function assertNoPreserveSiteCaps(project, label) {
+function assertNoPreserveSiteCaps(project, label, allowSize = false) {
   const definitions = project.targets.map(target => coherentProcedureDefinitions(target));
   const receivers = project.targets.map(target => Object.entries(target.blocks)
     .filter(([, block]) => isObjectBlock(block) && block.opcode === 'event_whenbroadcastreceived')
@@ -538,9 +1679,28 @@ function assertNoPreserveSiteCaps(project, label) {
       siteGrowths.push(equivalentGrowth(target, siteIds));
     }
   }
-  assert(componentGrowths.length > 0, `${label} has no attributable coherent components`);
-  assert(componentGrowths.every(growth => growth <= 56), `${label} has an oversized coherent component`);
-  assert(siteGrowths.every(growth => growth <= 256), `${label} exceeded a 256-equivalent no-preserve site cap`);
+  if (componentGrowths.length === 0) {
+    assert(allowSize && hasTwoWordExpandedRecordStore(project),
+      `${label} has no attributable coherent components or expanded K=4 record site`);
+    return;
+  }
+  const componentCap = allowSize ? 224 : 56;
+  const siteCap = allowSize ? 2048 : 256;
+  assert(componentGrowths.every(growth => growth <= componentCap), `${label} has an oversized coherent component`);
+  assert(siteGrowths.every(growth => growth <= siteCap), `${label} exceeded a ${siteCap}-equivalent no-preserve site cap`);
+}
+
+function hasTwoWordExpandedRecordStore(project) {
+  return project.targets.some(target => Object.values(target.lists).some(declaration => (
+    Array.isArray(declaration?.[1])
+    && declaration[1].length === 128
+    && declaration[1].every(value => (
+      typeof value === 'number'
+      && Number.isSafeInteger(value)
+      && value >= 67_108_859
+      && value < 67_108_859 ** 2
+    ))
+  )));
 }
 
 function coherentComponentIds(target, senderId, broadcastId, receivers, definitions) {
@@ -587,7 +1747,7 @@ function assertAntiCheat(project, label) {
   assert(stage, `${label} has no Stage`);
   const watermarkEntries = Object.entries(stage.variables).filter(([, declaration]) => declaration?.[0] === WATERMARK);
   assert(watermarkEntries.length === 1, `${label} has an invalid anti-cheat watermark count`);
-  const [watermarkId, watermarkDeclaration] = watermarkEntries[0];
+  const [watermarkId] = watermarkEntries[0];
 
   const stageBlocks = Object.entries(stage.blocks)
     .filter(([, block]) => isObjectBlock(block))
@@ -611,7 +1771,8 @@ function assertAntiCheat(project, label) {
   const conditionRoot = activeReference(guard.block.inputs?.CONDITION);
   assert(conditionRoot, `${label} watchdog has no condition root`);
   const protectedSentinels = inspectMismatchCondition(stage, conditionRoot, `${label} watchdog`);
-  assert(protectedSentinels.size >= 8, `${label} watchdog must protect the watermark, six decoys, and latch`);
+  assert(protectedSentinels.size === 9,
+    `${label} watchdog must protect seven decoys, one gameplay-breach sentinel, and its latch`);
   for (const [variableId, sentinel] of protectedSentinels) {
     const declaration = stage.variables[variableId];
     assert(Array.isArray(declaration), `${label} protected variable declaration is missing`);
@@ -619,13 +1780,14 @@ function assertAntiCheat(project, label) {
     assert(sentinel.expected === declaration[1], `${label} watchdog sentinel does not match its initial value`);
   }
 
-  assert(protectedSentinels.has(watermarkId), `${label} watchdog does not protect its watermark`);
-  assert(watermarkDeclaration?.[1] === 0, `${label} watermark sentinel is invalid`);
-  const candidateDecoyIds = [...protectedSentinels.keys()].filter(id => id !== watermarkId && id !== latchId);
+  assert(!protectedSentinels.has(watermarkId), `${label} watchdog improperly uses its watermark as a sentinel`);
+  assert(countExactStringOccurrences(stage.blocks, watermarkId) === 0,
+    `${label} anti-cheat block graph reads or mutates its watermark`);
+  const candidateDecoyIds = [...protectedSentinels.keys()].filter(id => id !== latchId);
   const decoyIds = candidateDecoyIds.filter(id => !objectBlocks(project).some(({block}) => (
     block.opcode === 'data_setvariableto' && block.fields?.VARIABLE?.[1] === id
   )));
-  assert(decoyIds.length === 6, `${label} must contain six protected decoy variables`);
+  assert(decoyIds.length === 7, `${label} must contain seven protected decoy variables`);
   for (const id of decoyIds) {
     const declaration = stage.variables[id];
     assert(isOpaqueName(String(declaration?.[0])), `${label} decoy name is readable`);
@@ -649,6 +1811,20 @@ function assertAntiCheat(project, label) {
   });
   assert(latchMutators.length === allowedLatchSetters.size &&
     latchMutators.every(mutator => allowedLatchSetters.has(mutator.id)), `${label} resets or otherwise mutates its latch`);
+
+  const integrity = recoverAdversarialStructure(project).tamperIntegrityAnalysis;
+  assert(integrity.status === 'analyzed', `${label} gameplay integrity structure was not analyzed`);
+  assert(integrity.integrityPairCount === 4, `${label} has an unexpected protected gameplay-variable count`);
+  assert(integrity.integrityGroupCount === 2 && integrity.completeIntegrityGroupCount === 2,
+    `${label} does not retain both complete gameplay integrity groups`);
+  assert(integrity.linkedIntegrityGroupCount === 2 && integrity.linkedIntegrityPairCount === 4,
+    `${label} gameplay integrity groups are not cyclically linked`);
+  assert(integrity.integrityLinkEdgeCount === 4 && integrity.coupledRefreshPathCount === 4,
+    `${label} gameplay integrity coupling is incomplete`);
+  assert(integrity.weakestComponentCut === 2 && integrity.weakestStructuralComponentCut === 2,
+    `${label} gameplay integrity cut regressed below two components`);
+  assert(integrity.singleComponentBypassCount === 0,
+    `${label} gameplay integrity admits a single-component bypass`);
   return project.targets.reduce((growth, target) => growth + Object.entries(target.blocks)
     .filter(([id, block]) => id.startsWith('b_ac_') && isObjectBlock(block))
     .reduce((targetGrowth, [, block]) => targetGrowth + blockEquivalentContribution(block), 0), 0);
@@ -783,16 +1959,183 @@ function assertSameSentinels(expected, actual, label) {
 }
 
 function isExecutableHat(opcode) {
-  return opcode.startsWith('event_when') || opcode === 'control_start_as_clone';
+  return isOfficialHatOpcode(opcode);
 }
 
 function assertWatermark(project, label) {
-  const stage = project.targets.find(target => target.isStage);
-  assert(stage, `${label} has no Stage`);
-  const stageCount = Object.values(stage.variables).filter(declaration => declaration?.[0] === WATERMARK).length;
-  const spriteCount = project.targets.filter(target => !target.isStage).flatMap(target => Object.values(target.variables))
-    .filter(declaration => declaration?.[0] === WATERMARK).length;
-  assert(stageCount === 1 && spriteCount === 0, `${label} must contain exactly one Stage watermark`);
+  const stageIndex = project.targets.findIndex(target => target.isStage);
+  const stage = project.targets[stageIndex];
+  assert(stageIndex >= 0 && stage, `${label} has no Stage`);
+  const watermarkEntries = Object.entries(stage.variables).filter(([, declaration]) => declaration?.[0] === WATERMARK);
+  assert(watermarkEntries.length === 1, `${label} must contain exactly one Stage watermark variable`);
+  const watermarkEntry = watermarkEntries[0];
+  assert(watermarkEntry !== undefined, `${label} Stage watermark variable is unavailable`);
+  const [watermarkId, watermarkDeclaration] = watermarkEntry;
+  const nameOccurrences = collectExactStringOccurrences(project, WATERMARK);
+  assert(nameOccurrences.length === 1
+    && nameOccurrences[0]?.kind === 'value'
+    && nameOccurrences[0]?.owner === watermarkDeclaration
+    && nameOccurrences[0]?.key === 0,
+  `${label} must contain exactly one branded string, only as the Stage watermark variable name`);
+  assert(countExactStringOccurrences(stage.blocks, watermarkId) === 0,
+    `${label} executable Stage blocks reference the watermark variable`);
+}
+
+function assertAntiSave(project, label, antiCheat) {
+  const stageIndex = project.targets.findIndex(target => target.isStage);
+  const stage = project.targets[stageIndex];
+  assert(stageIndex >= 0 && stage, `${label} has no Stage`);
+
+  const negativeZeroVariables = project.targets.flatMap((target, targetIndex) => Object.entries(target.variables)
+    .filter(([, declaration]) => Object.is(declaration?.[1], -0))
+    .map(([id, declaration]) => ({targetIndex, id, declaration})));
+  assert(negativeZeroVariables.length === 1, `${label} must contain exactly one signed-negative-zero sentinel`);
+  const sentinel = negativeZeroVariables[0];
+  assert(sentinel.targetIndex === stageIndex && sentinel.id.startsWith('v_as_'),
+    `${label} signed-zero sentinel is not the generated Stage sentinel`);
+  const sentinelName = sentinel.declaration?.[0];
+  assert(isAntiSaveCanaryText(sentinelName), `${label} signed-zero sentinel name is not a safe Unicode canary`);
+
+  const markerLists = Object.entries(stage.lists).filter(([id, declaration]) => (
+    id.startsWith('l_as_')
+    && isAntiSaveCanaryText(declaration?.[0])
+    && Array.isArray(declaration?.[1])
+    && declaration[1].length === 1
+    && isAntiSaveCanaryText(declaration[1][0])
+  ));
+  assert(markerLists.length === 1, `${label} must contain exactly one safe Unicode marker list`);
+
+  const guardCodesByTarget = new Map();
+  for (const [targetIndex, target] of project.targets.entries()) {
+    const codes = signedZeroGuardProcedureCodes(target, sentinel.id, label);
+    const runnableHats = Object.values(target.blocks).filter(block => (
+      isObjectBlock(block) && block.topLevel && isExecutableHat(block.opcode)
+    ));
+    const requiresGuard = targetIndex === stageIndex || runnableHats.length > 0;
+    assert(codes.length === (requiresGuard ? 1 : 0),
+      `${label} target ${targetIndex} has an invalid signed-zero guard procedure count`);
+    if (codes.length === 1) guardCodesByTarget.set(targetIndex, codes[0]);
+  }
+
+  const antiCheatWatchdogs = objectBlocks(project).filter(entry => (
+    entry.block.topLevel && isWatchdogHat(project.targets[entry.targetIndex], entry)
+  ));
+  assert(antiCheatWatchdogs.length === (antiCheat ? 1 : 0),
+    `${label} has an unexpected anti-cheat watchdog surface while auditing antisave`);
+  const antiCheatWatchdogIds = new Set(antiCheatWatchdogs.map(entry => `${entry.targetIndex}:${entry.id}`));
+  const guardedHats = objectBlocks(project).filter(entry => (
+    entry.block.topLevel
+    && isExecutableHat(entry.block.opcode)
+    && !antiCheatWatchdogIds.has(`${entry.targetIndex}:${entry.id}`)
+  ));
+  assert(guardedHats.length > 0, `${label} has no runnable native hats protected by antisave`);
+
+  for (const hat of guardedHats) {
+    const target = project.targets[hat.targetIndex];
+    const guardCode = guardCodesByTarget.get(hat.targetIndex);
+    assert(typeof guardCode === 'string', `${label} native hat has no target-local signed-zero guard`);
+    let parentId = hat.id;
+    let callId = hat.block.next;
+    if (antiCheat) {
+      const outerCall = typeof callId === 'string' ? target.blocks[callId] : undefined;
+      assert(isObjectBlock(outerCall) && outerCall.opcode === 'procedures_call',
+        `${label} protected native hat has no outer anti-cheat guard call`);
+      assert(outerCall.parent === parentId && typeof outerCall.next === 'string',
+        `${label} outer anti-cheat guard call is disconnected`);
+      parentId = callId;
+      callId = outerCall.next;
+    }
+    const call = typeof callId === 'string' ? target.blocks[callId] : undefined;
+    assert(isObjectBlock(call) && call.opcode === 'procedures_call' && call.mutation?.proccode === guardCode,
+      `${label} native hat does not enter its signed-zero guard before its original successor`);
+    assert(call.parent === parentId && call.mutation?.warp === 'true',
+      `${label} native-hat signed-zero guard call is disconnected or non-warp`);
+    if (typeof call.next === 'string') {
+      const continuation = target.blocks[call.next];
+      assert(isObjectBlock(continuation) && continuation.parent === callId,
+        `${label} signed-zero guard lost its original continuation`);
+    }
+  }
+
+  const generatedBlocks = objectBlocks(project).filter(entry => entry.id.startsWith('b_as_'));
+  const generatedBlockEquivalents = generatedBlocks.reduce(
+    (count, entry) => count + blockEquivalentContribution(entry.block),
+    0
+  );
+  const expectedBlockEquivalents = (guardCodesByTarget.size * 10) + guardedHats.length;
+  assert(generatedBlocks.length > 0 && generatedBlockEquivalents === expectedBlockEquivalents,
+    `${label} antisave generated-block accounting is invalid ` +
+      `(${generatedBlockEquivalents} !== ${expectedBlockEquivalents})`);
+  return {generatedBlockEquivalents};
+}
+
+function signedZeroGuardProcedureCodes(target, sentinelId, label) {
+  const codes = [];
+  for (const [definitionId, definition] of Object.entries(target.blocks)) {
+    if (!isObjectBlock(definition) || definition.opcode !== 'procedures_definition') continue;
+    const prototypeId = activeReference(definition.inputs?.custom_block);
+    const prototype = prototypeId ? target.blocks[prototypeId] : undefined;
+    const guard = typeof definition.next === 'string' ? target.blocks[definition.next] : undefined;
+    if (!isObjectBlock(prototype) || prototype.opcode !== 'procedures_prototype'
+      || !isObjectBlock(guard) || guard.opcode !== 'control_if') continue;
+    const notId = activeReference(guard.inputs?.CONDITION);
+    const not = notId ? target.blocks[notId] : undefined;
+    const lessThanId = isObjectBlock(not) ? activeReference(not.inputs?.OPERAND) : undefined;
+    const lessThan = lessThanId ? target.blocks[lessThanId] : undefined;
+    const divideId = isObjectBlock(lessThan) ? activeReference(lessThan.inputs?.OPERAND1) : undefined;
+    const divide = divideId ? target.blocks[divideId] : undefined;
+    const sentinelReporter = isObjectBlock(divide) ? inlineVariable(divide.inputs?.NUM2) : undefined;
+    if (!isObjectBlock(not) || not.opcode !== 'operator_not'
+      || !isObjectBlock(lessThan) || lessThan.opcode !== 'operator_lt'
+      || !isObjectBlock(divide) || divide.opcode !== 'operator_divide'
+      || sentinelReporter?.id !== sentinelId) continue;
+    assert(primitiveNumber(divide.inputs?.NUM1) === 1 && primitiveNumber(lessThan.inputs?.OPERAND2) === 0,
+      `${label} signed-zero guard arithmetic is invalid`);
+    const stopId = activeReference(guard.inputs?.SUBSTACK);
+    const stop = stopId ? target.blocks[stopId] : undefined;
+    assert(isObjectBlock(stop) && stop.opcode === 'control_stop' && stop.fields?.STOP_OPTION?.[0] === 'all',
+      `${label} signed-zero guard does not stop the project`);
+    const code = prototype.mutation?.proccode;
+    assert(typeof code === 'string' && isAntiSaveCanaryText(code) && prototype.mutation?.warp === 'true',
+      `${label} signed-zero guard procedure name is not a safe Unicode canary`);
+    assert(prototype.parent === definitionId, `${label} signed-zero guard prototype has a stale parent`);
+    codes.push(code);
+  }
+  assert(new Set(codes).size === codes.length, `${label} has duplicate signed-zero guard procedure names`);
+  return codes;
+}
+
+function assertNoAntiSave(project, label) {
+  const generatedIds = project.targets.flatMap(target => [
+    ...Object.keys(target.variables),
+    ...Object.keys(target.lists),
+    ...Object.keys(target.blocks)
+  ]).filter(id => /^(?:[blv]_as_)/u.test(id));
+  assert(generatedIds.length === 0, `${label} contains antisave-generated IDs without the flag`);
+  const negativeZeroVariables = project.targets.flatMap(target => Object.values(target.variables))
+    .filter(declaration => Object.is(declaration?.[1], -0));
+  assert(negativeZeroVariables.length === 0, `${label} contains a signed-zero sentinel without the flag`);
+  const canaryStrings = [...collectStrings(project)].filter(isAntiSaveCanaryText);
+  assert(canaryStrings.length === 0, `${label} contains antisave Unicode canaries without the flag`);
+  return undefined;
+}
+
+function isAntiSaveCanaryText(value) {
+  if (typeof value !== 'string' || value.length < 20 || value !== value.normalize('NFC')) return false;
+  if (!value.startsWith('\u2063\u200b\u2060')) return false;
+  if (value.includes('\u0000')
+    || /\uffff|\ufeff|\u200c|\u200d|[\r\n]|[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(value)) return false;
+  let privateUseCharacters = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xe000 && code <= 0xf8ff) {
+      privateUseCharacters += 1;
+      continue;
+    }
+    if (code === 0x200b || code === 0x2060 || code === 0x2063 || (code >= 0xfe00 && code <= 0xfe02)) continue;
+    return false;
+  }
+  return privateUseCharacters >= 2;
 }
 
 function assertNoAntiCheat(project, label) {
@@ -860,6 +2203,26 @@ function collectReporterOpcodes(target, input) {
     const block = target.blocks[id];
     if (!isObjectBlock(block)) return;
     found.push(block.opcode);
+    for (const child of Object.values(block.inputs ?? {})) visitInput(child);
+  };
+  visitInput(input);
+  return found;
+}
+
+function collectInlineVariableIds(target, input) {
+  const found = [];
+  const visited = new Set();
+  const visitInput = value => {
+    if (!Array.isArray(value)) return;
+    const active = value[1];
+    if (Array.isArray(active)) {
+      if (active[0] === 12 && typeof active[2] === 'string' && !found.includes(active[2])) found.push(active[2]);
+      return;
+    }
+    if (typeof active !== 'string' || visited.has(active)) return;
+    visited.add(active);
+    const block = target.blocks[active];
+    if (!isObjectBlock(block)) return;
     for (const child of Object.values(block.inputs ?? {})) visitInput(child);
   };
   visitInput(input);
@@ -944,6 +2307,29 @@ function collectStrings(value, found = new Set()) {
     collectStrings(item, found);
   }
   return found;
+}
+
+function collectExactStringOccurrences(value, expected, found = [], owner, key) {
+  if (typeof value === 'string') {
+    if (value === expected) found.push({kind: 'value', owner, key});
+    return found;
+  }
+  if (!value || typeof value !== 'object') return found;
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      collectExactStringOccurrences(item, expected, found, value, index);
+    }
+    return found;
+  }
+  for (const [property, item] of Object.entries(value)) {
+    if (property === expected) found.push({kind: 'key', owner: value, key: property});
+    collectExactStringOccurrences(item, expected, found, value, property);
+  }
+  return found;
+}
+
+function countExactStringOccurrences(value, expected) {
+  return collectExactStringOccurrences(value, expected).length;
 }
 
 function broadcastReferenceCounts(project) {

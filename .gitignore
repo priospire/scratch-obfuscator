@@ -3,6 +3,13 @@ dist/
 coverage*/
 *.tgz
 *.tmp-*
+*.sb3
+/ci-hashes.json
+/platform-hashes.json
+/artifacts/
+/qa/.official-scratch-gui/
 .implementation-context.md
+/HARDENING.md
+/QA_SECURITY.md
 .DS_Store
 Thumbs.db

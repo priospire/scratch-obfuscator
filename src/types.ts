@@ -2,6 +2,20 @@ export type ObfuscationMode = 'lossless' | 'lossy' | 'no-preserve';
 
 export interface ObfuscationOptions {
   readonly antiCheat?: boolean;
+  readonly antiSave?: boolean;
+  readonly allowSize?: boolean;
+  readonly extra?: boolean;
+  readonly onProgress?: (event: ObfuscationProgressEvent) => void;
+}
+
+export interface ObfuscationProgressEvent {
+  /** Stable machine-readable name for the current transformation stage. */
+  readonly stage: string;
+  /** Completion within the in-memory transformation, from 0 through 100. */
+  readonly percentage: number;
+  /** Safe operational detail. Identifier mappings and project values are never included. */
+  readonly detail?: string;
+  readonly metrics?: Readonly<Record<string, number | string | boolean>>;
 }
 
 export type JsonPrimitive = null | boolean | number | string;
@@ -94,7 +108,21 @@ export interface ObfuscationStats {
   constantsFolded?: number;
   inactiveFallbacksRemoved?: number;
   antiCheatDecoys?: number;
+  antiSaveCanaries?: number;
+  privacyNamesRenamed?: number;
+  privacyMonitorsCanonicalized?: number;
+  privacyMetadataPropertiesRemoved?: number;
   warnings: string[];
+  caveats?: string[];
+  verification?: ObfuscationVerificationSummary;
+}
+
+export interface ObfuscationVerificationSummary {
+  readonly scope: 'static-project-structure';
+  readonly verdict: 'verified-with-caveats';
+  readonly provenInvariants: number;
+  readonly attributedPasses: number;
+  readonly caveats: number;
 }
 
 export interface ObfuscationResult {

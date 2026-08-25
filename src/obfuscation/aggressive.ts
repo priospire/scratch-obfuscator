@@ -1,8 +1,13 @@
 import {isPrimitive, isScratchBlock} from '../model/blocks.js';
 import type {DeterministicGenerator} from '../deterministic.js';
+import {
+  aggressiveBlockEquivalentCap,
+  aggressivePerSiteBlockEquivalentCap
+} from '../growth-policy.js';
 import type {
   JsonValue,
   ObfuscationMode,
+  ObfuscationProgressEvent,
   ObfuscationStats,
   ScratchBlock,
   ScratchInput,
@@ -19,10 +24,13 @@ import {
   countBlockEquivalents,
   countObjectBlocks,
   hardenInactiveShadows,
+  isOfficialHatOpcode,
+  isProjectVariableSensed,
   isVirtualizableStackBlock,
   type LinearRunEntryConnector,
   type LinearRun,
   type NumericLiteralSite,
+  type RegionEffectSummary,
   type RegionEffectRequest,
   type StringLiteralSite,
   type VariableCandidate
@@ -67,11 +75,20 @@ interface SelectedVariable {
   readonly slot: number;
 }
 
-interface FixedListUsage {
+interface FixedListIndexedUsage {
+  readonly kind: 'indexed';
   readonly targetIndex: number;
   readonly blockId: string;
-  readonly originalIndex: number | null;
+  readonly staticIndex: number | null | undefined;
 }
+
+interface FixedListLengthUsage {
+  readonly kind: 'length';
+  readonly targetIndex: number;
+  readonly blockId: string;
+}
+
+type FixedListUsage = FixedListIndexedUsage | FixedListLengthUsage;
 
 interface FixedListCandidate {
   readonly targetIndex: number;
@@ -79,6 +96,7 @@ interface FixedListCandidate {
   readonly name: string;
   readonly values: readonly JsonValue[];
   readonly usages: readonly FixedListUsage[];
+  readonly growth: number;
 }
 
 interface MutableFixedListCandidate {
@@ -89,8 +107,6 @@ interface MutableFixedListCandidate {
   readonly usages: FixedListUsage[];
   safe: boolean;
 }
-
-type DispatcherTemplate = 'nested-if-else' | 'sequential-if';
 
 type DecoyOpcode =
   | 'data_addtolist'
@@ -105,35 +121,190 @@ interface DecoyVocabulary {
   readonly byCost: Readonly<Record<1 | 2 | 3, readonly DecoyOpcode[]>>;
 }
 
-interface IndexedStore {
-  readonly values: Array<string | number>;
-  readonly modulus: number;
+interface DispatcherWitnessPlan {
+  readonly opcode: string;
+  readonly fields: Readonly<Record<string, readonly JsonValue[]>>;
+  readonly protectedListId?: string;
+  readonly resultBound: boolean;
+}
+
+interface DispatcherFrameVariable {
+  readonly variableId: string;
+  readonly variableName: string;
 }
 
 interface DispatcherHandler {
   readonly originalId: string;
-  readonly changeKeyId: string;
-  readonly keyDeltaReporterId: string;
-  readonly keyDeltaIndexId: string;
-  readonly setStateId: string;
-  readonly transitionReporterId: string;
-  readonly transitionIndexId: string;
-  readonly setTagId: string;
-  readonly tagReporterId: string;
-  readonly tagIndexId: string;
-  readonly dispatchCallId: string | null;
-  readonly stateCode: number;
-  readonly tagCode: number;
-  readonly tagFirst: boolean;
+  readonly setWitnessId: string;
+  readonly witnessModId: string;
+  readonly witnessLengthId: string;
+  readonly witnessReporterId: string;
+  readonly setArmedId: string;
+  readonly routeIndex: number;
+  readonly witness: DispatcherWitnessPlan;
 }
 
-interface DispatcherHandlerBucket {
-  readonly definitionId: string;
-  readonly prototypeId: string;
-  readonly proccode: string;
-  readonly handlers: readonly DispatcherHandler[];
+interface DispatcherPacketList {
+  readonly listId: string;
+  readonly listName: string;
+  readonly digitOrder: readonly number[];
 }
 
+interface DispatcherPacketDescriptor {
+  readonly row: number;
+  readonly rho: number;
+  readonly routeIndex: number;
+  readonly lane: number;
+}
+
+interface DispatcherRoutePolynomial {
+  readonly slope: number;
+}
+
+interface DispatcherExpandedRecord {
+  readonly cellIndex: number;
+  readonly routeIndex: number;
+  readonly handlerIndex: number;
+  readonly localSlot: number;
+  readonly transitionSlot: number;
+  readonly currentLabel: number;
+  readonly continuationShare: number;
+  readonly salt: number;
+  readonly routeSeed?: number;
+  readonly producerWords?: readonly [number, number, number];
+  readonly baseKeyLeft?: number;
+  readonly baseKeyRight?: number;
+}
+
+interface DispatcherThreadedRecord {
+  readonly nonce: number;
+  readonly routeIndex: number;
+  readonly handlerIndex: number;
+  readonly nextHandlerIndex: number;
+  readonly words: readonly [number, number];
+}
+
+interface DispatcherThreadedProgram {
+  readonly prime: number;
+  readonly records: readonly DispatcherThreadedRecord[];
+  readonly roundABase: number;
+  readonly roundAStep: number;
+  readonly roundBBase: number;
+  readonly roundBStep: number;
+  readonly nonceScale: number;
+  readonly wordScale: number;
+  readonly handlerScale: number;
+  readonly selectedHandlerScale: number;
+  readonly stepScale: number;
+  readonly terminalScale: number;
+  readonly routeCount: number;
+  readonly aliasCount: number;
+  readonly tagConstants: readonly number[];
+  readonly slotConstants: readonly number[];
+}
+
+interface DispatcherExpandedBridge {
+  readonly program: DispatcherPacketList;
+  readonly powers: DispatcherPacketList;
+  readonly delimiter: string;
+  readonly aliasCount: number;
+  readonly records: readonly (readonly DispatcherExpandedRecord[])[];
+  readonly fieldMasks: readonly DispatcherExpandedFieldMask[];
+  readonly tagCoefficients: readonly number[];
+  readonly powerSlots: readonly number[];
+  readonly programChecksum: number;
+  readonly logicalEntrySeed?: number;
+  readonly logicalRecurrenceAdd?: number;
+  readonly aliasStride?: number;
+  readonly aliasOffset?: number;
+  readonly transitionInputStride?: number;
+  readonly entryRecord: DispatcherExpandedRecord;
+  readonly terminalRecords?: readonly DispatcherExpandedRecord[];
+  readonly threadedProgram?: DispatcherThreadedProgram;
+}
+
+interface DispatcherExpandedFieldMask {
+  readonly indexSlope: number;
+  readonly epochSlope: number;
+  readonly offset: number;
+}
+
+interface DispatcherExpandedAliasHandler {
+  readonly routeIndex: number;
+  readonly handlerIndex: number;
+  readonly localSlot: number;
+  readonly currentLabel: number;
+  readonly continuationShare: number;
+  readonly salt: number;
+  readonly routeSeed?: number;
+  readonly producerWords?: readonly [number, number, number];
+  readonly commandId: string;
+}
+
+interface DispatcherPacketScheme {
+  readonly modulus: number;
+  readonly packetDomain: number;
+  readonly descriptors: readonly DispatcherPacketDescriptor[];
+  readonly bank0: DispatcherPacketList;
+  readonly bank1: DispatcherPacketList;
+  readonly routePolynomials: readonly DispatcherRoutePolynomial[];
+  readonly routeMaskTemplate: 0 | 1;
+  readonly checksum: number;
+  readonly expandedBridge?: DispatcherExpandedBridge;
+  readonly entry: {
+    readonly key: number;
+    readonly witness: number;
+    readonly rho: number;
+    readonly y: number;
+  };
+}
+
+type DispatcherPacketFrameKey =
+  | 'step'
+  | 'witness'
+  | 'hash'
+  | 'key'
+  | 'epoch'
+  | 'y'
+  | 'rho'
+  | 'checksum'
+  | 'index'
+  | 'row'
+  | 'word'
+  | 'label'
+  | 'handler'
+  | 'slot'
+  | 'continuation'
+  | 'salt'
+  | 'tag'
+  | 'armed';
+
+type DispatcherPacketFrame = Readonly<Record<DispatcherPacketFrameKey, DispatcherFrameVariable>>;
+
+type DispatcherThreadedFrameKey =
+  | 'recordIndex'
+  | 'wordDomain'
+  | 'round'
+  | 'word'
+  | 'left'
+  | 'right'
+  | 'mix'
+  | 'roundValue'
+  | 'temporary'
+  | 'matches'
+  | 'selectedHandler'
+  | 'nextKeyLeft'
+  | 'nextKeyRight'
+  | 'tagLeft'
+  | 'tagRight'
+  | 'selectedSlot'
+  | 'selectedKeyLeft'
+  | 'selectedKeyRight';
+
+type DispatcherThreadedFrame = Readonly<Record<
+  DispatcherThreadedFrameKey,
+  DispatcherFrameVariable
+>>;
 
 interface StringPoolState {
   readonly listId: string;
@@ -171,12 +342,23 @@ interface LocalGrowth {
 const COHERENT_DECOY_GROWTH = 38;
 const MAX_COHERENT_EXTRA_GROWTH = 18;
 const ENCODED_OPAQUE_GUARD_GROWTH = 6;
-const ENCODED_DUAL_RAIL_GROWTH = 10;
+const ENCODED_DUAL_RAIL_GROWTH = 11;
+const DISPATCHER_PACKET_PRIMES = [251, 257, 263, 269] as const;
+const DISPATCHER_CHECKSUM_MODULUS = 2_147_483_647;
+const DISPATCHER_CHECKSUM_STATE_MODULUS = 1_000_003;
+const DISPATCHER_CHECKSUM_BANK_MODULUS = 1_000_033;
+const DISPATCHER_CHECKSUM_BANK_OFFSET = 65_537;
+const EXPANDED_DISPATCHER_DOMAIN = 257;
+const THREADED_RECORD_PRIME = 67_108_859;
+const THREADED_RECORD_WORDS = 2;
+const THREADED_FEISTEL_ROUNDS = 8;
+const MAX_EXPANDED_DISPATCHER_ALIASES = 4;
 
 class GrowthBudget {
   readonly #growth: number;
   readonly #boundaries: readonly [number, number, number, number];
   #spent = 0;
+  #stagedSpent = 0;
 
   constructor(growth: number, mode: AggressiveMode) {
     this.#growth = growth;
@@ -187,7 +369,14 @@ class GrowthBudget {
 
   trySpend(amount: number, stage: 0 | 1 | 2 | 3): boolean {
     const boundary = this.#boundaries[stage];
-    if (this.#spent + amount > boundary) return false;
+    if (this.#stagedSpent + amount > boundary || this.#spent + amount > this.#growth) return false;
+    this.#stagedSpent += amount;
+    this.#spent += amount;
+    return true;
+  }
+
+  trySpendExpanded(amount: number): boolean {
+    if (this.#spent + amount > this.#growth) return false;
     this.#spent += amount;
     return true;
   }
@@ -265,12 +454,20 @@ export function applyAggressiveTransforms(
   project: ScratchProject,
   mode: AggressiveMode,
   rng: DeterministicGenerator,
-  stats: ObfuscationStats
+  stats: ObfuscationStats,
+  onProgress?: (event: ObfuscationProgressEvent) => void,
+  allowSize = false,
+  reservedVariableKeys: ReadonlySet<string> = new Set()
 ): void {
+  const progress = (
+    stage: string,
+    percentage: number,
+    detail: string,
+    metrics?: Readonly<Record<string, number | string | boolean>>
+  ): void => onProgress?.({stage, percentage, detail, ...(metrics === undefined ? {} : {metrics})});
+  progress('analyzing-regions', 0, 'collecting transform candidates and executable-effect constraints');
   const initialEquivalents = countBlockEquivalents(project);
-  const cap = mode === 'lossy'
-    ? Math.max(initialEquivalents, Math.min(initialEquivalents * 4, 50_000))
-    : Math.max(initialEquivalents, Math.min((initialEquivalents * 25) + 512, 100_000));
+  const cap = aggressiveBlockEquivalentCap(initialEquivalents, mode, allowSize);
   const budget = new GrowthBudget(cap - initialEquivalents, mode);
   const factory = new UniqueFactory(project, rng.fork('aggressive-ids'));
   const decoyVocabulary = collectDecoyVocabulary(project);
@@ -278,6 +475,10 @@ export function applyAggressiveTransforms(
   const stringPools = new Map<number, StringPoolState>();
   const privateStates = new Map<number, PrivateState>();
   const decoyStates = new Map<number, PrivateState>();
+  const dispatcherWitnessListIds = new Set<string>();
+  const variableIsReserved = (candidate: VariableCandidate): boolean => (
+    reservedVariableKeys.has(`${candidate.targetIndex}\u0000${candidate.id}`)
+  );
   const getState = (targetIndex: number): PrivateState => {
     const present = privateStates.get(targetIndex);
     if (present) return present;
@@ -311,9 +512,9 @@ export function applyAggressiveTransforms(
   const originalNumericSites = collectNumericLiteralSites(project);
   const originalStringSites = collectStringLiteralSites(project);
   const originalConditionSites = collectConditionSites(project);
-  const eligibleVariableCandidates = mode === 'lossy'
+  const eligibleVariableCandidates = (mode === 'lossy'
     ? filterCertifiedVariableCandidates(project, originalVariableCandidates)
-    : originalVariableCandidates;
+    : originalVariableCandidates).filter(candidate => !variableIsReserved(candidate));
   const eligibleNumericSites = mode === 'lossy'
     ? filterCertifiedInputSites(project, originalNumericSites)
     : originalNumericSites;
@@ -321,9 +522,51 @@ export function applyAggressiveTransforms(
     ? filterCertifiedInputSites(project, originalStringSites)
     : originalStringSites;
   const eligibleConditionSites = filterCertifiedConditionSites(project, originalConditionSites, mode);
-  const certifiedRuns = collectCertifiedNestedLinearRuns(project, mode, {
+  const discoveredRuns = collectCertifiedNestedLinearRuns(project, mode, {
     includeProcedureBodies: mode === 'no-preserve'
-  }).filter(candidate => candidate.certificate.eligible);
+  });
+  const certifiedRuns = mode === 'no-preserve'
+    ? discoveredRuns.flatMap(candidate => {
+        if (
+          !candidate.certificate.eligible
+          || candidate.certificate.owningEntry?.reentrant === true
+        ) return [];
+        const boundedRuns = boundDispatcherRuns(project, candidate.run);
+        if (dispatcherWritesArePrivate(
+          project,
+          candidate.run.targetIndex,
+          candidate.run.blockIds,
+          candidate.certificate.effects
+        )) {
+          return boundedRuns.map(run => ({run, certificate: candidate.certificate}));
+        }
+        const certificates = certifyRegionsEffects(
+          project,
+          boundedRuns.map(run => ({...run, introducesProcedureFrame: true})),
+          mode
+        );
+        return boundedRuns.flatMap((run, index) => {
+          const certificate = certificates[index];
+          return certificate?.eligible === true
+            && certificate.owningEntry?.reentrant !== true
+            && dispatcherWritesArePrivate(
+              project,
+              run.targetIndex,
+              run.blockIds,
+              certificate.effects
+            )
+            ? [{run, certificate}]
+            : [];
+        });
+      })
+    : discoveredRuns.filter(candidate => candidate.certificate.eligible);
+  progress('analyzing-regions', 8, 'candidate analysis complete', {
+    variables: eligibleVariableCandidates.length,
+    numbers: eligibleNumericSites.length,
+    strings: eligibleStringSites.length,
+    conditions: eligibleConditionSites.length,
+    linearRuns: certifiedRuns.length
+  });
 
   if (mode === 'lossy') {
     const runs = rng.fork('outline-order').shuffle(certifiedRuns.map(candidate => candidate.run));
@@ -332,34 +575,173 @@ export function applyAggressiveTransforms(
       outlineRun(project, run, factory);
     }
   }
+  progress('outlining-control-flow', 16, mode === 'lossy'
+    ? 'eligible non-yielding runs outlined'
+    : 'procedure outlining replaced by authenticated dispatch in this mode');
 
   if (mode === 'no-preserve') {
-    const runs = rng.fork('run-order').shuffle(
-      certifiedRuns.flatMap(candidate => boundDispatcherRuns(project, candidate.run))
-    );
+    let expandedDispatcherEmitted = false;
+    const runs = rng.fork('run-order').shuffle(certifiedRuns.map(candidate => candidate.run));
+    const compactGrowthReservations = allowSize
+      ? runs.map((run, index): number | undefined => {
+          const target = requireTarget(project, run.targetIndex);
+          const witnesses = collectDispatcherWitnessPlans(target, run.blockIds);
+          if (witnesses.some(witness => !witness.resultBound)) return undefined;
+          const candidateTarget = structuredClone(target);
+          const candidateProject: ScratchProject = {
+            ...project,
+            targets: project.targets.map((candidate, targetIndex) => (
+              targetIndex === run.targetIndex ? candidateTarget : candidate
+            ))
+          };
+          const beforeFragment = countBlockEquivalents(candidateProject);
+          fragmentRun(
+            candidateProject,
+            run,
+            witnesses,
+            new UniqueFactory(candidateProject, rng.fork(`compact-reservation-ids-${index}`)),
+            rng.fork(`run-${index}`).fork('compact-fallback'),
+            0
+          );
+          const growth = countBlockEquivalents(candidateProject) - beforeFragment;
+          const siteCap = aggressivePerSiteBlockEquivalentCap(mode, allowSize)
+            * Math.ceil(run.blockIds.length / 4);
+          return growth >= 0 && growth <= siteCap ? growth : undefined;
+        })
+      : [];
+    const reservedCompactGrowth = (startIndex: number, available: number): number => {
+      let reserved = 0;
+      for (let index = startIndex; index < compactGrowthReservations.length; index += 1) {
+        const growth = compactGrowthReservations[index];
+        if (growth === undefined || reserved + growth > available) continue;
+        reserved += growth;
+      }
+      return reserved;
+    };
     for (const [index, run] of runs.entries()) {
-      const growth = estimateDispatcherGrowth(run.blockIds.length);
-      if (!budget.trySpend(growth, 0)) continue;
-      fragmentRun(project, run, getDecoyState(run.targetIndex), factory, rng.fork(`run-${index}`));
+      const target = requireTarget(project, run.targetIndex);
+      for (const blockId of run.blockIds) requireBlock(target, blockId);
+      const witnesses = collectDispatcherWitnessPlans(target, run.blockIds);
+      if (witnesses.some(witness => !witness.resultBound)) continue;
+      const runRng = rng.fork(`run-${index}`);
+      const siteCount = Math.ceil(run.blockIds.length / 4);
+      const dispatcherSiteCap = aggressivePerSiteBlockEquivalentCap(mode, allowSize);
+      const buildDraft = (expandedAliasCount: number): {
+        readonly target: ScratchTarget;
+        readonly dispatcherGrowth: number;
+        readonly growth: number;
+        readonly expanded: boolean;
+      } => {
+        const candidateTarget = structuredClone(target);
+        const candidateProject: ScratchProject = {
+          ...project,
+          targets: project.targets.map((candidate, targetIndex) => (
+            targetIndex === run.targetIndex ? candidateTarget : candidate
+          ))
+        };
+        const beforeFragment = countBlockEquivalents(candidateProject);
+        fragmentRun(
+          candidateProject,
+          run,
+          witnesses,
+          factory,
+          expandedAliasCount > 0
+            ? runRng.fork(`expanded-aliases-${expandedAliasCount}`)
+            : (allowSize ? runRng.fork('compact-fallback') : runRng),
+          expandedAliasCount
+        );
+        const dispatcherGrowth = countBlockEquivalents(candidateProject) - beforeFragment;
+        return {
+          target: candidateTarget,
+          dispatcherGrowth,
+          growth: dispatcherGrowth,
+          expanded: expandedAliasCount > 0
+        };
+      };
+      let draft: ReturnType<typeof buildDraft> | undefined;
+      if (
+        allowSize
+        && !expandedDispatcherEmitted
+        && run.blockIds.every(blockId => expandedAliasCloneEligible(target, blockId))
+      ) {
+        const compactGrowth = compactGrowthReservations[index];
+        const reservedGrowth = reservedCompactGrowth(index, budget.remaining);
+        const maximumGrowthWithoutDisplacingCompact = compactGrowth === undefined
+          ? 0
+          : compactGrowth + (budget.remaining - reservedGrowth);
+        const fitsExpandedBudget = (candidate: ReturnType<typeof buildDraft>): boolean => (
+          candidate.dispatcherGrowth >= 0
+          && candidate.growth <= dispatcherSiteCap * siteCount
+          && candidate.growth <= budget.remaining
+          && candidate.growth <= maximumGrowthWithoutDisplacingCompact
+        );
+        for (
+          let aliasCount = MAX_EXPANDED_DISPATCHER_ALIASES;
+          aliasCount >= MIN_EXPANDED_DISPATCHER_ALIASES && draft === undefined;
+          aliasCount -= 1
+        ) {
+          const universal = buildDraft(aliasCount);
+          if (fitsExpandedBudget(universal)) draft = universal;
+        }
+      }
+      draft ??= buildDraft(0);
+      if (draft.dispatcherGrowth < 0 || draft.growth > dispatcherSiteCap * siteCount) continue;
+      const budgetAccepted = allowSize
+        ? budget.trySpendExpanded(draft.growth)
+        : budget.trySpend(draft.growth, 0);
+      if (!budgetAccepted) continue;
+      project.targets[run.targetIndex] = draft.target;
+      if (draft.expanded) expandedDispatcherEmitted = true;
+      for (const witness of witnesses) {
+        if (witness.protectedListId !== undefined) dispatcherWitnessListIds.add(witness.protectedListId);
+      }
       stats.virtualizedBlocks += run.blockIds.length;
     }
   }
+  progress('virtualizing-control-flow', 28, mode === 'no-preserve'
+    ? 'eligible linear runs routed through authenticated dispatchers'
+    : 'control-flow virtualization is disabled in lossy mode', {
+    virtualizedBlocks: stats.virtualizedBlocks
+  });
 
   if (originalListCandidates.length > 0) {
+    const listSiteCap = aggressivePerSiteBlockEquivalentCap(mode, allowSize);
+    const selectedListCandidates = rng.fork('fixed-list-order').shuffle(
+      originalListCandidates.filter(candidate => !dispatcherWitnessListIds.has(candidate.id))
+    ).filter(candidate => (
+      candidate.growth <= listSiteCap
+      && budget.trySpend(candidate.growth, 1)
+    ));
     const packed = packFixedLists(
       project,
-      rng.fork('fixed-list-order').shuffle(originalListCandidates),
+      selectedListCandidates,
       getState,
+      factory,
+      mode,
       rng.fork('fixed-list-heap')
     );
     stats.listsVirtualized = (stats.listsVirtualized ?? 0) + packed;
   }
+  progress('virtualizing-lists', 38, 'eligible fixed lists packed into shuffled private storage', {
+    packedLists: stats.listsVirtualized ?? 0,
+    candidates: originalListCandidates.length
+  });
 
   if (eligibleVariableCandidates.length > 0) {
-    const variables = rng.fork('variable-order').shuffle(eligibleVariableCandidates);
+    const originalVariableKeys = new Set(originalVariableCandidates.map(candidate => (
+      `${candidate.targetIndex}\u0000${candidate.id}`
+    )));
+    const refreshedVariableCandidates = mode === 'no-preserve'
+      ? collectVariableCandidates(project).filter(candidate => (
+          originalVariableKeys.has(`${candidate.targetIndex}\u0000${candidate.id}`)
+          && !variableIsReserved(candidate)
+        ))
+      : eligibleVariableCandidates;
+    const variables = rng.fork('variable-order').shuffle(refreshedVariableCandidates);
     const selected: SelectedVariable[] = [];
     for (const [index, candidate] of variables.entries()) {
-      if (candidate.estimatedGrowth > (mode === 'lossy' ? 64 : 256)) continue;
+      const variableSiteCap = aggressivePerSiteBlockEquivalentCap(mode, allowSize);
+      if (candidate.estimatedGrowth > variableSiteCap) continue;
       if (!budget.trySpend(candidate.estimatedGrowth, 1)) continue;
       const state = getState(candidate.targetIndex);
       selected.push({
@@ -377,17 +759,26 @@ export function applyAggressiveTransforms(
       stats.variablesVirtualized = (stats.variablesVirtualized ?? 0) + 1;
     }
   }
+  progress('virtualizing-variables', 50, 'eligible scalar variables packed into private list slots', {
+    packedVariables: stats.variablesVirtualized ?? 0,
+    candidates: eligibleVariableCandidates.length
+  });
 
   const numericSites = rng.fork('numeric-order').shuffle(eligibleNumericSites);
   for (const [index, site] of numericSites.entries()) {
+    if (!blockAt(requireTarget(project, site.targetIndex), site.ownerId)) continue;
     if (!budget.trySpend(site.growth, 1)) continue;
     encodeNumericLiteral(project, site, factory, rng.fork(`numeric-${index}`), poisonRng);
   }
+  progress('encoding-numbers', 59, 'eligible numeric literals replaced with exact-domain expressions', {
+    candidates: numericSites.length
+  });
 
   const stringSites = rng.fork('literal-order').shuffle(eligibleStringSites);
   for (const [index, site] of stringSites.entries()) {
     const target = requireTarget(project, site.targetIndex);
-    const owner = requireBlock(target, site.ownerId);
+    const owner = blockAt(target, site.ownerId);
+    if (!owner) continue;
     const input = owner.inputs[site.inputName];
     const active = input?.[1];
     if (!input || !Array.isArray(active) || active[0] !== 10 || active[1] !== site.value) continue;
@@ -405,11 +796,19 @@ export function applyAggressiveTransforms(
     if (!budget.trySpend(splitGrowth, 1)) continue;
     splitStringLiteral(target, site.ownerId, owner, site.inputName, site.value, factory, literalRng, poisonRng);
   }
+  progress('encoding-strings', 68, 'eligible strings split or pooled behind indirection', {
+    candidates: stringSites.length,
+    pools: stringPools.size
+  });
 
   for (const [index, site] of rng.fork('condition-order').shuffle(eligibleConditionSites).entries()) {
+    if (!blockAt(requireTarget(project, site.targetIndex), site.blockId)) continue;
     if (!budget.trySpend(site.growth, 2)) continue;
     invertCondition(project, site, factory, `condition-${index}`);
   }
+  progress('rewriting-branches', 75, 'eligible branches inverted behind equivalent conditions', {
+    candidates: eligibleConditionSites.length
+  });
 
 
   const dualRailCandidates = collectInsertionEdges(project);
@@ -430,6 +829,9 @@ export function applyAggressiveTransforms(
       `dual-rail-${index}`
     );
   }
+  progress('installing-dual-rails', 83, 'state transitions coupled to encoded dual-rail checks', {
+    candidates: dualRailEdges.length
+  });
 
   const guards: GuardSite[] = [];
   const guardCandidates = mode === 'no-preserve'
@@ -469,6 +871,9 @@ export function applyAggressiveTransforms(
       ? createLiveRailDriver(target, targetIndex, state, factory, 'top-level', fallbackLivePlan)
       : createTopLevelGuard(target, targetIndex, state, factory, 'top-level'));
   }
+  progress('installing-integrity-guards', 90, 'opaque and live integrity guards installed', {
+    guards: guards.length
+  });
 
   addCoherentDecoySubsystems(
     project,
@@ -480,8 +885,12 @@ export function applyAggressiveTransforms(
     factory,
     rng.fork('coherent-decoys'),
     decoyVocabulary,
-    stats
+    stats,
+    aggressivePerSiteBlockEquivalentCap(mode, allowSize)
   );
+  progress('building-decoy-graphs', 95, 'coherent project-shaped decoy subsystems generated', {
+    decoyBlocks: stats.decoysAdded
+  });
 
   fillDecoyBudget(
     project,
@@ -493,14 +902,22 @@ export function applyAggressiveTransforms(
     factory,
     rng.fork('decoys'),
     decoyVocabulary,
-    stats
+    stats,
+    aggressivePerSiteBlockEquivalentCap(mode, allowSize)
   );
+  progress('filling-decoy-budget', 99, 'remaining bounded growth allocated to decoy graphs', {
+    decoyBlocks: stats.decoysAdded
+  });
   stats.blocksAfter = countObjectBlocks(project);
 
   const finalEquivalents = countBlockEquivalents(project);
   if (finalEquivalents > cap) {
     throw new Error(`aggressive transform exceeded its block-equivalent cap (${finalEquivalents} > ${cap})`);
   }
+  progress('aggressive-transforms-complete', 100, 'bounded structural transforms complete', {
+    blockEquivalents: finalEquivalents,
+    cap
+  });
 }
 
 function filterCertifiedVariableCandidates(
@@ -529,6 +946,107 @@ function filterCertifiedVariableCandidates(
     }
   }
   return candidates.filter((_, index) => !rejected.has(index));
+}
+
+function dispatcherWritesArePrivate(
+  project: ScratchProject,
+  executionTargetIndex: number,
+  runBlockIds: readonly string[],
+  effects: RegionEffectSummary
+): boolean {
+  const executionTarget = project.targets[executionTargetIndex];
+  if (!executionTarget) return false;
+  const ownedBlockIds = collectDispatcherOwnedBlockIds(executionTarget, runBlockIds);
+  const writes = [...effects.variableWrites, ...effects.listWrites];
+  for (const write of writes) {
+    if (write.targetIndex !== executionTargetIndex || write.scope === 'unresolved') return false;
+    const declarations = write.kind === 'variable' ? executionTarget.variables : executionTarget.lists;
+    const declaration = declarations[write.id];
+    if (!declaration) return false;
+    if (write.kind === 'variable' && declaration.length === 3 && declaration[2] === true) return false;
+    if (write.kind === 'variable' && isProjectVariableSensed(project, write.targetIndex, write.id)) return false;
+    if (isMonitoredDispatcherSymbol(project, executionTarget, write.kind, write.id)) return false;
+    if (targetReferencesDispatcherSymbol(executionTarget, write.kind, write.id, ownedBlockIds)) return false;
+    if (executionTarget.isStage && project.targets.some((target, targetIndex) => {
+      if (targetIndex === executionTargetIndex) return false;
+      const localDeclarations = write.kind === 'variable' ? target.variables : target.lists;
+      if (localDeclarations[write.id] !== undefined) return false;
+      return targetReferencesDispatcherSymbol(target, write.kind, write.id);
+    })) return false;
+  }
+  return true;
+}
+
+function collectDispatcherOwnedBlockIds(
+  target: ScratchTarget,
+  runBlockIds: readonly string[]
+): ReadonlySet<string> {
+  const owned = new Set(runBlockIds);
+  const visitInput = (input: ScratchInput): void => {
+    for (let index = 1; index < input.length; index += 1) {
+      const blockId = input[index];
+      if (typeof blockId !== 'string' || owned.has(blockId) || target.blocks[blockId] === undefined) continue;
+      owned.add(blockId);
+      const block = target.blocks[blockId];
+      if (!isScratchBlock(block)) continue;
+      for (const nested of Object.values(block.inputs)) visitInput(nested);
+    }
+  };
+  for (const blockId of runBlockIds) {
+    const block = target.blocks[blockId];
+    if (!isScratchBlock(block)) continue;
+    for (const input of Object.values(block.inputs)) visitInput(input);
+  }
+  return owned;
+}
+
+function isMonitoredDispatcherSymbol(
+  project: ScratchProject,
+  target: ScratchTarget,
+  kind: 'variable' | 'list',
+  id: string
+): boolean {
+  const opcode = kind === 'variable' ? 'data_variable' : 'data_listcontents';
+  return project.monitors.some(monitor => {
+    if (monitor['opcode'] !== opcode || monitor['id'] !== id) return false;
+    const spriteName = monitor['spriteName'];
+    if (target.isStage) {
+      if (typeof spriteName !== 'string' || spriteName.length === 0) return true;
+      const requestedTarget = project.targets.find(candidate => !candidate.isStage && candidate.name === spriteName);
+      if (!requestedTarget) return true;
+      const localDeclarations = kind === 'variable' ? requestedTarget.variables : requestedTarget.lists;
+      return localDeclarations[id] === undefined;
+    }
+    return spriteName === target.name;
+  });
+}
+
+function targetReferencesDispatcherSymbol(
+  target: ScratchTarget,
+  kind: 'variable' | 'list',
+  id: string,
+  ignoredBlockIds: ReadonlySet<string> = new Set()
+): boolean {
+  const fieldName = kind === 'variable' ? 'VARIABLE' : 'LIST';
+  const primitiveCode = kind === 'variable' ? 12 : 13;
+  const inputReferences = (input: ScratchInput): boolean => {
+    for (let index = 1; index < input.length; index += 1) {
+      const value = input[index];
+      if (Array.isArray(value) && value[0] === primitiveCode && value[2] === id) return true;
+    }
+    return false;
+  };
+  for (const [blockId, value] of Object.entries(target.blocks)) {
+    if (ignoredBlockIds.has(blockId)) continue;
+    if (isPrimitive(value)) {
+      if (value[0] === primitiveCode && value[2] === id) return true;
+      continue;
+    }
+    if (!isScratchBlock(value)) continue;
+    if (value.fields[fieldName]?.[1] === id) return true;
+    if (Object.values(value.inputs).some(inputReferences)) return true;
+  }
+  return false;
 }
 
 function filterCertifiedInputSites<T extends NumericLiteralSite | StringLiteralSite>(
@@ -721,12 +1239,16 @@ function collectFixedListCandidates(project: ScratchProject): FixedListCandidate
         candidate.safe = false;
         continue;
       }
-      const index = staticListIndex(value.inputs['INDEX'], candidate.values.length);
-      if (index === undefined) {
-        candidate.safe = false;
-        continue;
+      if (value.opcode === 'data_lengthoflist') {
+        candidate.usages.push({kind: 'length', targetIndex: usageTargetIndex, blockId});
+      } else {
+        candidate.usages.push({
+          kind: 'indexed',
+          targetIndex: usageTargetIndex,
+          blockId,
+          staticIndex: staticListIndex(value.inputs['INDEX'], candidate.values.length)
+        });
       }
-      candidate.usages.push({targetIndex: usageTargetIndex, blockId, originalIndex: index});
     }
   }
 
@@ -735,7 +1257,8 @@ function collectFixedListCandidates(project: ScratchProject): FixedListCandidate
     id: candidate.id,
     name: candidate.name,
     values: candidate.values,
-    usages: candidate.usages
+    usages: candidate.usages,
+    growth: candidate.usages.filter(usage => usage.kind === 'indexed' && usage.staticIndex === undefined).length
   }] : []);
 }
 
@@ -752,6 +1275,7 @@ function isMonitoredList(project: ScratchProject, id: string): boolean {
 function hasExactFixedListBlockShape(block: ScratchBlock): boolean {
   if (block.shadow || Object.keys(block.fields).length !== 1 || block.fields['LIST'] === undefined) return false;
   const inputs = Object.keys(block.inputs).sort();
+  if (block.opcode === 'data_lengthoflist') return block.next === null && inputs.length === 0;
   if (block.opcode === 'data_itemoflist') {
     return block.next === null && inputs.length === 1 && inputs[0] === 'INDEX';
   }
@@ -784,6 +1308,8 @@ function packFixedLists(
   project: ScratchProject,
   candidates: readonly FixedListCandidate[],
   getState: (targetIndex: number) => PrivateState,
+  factory: UniqueFactory,
+  mode: AggressiveMode,
   rng: DeterministicGenerator
 ): number {
   const byTarget = new Map<number, FixedListCandidate[]>();
@@ -817,15 +1343,44 @@ function packFixedLists(
     }
 
     for (const candidate of targetCandidates) {
+      const logicalSlots = candidate.values.map((_, offset) => {
+        const slot = slots.get(`${candidate.id}\u0000${offset + 1}`);
+        if (slot === undefined) throw new Error('fixed list heap is missing an element slot');
+        return slot;
+      });
+      const mapId = factory.symbol('l_', `fixed-list-map-${candidate.targetIndex}-${candidate.id}`);
+      const mapName = factory.name(mode, `fixed-list-map-${candidate.targetIndex}-${candidate.id}`);
+      target.lists[mapId] = [mapName, logicalSlots];
       for (const usage of candidate.usages) {
         const usageTarget = requireTarget(project, usage.targetIndex);
         const block = requireBlock(usageTarget, usage.blockId);
-        const slot = usage.originalIndex === null
-          ? 0
-          : slots.get(`${candidate.id}\u0000${usage.originalIndex}`);
-        if (slot === undefined) throw new Error('fixed list heap is missing an element slot');
+        if (usage.kind === 'length') {
+          block.fields = {LIST: [mapName, mapId]};
+          continue;
+        }
         block.fields = {LIST: [state.listName, state.listId]};
-        block.inputs['INDEX'] = numericInput(slot);
+        if (usage.staticIndex !== undefined) {
+          const slot = usage.staticIndex === null ? 0 : logicalSlots[usage.staticIndex - 1];
+          if (slot === undefined) throw new Error('fixed list heap is missing a static element slot');
+          block.inputs['INDEX'] = numericInput(slot);
+          continue;
+        }
+        const logicalIndex = block.inputs['INDEX'];
+        if (!logicalIndex) throw new Error('dynamic fixed list access is missing its INDEX input');
+        const mapReporterId = factory.block(
+          `fixed-list-map-read-${candidate.targetIndex}-${usage.targetIndex}-${candidate.id}-${usage.blockId}`
+        );
+        reparentInputReferences(usageTarget, logicalIndex, mapReporterId);
+        usageTarget.blocks[mapReporterId] = {
+          opcode: 'data_itemoflist',
+          next: null,
+          parent: usage.blockId,
+          inputs: {INDEX: logicalIndex},
+          fields: {LIST: [mapName, mapId]},
+          shadow: false,
+          topLevel: false
+        };
+        block.inputs['INDEX'] = [2, mapReporterId];
       }
       delete target.lists[candidate.id];
       packed += 1;
@@ -838,438 +1393,2127 @@ function makeFixedListJunk(rng: DeterministicGenerator, ordinal: number): string
   return ordinal % 2 === 0 ? `j_${rng.id('h_', 16)}` : rng.integer(0x4000_0000);
 }
 
+function collectDispatcherWitnessPlans(
+  target: ScratchTarget,
+  blockIds: readonly string[]
+): DispatcherWitnessPlan[] {
+  return blockIds.map(blockId => dispatcherWitnessPlan(target, requireBlock(target, blockId)));
+}
+
+function dispatcherWitnessPlan(target: ScratchTarget, block: ScratchBlock): DispatcherWitnessPlan {
+  if (block.opcode === 'data_setvariableto' || block.opcode === 'data_changevariableby') {
+    const field = block.fields['VARIABLE'];
+    const id = field?.[1];
+    if (field && typeof id === 'string') {
+      return {opcode: 'data_variable', fields: {VARIABLE: [...field]}, resultBound: true};
+    }
+  }
+  if (
+    block.opcode === 'data_addtolist'
+    || block.opcode === 'data_deletealloflist'
+    || block.opcode === 'data_deleteoflist'
+    || block.opcode === 'data_insertatlist'
+    || block.opcode === 'data_replaceitemoflist'
+  ) {
+    const field = block.fields['LIST'];
+    const id = field?.[1];
+    if (field && typeof id === 'string') {
+      return {opcode: 'data_listcontents', fields: {LIST: [...field]}, protectedListId: id, resultBound: true};
+    }
+  }
+  if (!target.isStage) {
+    if (
+      block.opcode === 'motion_changexby'
+      || block.opcode === 'motion_ifonedgebounce'
+      || block.opcode === 'motion_movesteps'
+      || block.opcode === 'motion_setx'
+    ) return {opcode: 'motion_xposition', fields: {}, resultBound: true};
+    if (block.opcode === 'motion_changeyby' || block.opcode === 'motion_sety') {
+      return {opcode: 'motion_yposition', fields: {}, resultBound: true};
+    }
+    if (
+      block.opcode === 'motion_pointindirection'
+      || block.opcode === 'motion_turnleft'
+      || block.opcode === 'motion_turnright'
+    ) return {opcode: 'motion_direction', fields: {}, resultBound: true};
+    if (block.opcode === 'looks_changesizeby' || block.opcode === 'looks_setsizeto') {
+      return {opcode: 'looks_size', fields: {}, resultBound: true};
+    }
+    if (block.opcode === 'looks_nextcostume' || block.opcode === 'looks_switchcostumeto') {
+      return {opcode: 'looks_costumenumbername', fields: {NUMBER_NAME: ['number', null]}, resultBound: true};
+    }
+  }
+  if (block.opcode === 'looks_nextbackdrop' || block.opcode === 'looks_switchbackdropto') {
+    return {opcode: 'looks_backdropnumbername', fields: {NUMBER_NAME: ['number', null]}, resultBound: true};
+  }
+  if (block.opcode === 'sound_changevolumeby' || block.opcode === 'sound_setvolumeto') {
+    return {opcode: 'sound_volume', fields: {}, resultBound: true};
+  }
+  return target.isStage
+    ? {opcode: 'looks_backdropnumbername', fields: {NUMBER_NAME: ['number', null]}, resultBound: false}
+    : {opcode: 'motion_xposition', fields: {}, resultBound: false};
+}
+
+function expandedCommandInputGraphIds(target: ScratchTarget, rootId: string): Set<string> {
+  const collected = new Set<string>();
+  const visit = (blockId: string): void => {
+    if (collected.has(blockId)) return;
+    const block = target.blocks[blockId];
+    if (block === undefined) throw new Error('expanded command input graph is incomplete');
+    collected.add(blockId);
+    if (!isScratchBlock(block)) return;
+    for (const input of Object.values(block.inputs)) {
+      for (const value of [input[1], input[2]]) {
+        if (typeof value !== 'string') continue;
+        const child = target.blocks[value];
+        if (child !== undefined) visit(value);
+      }
+    }
+  };
+  visit(rootId);
+  return collected;
+}
+
+function expandedAliasCloneEligible(target: ScratchTarget, rootId: string): boolean {
+  let ids: ReadonlySet<string>;
+  try {
+    ids = expandedCommandInputGraphIds(target, rootId);
+  } catch {
+    return false;
+  }
+  for (const blockId of ids) {
+    const block = target.blocks[blockId];
+    if (block === undefined) return false;
+    if (!isScratchBlock(block)) continue;
+    if (block.mutation !== undefined) return false;
+    if (blockId !== rootId && block.next !== null) return false;
+    if (blockId === rootId) continue;
+    if (block.opcode === 'operator_random' || block.opcode.startsWith('sensing_')) return false;
+    if (
+      !block.shadow
+      && !block.opcode.startsWith('operator_')
+      && !block.opcode.startsWith('data_')
+      && !block.opcode.startsWith('motion_')
+      && !block.opcode.startsWith('looks_')
+      && !block.opcode.startsWith('sound_')
+    ) return false;
+  }
+  return true;
+}
+
+function cloneExpandedCommandInputGraph(
+  target: ScratchTarget,
+  sourceRootId: string,
+  cloneRootId: string,
+  factory: UniqueFactory,
+  domain: string
+): void {
+  const clonedIds = new Map<string, string>([[sourceRootId, cloneRootId]]);
+  let ordinal = 0;
+  const cloneBlock = (sourceId: string, parentId: string | null): string => {
+    const existing = clonedIds.get(sourceId);
+    if (existing !== undefined && sourceId !== sourceRootId) return existing;
+    const cloneId = sourceId === sourceRootId
+      ? cloneRootId
+      : factory.block(`${domain}-input-${ordinal++}`);
+    clonedIds.set(sourceId, cloneId);
+    const source = target.blocks[sourceId];
+    if (source === undefined) throw new Error('expanded clone source is unavailable');
+    if (!isScratchBlock(source)) {
+      target.blocks[cloneId] = structuredClone(source);
+      return cloneId;
+    }
+    const clone = structuredClone(source);
+    clone.next = null;
+    clone.parent = parentId;
+    clone.topLevel = false;
+    delete clone.x;
+    delete clone.y;
+    clone.inputs = Object.fromEntries(Object.entries(source.inputs).map(([name, input]) => {
+      const clonedInput = structuredClone(input);
+      for (const position of [1, 2]) {
+        const value = clonedInput[position];
+        if (typeof value !== 'string') continue;
+        const child = target.blocks[value];
+        if (child !== undefined) {
+          clonedInput[position] = cloneBlock(value, cloneId);
+        }
+      }
+      return [name, clonedInput];
+    }));
+    target.blocks[cloneId] = clone;
+    return cloneId;
+  };
+  cloneBlock(sourceRootId, null);
+}
+
 function fragmentRun(
   project: ScratchProject,
   run: ConnectableLinearRun,
-  railState: PrivateState,
+  witnesses: readonly DispatcherWitnessPlan[],
   factory: UniqueFactory,
-  rng: DeterministicGenerator
+  rng: DeterministicGenerator,
+  expandedAliasCount: number
 ): void {
   const target = requireTarget(project, run.targetIndex);
   const firstId = requireItem(run.blockIds, 0, 'dispatcher run');
+  if (witnesses.length !== run.blockIds.length) throw new Error('dispatcher witness plan is incomplete');
+  const domain = `dispatcher-packet-${run.targetIndex}-${firstId}`;
+  const scheme = makeDispatcherPacketScheme(
+    target,
+    run.blockIds.length,
+    factory,
+    rng.fork('packet-scheme'),
+    domain,
+    expandedAliasCount
+  );
+  const initialValues: Readonly<Record<DispatcherPacketFrameKey, number>> = {
+    step: 0,
+    witness: scheme.entry.witness,
+    hash: 0,
+    key: scheme.entry.key,
+    epoch: scheme.entry.key,
+    y: scheme.entry.y,
+    rho: scheme.entry.rho,
+    checksum: 0,
+    index: 1,
+    row: 0,
+    word: 0,
+    label: 0,
+    handler: 0,
+    slot: 0,
+    continuation: 0,
+    salt: 0,
+    tag: 0,
+    armed: 0
+  };
+  const frame = Object.fromEntries(
+    (Object.keys(initialValues) as DispatcherPacketFrameKey[]).map(key => [key, {
+      variableId: factory.symbol('v_', `${domain}-${key}`),
+      variableName: factory.name('no-preserve', `${domain}-${key}`)
+    }])
+  ) as DispatcherPacketFrame;
+  const declarations = (Object.keys(initialValues) as DispatcherPacketFrameKey[]).map(key => ({
+    variable: frame[key],
+    value: initialValues[key]
+  }));
+  for (const declaration of rng.fork('variable-declaration-order').shuffle(declarations)) {
+    target.variables[declaration.variable.variableId] = [
+      declaration.variable.variableName,
+      declaration.value
+    ];
+  }
 
   const existingCodes = collectProcedureCodes(target);
-  const stateId = factory.symbol('v_', `dispatcher-state-${run.targetIndex}-${firstId}`);
-  const stateName = factory.name('no-preserve', `dispatcher-state-${run.targetIndex}-${firstId}`);
-  const tagId = factory.symbol('v_', `dispatcher-tag-${run.targetIndex}-${firstId}`);
-  const tagName = factory.name('no-preserve', `dispatcher-tag-${run.targetIndex}-${firstId}`);
-  const keyId = factory.symbol('v_', `dispatcher-key-${run.targetIndex}-${firstId}`);
-  const keyName = factory.name('no-preserve', `dispatcher-key-${run.targetIndex}-${firstId}`);
-  const transitionListId = factory.symbol('l_', `dispatcher-transitions-${run.targetIndex}-${firstId}`);
-  const transitionListName = factory.name('no-preserve', `dispatcher-transitions-${run.targetIndex}-${firstId}`);
-  const tagListId = factory.symbol('l_', `dispatcher-tags-${run.targetIndex}-${firstId}`);
-  const tagListName = factory.name('no-preserve', `dispatcher-tags-${run.targetIndex}-${firstId}`);
-  const keyListId = factory.symbol('l_', `dispatcher-keys-${run.targetIndex}-${firstId}`);
-  const keyListName = factory.name('no-preserve', `dispatcher-keys-${run.targetIndex}-${firstId}`);
-  const stateCodes = uniqueDispatcherNumbers(run.blockIds.length + 2, rng.fork('state-codes'));
-  const tagCodes = uniqueDispatcherTagNumbers(stateCodes, rng.fork('tag-codes'));
-  const storeModuli = rng.fork('store-moduli').shuffle([17, 19, 23] as const);
-  const stateModulus = requireItem(storeModuli, 0, 'dispatcher state modulus');
-  const tagModulus = requireItem(storeModuli, 1, 'dispatcher tag modulus');
-  const keyModulus = requireItem(storeModuli, 2, 'dispatcher key modulus');
-  const keys = uniqueDispatcherKeys(
-    run.blockIds.length + 2,
-    [stateModulus, tagModulus, keyModulus],
-    rng.fork('path-keys')
-  );
-  const stateCiphers = stateCodes.map((code, index) => code + requireItem(keys, index, 'dispatcher state key'));
-  const tagCiphers = tagCodes.map((code, index) => code - requireItem(keys, index, 'dispatcher tag key'));
-  const exitState = requireItem(stateCiphers, run.blockIds.length, 'dispatcher exit state');
-  const exitTag = requireItem(tagCiphers, run.blockIds.length, 'dispatcher exit tag');
-  const exitKey = requireItem(keys, run.blockIds.length, 'dispatcher exit key');
-  const fakeStateCode = requireItem(stateCodes, run.blockIds.length + 1, 'dispatcher fake state');
-  const fakeTagCode = requireItem(tagCodes, run.blockIds.length + 1, 'dispatcher fake tag');
-  const stateStore = makeIndexedStore(
-    keys.slice(0, run.blockIds.length + 1),
-    stateCiphers.slice(0, run.blockIds.length + 1),
-    stateModulus,
-    rng.fork('state-store')
-  );
-  const tagStore = makeIndexedStore(
-    keys.slice(0, run.blockIds.length + 1),
-    tagCiphers.slice(0, run.blockIds.length + 1),
-    tagModulus,
-    rng.fork('tag-store')
-  );
-  const deltas = run.blockIds.map((_, index) => (
-    requireItem(keys, index + 1, 'dispatcher next key') - requireItem(keys, index, 'dispatcher current key')
-  ));
-  const keyStore = makeIndexedStore(
-    [exitKey, ...keys.slice(0, run.blockIds.length)],
-    [requireItem(keys, 0, 'dispatcher entry key'), ...deltas],
-    keyModulus,
-    rng.fork('key-store')
-  );
-  target.variables[stateId] = [stateName, exitState];
-  target.variables[tagId] = [tagName, exitTag];
-  target.variables[keyId] = [keyName, exitKey];
-  target.lists[transitionListId] = [transitionListName, stateStore.values];
-  target.lists[tagListId] = [tagListName, tagStore.values];
-  target.lists[keyListId] = [keyListName, keyStore.values];
-
-  const allocateCode = (domain: string, ordinal: number): string => {
-    let code = makeInvisibleDisplayName(rng.fork(domain), ordinal);
-    for (let suffix = 0; existingCodes.has(code); suffix += 1) code += suffix % 2 === 0 ? '\u200b' : '\u2060';
+  const makeCode = (label: string, ordinal: number): string => {
+    let code = makeInvisibleDisplayName(rng.fork(label), ordinal);
+    for (let suffix = 0; existingCodes.has(code); suffix += 1) {
+      code += suffix % 2 === 0 ? '\u200b' : '\u2060';
+    }
     existingCodes.add(code);
     return code;
   };
-  const dispatcherCode = allocateCode('dispatcher-code', run.blockIds.length + 1);
-  const fakeCode = allocateCode('fake-code', run.blockIds.length + 2);
-  const dispatcherDefinitionId = factory.block(`dispatcher-def-${run.targetIndex}-${firstId}`);
-  const dispatcherPrototypeId = factory.block(`dispatcher-proto-${run.targetIndex}-${firstId}`);
-  const fakeDefinitionId = factory.block(`fake-def-${run.targetIndex}-${firstId}`);
-  const fakePrototypeId = factory.block(`fake-proto-${run.targetIndex}-${firstId}`);
-  const fakeBodyId = factory.block(`fake-body-${run.targetIndex}-${firstId}`);
-  const fakeTagBodyId = factory.block(`fake-tag-body-${run.targetIndex}-${firstId}`);
-  const fakeKeyBodyId = factory.block(`fake-key-body-${run.targetIndex}-${firstId}`);
-  const handlers: DispatcherHandler[] = run.blockIds.map((originalId, index) => {
-    const changeKeyId = factory.block(`handler-key-${run.targetIndex}-${originalId}`);
-    const keyDeltaReporterId = factory.block(`handler-key-delta-${run.targetIndex}-${originalId}`);
-    const keyDeltaIndexId = factory.block(`handler-key-index-${run.targetIndex}-${originalId}`);
-    const setStateId = factory.block(`handler-state-${run.targetIndex}-${originalId}`);
-    const transitionReporterId = factory.block(`handler-transition-${run.targetIndex}-${originalId}`);
-    const transitionIndexId = factory.block(`handler-transition-index-${run.targetIndex}-${originalId}`);
-    const setTagId = factory.block(`handler-tag-${run.targetIndex}-${originalId}`);
-    const tagReporterId = factory.block(`handler-transition-tag-${run.targetIndex}-${originalId}`);
-    const tagIndexId = factory.block(`handler-tag-index-${run.targetIndex}-${originalId}`);
-    const dispatchCallId = index + 1 < run.blockIds.length
-      ? factory.block(`handler-dispatch-${run.targetIndex}-${originalId}`)
-      : null;
-    return {
-      originalId,
-      changeKeyId,
-      keyDeltaReporterId,
-      keyDeltaIndexId,
-      setStateId,
-      transitionReporterId,
-      transitionIndexId,
-      setTagId,
-      tagReporterId,
-      tagIndexId,
-      dispatchCallId,
-      stateCode: requireItem(stateCodes, index, 'dispatcher state code'),
-      tagCode: requireItem(tagCodes, index, 'dispatcher tag code'),
-      tagFirst: rng.fork(`handler-rail-order-${index}`).integer(2) === 0
-    };
-  });
-  const handlerBuckets = makeDispatcherHandlerBuckets(
-    handlers,
-    run.targetIndex,
-    firstId,
-    factory,
-    rng.fork('handler-buckets'),
-    allocateCode
-  );
-  const handlerCodeByOriginal = new Map<string, string>();
-  for (const bucket of handlerBuckets) {
-    for (const handler of bucket.handlers) handlerCodeByOriginal.set(handler.originalId, bucket.proccode);
-  }
-  const entryKeySetId = factory.block(`dispatcher-entry-key-${run.targetIndex}-${firstId}`);
-  const entryKeyReporterId = factory.block(`dispatcher-entry-key-value-${run.targetIndex}-${firstId}`);
-  const entryKeyIndexId = factory.block(`dispatcher-entry-key-index-${run.targetIndex}-${firstId}`);
-  const entrySetId = factory.block(`dispatcher-entry-state-${run.targetIndex}-${firstId}`);
-  const entryReporterId = factory.block(`dispatcher-entry-transition-${run.targetIndex}-${firstId}`);
-  const entryIndexId = factory.block(`dispatcher-entry-transition-index-${run.targetIndex}-${firstId}`);
-  const entryTagSetId = factory.block(`dispatcher-entry-tag-${run.targetIndex}-${firstId}`);
-  const entryTagReporterId = factory.block(`dispatcher-entry-transition-tag-${run.targetIndex}-${firstId}`);
-  const entryTagIndexId = factory.block(`dispatcher-entry-tag-index-${run.targetIndex}-${firstId}`);
-  const entryCallId = factory.block(`dispatcher-entry-call-${run.targetIndex}-${firstId}`);
-  const entryTagFirst = rng.fork('entry-rail-order').integer(2) === 0;
-
-  for (const handler of handlers) {
-    const original = requireBlock(target, handler.originalId);
-    original.topLevel = false;
-    delete original.x;
-    delete original.y;
-    original.next = handler.changeKeyId;
-    const firstRailId = handler.tagFirst ? handler.setTagId : handler.setStateId;
-    const secondRailId = handler.tagFirst ? handler.setStateId : handler.setTagId;
-    target.blocks[handler.changeKeyId] = makeChangeStateFromListBlock(
-      handler.originalId,
-      firstRailId,
-      keyName,
-      keyId,
-      handler.keyDeltaReporterId
-    );
-    addKeyIndexedListReporter(
-      target,
-      handler.keyDeltaReporterId,
-      handler.keyDeltaIndexId,
-      handler.changeKeyId,
-      keyListName,
-      keyListId,
-      keyName,
-      keyId,
-      keyStore.modulus
-    );
-    target.blocks[handler.setStateId] = makeSetStateFromListBlock(
-      handler.tagFirst ? handler.setTagId : handler.changeKeyId,
-      handler.tagFirst ? handler.dispatchCallId : handler.setTagId,
-      stateName,
-      stateId,
-      handler.transitionReporterId,
-      false
-    );
-    addKeyIndexedListReporter(
-      target,
-      handler.transitionReporterId,
-      handler.transitionIndexId,
-      handler.setStateId,
-      transitionListName,
-      transitionListId,
-      keyName,
-      keyId,
-      stateStore.modulus
-    );
-    target.blocks[handler.setTagId] = makeSetStateFromListBlock(
-      handler.tagFirst ? handler.changeKeyId : handler.setStateId,
-      handler.tagFirst ? handler.setStateId : handler.dispatchCallId,
-      tagName,
-      tagId,
-      handler.tagReporterId,
-      false
-    );
-    addKeyIndexedListReporter(
-      target,
-      handler.tagReporterId,
-      handler.tagIndexId,
-      handler.setTagId,
-      tagListName,
-      tagListId,
-      keyName,
-      keyId,
-      tagStore.modulus
-    );
-    if (handler.dispatchCallId) {
-      target.blocks[handler.dispatchCallId] = makeProcedureCall(dispatcherCode, secondRailId, null, false);
+  const dispatcherCode = makeCode('dispatcher-code', run.blockIds.length + 1);
+  const dispatcherDefinitionId = factory.block(`${domain}-definition`);
+  const dispatcherPrototypeId = factory.block(`${domain}-prototype`);
+  const handlers: DispatcherHandler[] = run.blockIds.map((originalId, routeIndex) => ({
+    originalId,
+    setWitnessId: factory.block(`${domain}-leaf-witness-${routeIndex}`),
+    witnessModId: factory.block(`${domain}-leaf-witness-mod-${routeIndex}`),
+    witnessLengthId: factory.block(`${domain}-leaf-witness-length-${routeIndex}`),
+    witnessReporterId: factory.block(`${domain}-leaf-witness-reporter-${routeIndex}`),
+    setArmedId: factory.block(`${domain}-leaf-armed-${routeIndex}`),
+    routeIndex,
+    witness: requireItem(witnesses, routeIndex, 'dispatcher witness')
+  }));
+  if (scheme.expandedBridge === undefined) {
+    for (const handler of rng.fork('leaf-emission-order').shuffle(handlers)) {
+      const original = requireBlock(target, handler.originalId);
+      original.topLevel = false;
+      delete original.x;
+      delete original.y;
+      original.parent = null;
+      original.next = handler.setWitnessId;
+      target.blocks[handler.setWitnessId] = {
+        opcode: 'data_setvariableto',
+        next: handler.setArmedId,
+        parent: handler.originalId,
+        inputs: {VALUE: [2, handler.witnessModId]},
+        fields: {VARIABLE: [frame.witness.variableName, frame.witness.variableId]},
+        shadow: false,
+        topLevel: false
+      };
+      addDispatcherWitnessBucket(target, handler, scheme.modulus);
+      target.blocks[handler.setArmedId] = {
+        opcode: 'data_setvariableto',
+        next: null,
+        parent: handler.setWitnessId,
+        inputs: {VALUE: [1, [12, frame.y.variableName, frame.y.variableId]]},
+        fields: {VARIABLE: [frame.armed.variableName, frame.armed.variableId]},
+        shadow: false,
+        topLevel: false
+      };
     }
   }
 
+  if (scheme.expandedBridge !== undefined) {
+    emitExpandedDispatcher(
+      target,
+      run,
+      handlers,
+      frame,
+      scheme,
+      dispatcherDefinitionId,
+      dispatcherPrototypeId,
+      dispatcherCode,
+      factory,
+      rng.fork('expanded-dispatcher'),
+      domain
+    );
+    return;
+  }
+
+  emitPacketDispatcherProcedure(
+    target,
+    run,
+    handlers,
+    frame,
+    scheme,
+    dispatcherDefinitionId,
+    dispatcherPrototypeId,
+    dispatcherCode,
+    factory,
+    rng.fork('dispatcher-procedure'),
+    domain
+  );
+  emitPacketDispatcherEntry(
+    target,
+    run,
+    frame,
+    scheme,
+    dispatcherCode,
+    factory,
+    domain
+  );
+}
+
+function emitExpandedDispatcher(
+  target: ScratchTarget,
+  run: ConnectableLinearRun,
+  handlers: readonly DispatcherHandler[],
+  frame: DispatcherPacketFrame,
+  scheme: DispatcherPacketScheme,
+  definitionId: string,
+  prototypeId: string,
+  dispatcherCode: string,
+  factory: UniqueFactory,
+  rng: DeterministicGenerator,
+  domain: string
+): void {
+  const bridge = scheme.expandedBridge;
+  if (bridge === undefined) throw new Error('expanded dispatcher bridge is unavailable');
+  const aliases = makeTransientExpandedAliasHandlers(
+    target,
+    handlers,
+    frame,
+    bridge,
+    factory,
+    rng.fork('transient-alias-handlers'),
+    `${domain}-transient-aliases`
+  );
+  emitTransientExpandedDispatcherProcedure(
+    target,
+    run,
+    aliases,
+    frame,
+    bridge,
+    definitionId,
+    prototypeId,
+    dispatcherCode,
+    factory,
+    rng.fork('transient-body'),
+    `${domain}-transient-body`
+  );
+  emitTransientExpandedDispatcherEntry(
+    target,
+    run,
+    frame,
+    scheme,
+    bridge,
+    dispatcherCode,
+    factory,
+    `${domain}-transient-entry`
+  );
+}
+
+function emitDispatcherReplaceListItem(
+  target: ScratchTarget,
+  id: string,
+  parent: string | null,
+  next: string | null,
+  list: DispatcherPacketList,
+  index: DispatcherExpression,
+  value: DispatcherExpression,
+  factory: UniqueFactory,
+  domain: string
+): void {
+  target.blocks[id] = {
+    opcode: 'data_replaceitemoflist',
+    next,
+    parent,
+    inputs: {
+      INDEX: emitDispatcherExpression(target, id, index, factory, `${domain}-index`),
+      ITEM: emitDispatcherExpression(target, id, value, factory, `${domain}-value`)
+    },
+    fields: {LIST: [list.listName, list.listId]},
+    shadow: false,
+    topLevel: false
+  };
+}
+
+const TRANSIENT_EXPANDED_STATE_CELLS = 7;
+const MIN_EXPANDED_DISPATCHER_ALIASES = 4;
+
+function threadedCanonical(value: DispatcherExpression): DispatcherExpression {
+  return dispatcherMod(
+    dispatcherAdd(
+      dispatcherMod(value, THREADED_RECORD_PRIME),
+      dispatcherNumber(THREADED_RECORD_PRIME)
+    ),
+    THREADED_RECORD_PRIME
+  );
+}
+
+function threadedProduct(
+  left: DispatcherExpression,
+  right: DispatcherExpression
+): DispatcherExpression {
+  return dispatcherMod(dispatcherMultiply(left, right), THREADED_RECORD_PRIME);
+}
+
+function threadedSum(...values: readonly DispatcherExpression[]): DispatcherExpression {
+  if (values.length === 0) return dispatcherNumber(0);
+  let result = requireItem(values, 0, 'threaded sum operand');
+  for (let index = 1; index < values.length; index += 1) {
+    const value = requireItem(values, index, 'threaded sum operand');
+    result = dispatcherMod(dispatcherAdd(result, value), THREADED_RECORD_PRIME);
+  }
+  return result;
+}
+
+function threadedTagMixExpression(
+  left: DispatcherExpression,
+  right: DispatcherExpression,
+  constant: number
+): DispatcherExpression {
+  return threadedSum(
+    threadedProduct(left, right),
+    dispatcherNumber(threadedField(BigInt(constant)))
+  );
+}
+
+function threadedRecordTagContextExpression(
+  frame: DispatcherPacketFrame,
+  threaded: DispatcherThreadedFrame,
+  program: DispatcherThreadedProgram
+): DispatcherExpression {
+  const variable = dispatcherVariable;
+  const constant = (index: number): number => requireItem(
+    program.tagConstants,
+    index,
+    'threaded runtime tag constant'
+  );
+  const nextStep = threadedSum(variable(frame.step), dispatcherNumber(1));
+  const terminal = dispatcherEquals(nextStep, dispatcherNumber(program.routeCount));
+  const multiplier = dispatcherNumber(constant(1));
+  let context = threadedSum(variable(threaded.recordIndex), dispatcherNumber(constant(0)));
+  for (const value of [
+    threadedSum(variable(frame.handler), dispatcherNumber(1)),
+    threadedSum(variable(threaded.selectedHandler), dispatcherNumber(1)),
+    variable(frame.step),
+    nextStep,
+    terminal
+  ]) {
+    context = threadedSum(threadedProduct(context, multiplier), value);
+  }
+  return threadedSum(context, dispatcherNumber(constant(2)));
+}
+
+type ThreadedPairExpressions = readonly [DispatcherExpression, DispatcherExpression];
+
+function threadedRecordTagExpressions(
+  frame: DispatcherPacketFrame,
+  threaded: DispatcherThreadedFrame,
+  program: DispatcherThreadedProgram
+): ThreadedPairExpressions {
+  const variable = dispatcherVariable;
+  const constant = (index: number): number => requireItem(
+    program.tagConstants,
+    index,
+    'threaded runtime tag constant'
+  );
+  const left = threadedSum(
+    threadedProduct(
+      threadedSum(
+        variable(frame.label),
+        variable(threaded.nextKeyLeft),
+        variable(threaded.mix)
+      ),
+      threadedSum(
+        variable(frame.continuation),
+        variable(threaded.nextKeyRight),
+        variable(threaded.mix)
+      )
+    ),
+    dispatcherNumber(constant(3))
+  );
+  const right = threadedSum(
+    threadedProduct(
+      threadedSum(
+        variable(frame.label),
+        variable(threaded.nextKeyRight),
+        variable(threaded.mix)
+      ),
+      threadedSum(
+        variable(frame.continuation),
+        variable(threaded.nextKeyLeft),
+        variable(threaded.mix),
+        variable(threaded.recordIndex)
+      )
+    ),
+    dispatcherNumber(constant(4))
+  );
+  return [left, right];
+}
+
+function threadedSlotExpression(
+  keyLeft: DispatcherExpression,
+  keyRight: DispatcherExpression,
+  step: DispatcherExpression,
+  handler: DispatcherExpression,
+  program: DispatcherThreadedProgram
+): DispatcherExpression {
+  const constant = (index: number): DispatcherExpression => dispatcherNumber(requireItem(
+    program.slotConstants,
+    index,
+    'threaded runtime slot constant'
+  ));
+  const stateOrdinal = threadedSum(
+    threadedProduct(step, dispatcherNumber(program.aliasCount)),
+    handler,
+    dispatcherNumber(1)
+  );
+  const slotField = threadedSum(
+    threadedProduct(keyLeft, keyRight),
+    threadedProduct(stateOrdinal, constant(0)),
+    constant(1)
+  );
+  return dispatcherAdd(
+    dispatcherNumber(1),
+    dispatcherMod(slotField, THREADED_RECORD_PRIME - 1)
+  );
+}
+
+function threadedStateTag(
+  frame: DispatcherPacketFrame,
+  bridge: DispatcherExpandedBridge
+): DispatcherExpression {
+  const variable = dispatcherVariable;
+  const coefficient = (index: number): number => requireItem(
+    bridge.tagCoefficients,
+    index,
+    'threaded state tag coefficient'
+  );
+  return threadedSum(
+    threadedProduct(
+      threadedSum(
+        variable(frame.handler), variable(frame.slot), variable(frame.label),
+        variable(frame.salt), variable(frame.key), variable(frame.step),
+        dispatcherNumber(coefficient(0))
+      ),
+      threadedSum(
+        variable(frame.continuation), variable(frame.row), variable(frame.hash),
+        dispatcherNumber(coefficient(1))
+      )
+    ),
+    threadedProduct(
+      threadedSum(variable(frame.label), variable(frame.row), dispatcherNumber(coefficient(2))),
+      threadedSum(
+        variable(frame.continuation), variable(frame.salt), dispatcherNumber(coefficient(3))
+      )
+    ),
+    dispatcherNumber(coefficient(4))
+  );
+}
+
+function threadedRawAuthority(
+  frame: DispatcherPacketFrame,
+  bridge: DispatcherExpandedBridge,
+  tag: DispatcherExpression = threadedStateTag(frame, bridge)
+): DispatcherExpression {
+  return dispatcherJoin(
+    dispatcherVariable(frame.witness),
+    dispatcherJoin(dispatcherString(bridge.delimiter), tag)
+  );
+}
+
+function threadedHandlerAuthority(
+  frame: DispatcherPacketFrame,
+  bridge: DispatcherExpandedBridge
+): DispatcherExpression {
+  const variable = dispatcherVariable;
+  const coefficient = (index: number): number => requireItem(
+    bridge.tagCoefficients,
+    index,
+    'threaded handler authority coefficient'
+  );
+  return threadedSum(
+    threadedProduct(
+      threadedSum(variable(frame.handler), variable(frame.label), dispatcherNumber(coefficient(5))),
+      threadedSum(variable(frame.slot), variable(frame.continuation), dispatcherNumber(coefficient(6)))
+    ),
+    threadedProduct(
+      threadedSum(variable(frame.salt), variable(frame.step), dispatcherNumber(coefficient(7))),
+      threadedSum(variable(frame.row), variable(frame.key), dispatcherNumber(coefficient(8)))
+    )
+  );
+}
+
+function threadedTimerNonce(): DispatcherExpression {
+  return threadedCanonical(dispatcherRound(dispatcherMultiply(
+    dispatcherOperator('sensing_timer', {}),
+    dispatcherNumber(1_000)
+  )));
+}
+
+function threadedWitnessMix(frame: DispatcherPacketFrame): DispatcherExpression {
+  const witness = dispatcherVariable(frame.witness);
+  const boundedLength = threadedCanonical(dispatcherLength(witness));
+  return threadedSum(
+    threadedProduct(boundedLength, dispatcherNumber(65_537)),
+    dispatcherGreater(witness, dispatcherNumber(0))
+  );
+}
+
+function threadedChecksumFoldExpression(
+  checksum: DispatcherExpression,
+  word: DispatcherExpression,
+  index: DispatcherExpression
+): DispatcherExpression {
+  const left = dispatcherFloor(dispatcherBinary(
+    'operator_divide', 'NUM1', word, 'NUM2', dispatcherNumber(THREADED_RECORD_PRIME)
+  ));
+  const right = dispatcherMod(word, THREADED_RECORD_PRIME);
+  const cross = dispatcherMod(
+    dispatcherMultiply(
+      dispatcherAdd(left, dispatcherMultiply(index, dispatcherNumber(17))),
+      dispatcherAdd(
+        right,
+        dispatcherAdd(dispatcherMultiply(index, dispatcherNumber(31)), dispatcherNumber(7))
+      )
+    ),
+    DISPATCHER_CHECKSUM_MODULUS
+  );
+  return dispatcherMod(
+    dispatcherAdd(
+      dispatcherMod(dispatcherMultiply(checksum, dispatcherNumber(37)), DISPATCHER_CHECKSUM_MODULUS),
+      dispatcherAdd(
+        cross,
+        dispatcherAdd(
+          dispatcherMod(
+            dispatcherMultiply(left, dispatcherNumber(41)),
+            DISPATCHER_CHECKSUM_MODULUS
+          ),
+          dispatcherAdd(
+            dispatcherMod(
+              dispatcherMultiply(right, dispatcherNumber(43)),
+              DISPATCHER_CHECKSUM_MODULUS
+            ),
+            index
+          )
+        )
+      )
+    ),
+    DISPATCHER_CHECKSUM_MODULUS
+  );
+}
+
+function makeTransientExpandedAliasHandlers(
+  target: ScratchTarget,
+  handlers: readonly DispatcherHandler[],
+  frame: DispatcherPacketFrame,
+  bridge: DispatcherExpandedBridge,
+  factory: UniqueFactory,
+  rng: DeterministicGenerator,
+  domain: string
+): DispatcherExpandedAliasHandler[] {
+  const aliases: DispatcherExpandedAliasHandler[] = [];
+  for (const handler of handlers) {
+    const sourceIds = expandedCommandInputGraphIds(target, handler.originalId);
+    const routeRecords = requireItem(bridge.records, handler.routeIndex, 'transient expanded records');
+    for (const record of routeRecords) {
+      const aliasDomain = `${domain}-route-${handler.routeIndex}-handler-${record.handlerIndex}`;
+      const commandId = factory.block(`${aliasDomain}-command`);
+      const witnessId = factory.block(`${aliasDomain}-witness`);
+      const witnessReporterId = factory.block(`${aliasDomain}-witness-reporter`);
+      const armedId = factory.block(`${aliasDomain}-armed`);
+      cloneExpandedCommandInputGraph(target, handler.originalId, commandId, factory, `${aliasDomain}-clone`);
+      const command = requireBlock(target, commandId);
+      command.next = witnessId;
+      target.blocks[witnessId] = {
+        opcode: 'data_setvariableto',
+        next: armedId,
+        parent: commandId,
+        inputs: {VALUE: [2, witnessReporterId]},
+        fields: {VARIABLE: [frame.witness.variableName, frame.witness.variableId]},
+        shadow: false,
+        topLevel: false
+      };
+      addDispatcherRawWitness(target, {
+        setWitnessId: witnessId,
+        witnessReporterId,
+        witness: handler.witness
+      });
+      emitDispatcherSetVariable(
+        target,
+        armedId,
+        witnessId,
+        null,
+        frame.armed,
+        dispatcherNumber(1),
+        factory,
+        `${aliasDomain}-armed-value`
+      );
+      aliases.push({
+        routeIndex: handler.routeIndex,
+        handlerIndex: record.handlerIndex,
+        localSlot: record.localSlot,
+        currentLabel: record.currentLabel,
+        continuationShare: record.continuationShare,
+        salt: record.salt,
+        ...(record.routeSeed === undefined ? {} : {routeSeed: record.routeSeed}),
+        commandId
+      });
+    }
+    for (const sourceId of sourceIds) delete target.blocks[sourceId];
+  }
+  return rng.fork('transient-alias-emission-order').shuffle(aliases);
+}
+
+function emitTransientExpandedDispatcherProcedure(
+  target: ScratchTarget,
+  run: ConnectableLinearRun,
+  handlers: readonly DispatcherExpandedAliasHandler[],
+  frame: DispatcherPacketFrame,
+  bridge: DispatcherExpandedBridge,
+  definitionId: string,
+  prototypeId: string,
+  proccode: string,
+  factory: UniqueFactory,
+  rng: DeterministicGenerator,
+  domain: string
+): void {
+  if (bridge.program.digitOrder.length !== 0) {
+    throw new Error('legacy transient dispatcher program is unavailable');
+  }
+  emitRuntimeBoundTransientDispatcherProcedure(
+    target,
+    run,
+    handlers,
+    frame,
+    bridge,
+    definitionId,
+    prototypeId,
+    proccode,
+    factory,
+    rng,
+    `${domain}-runtime-bound`
+  );
+  return;
+}
+
+
+function makeDispatcherThreadedFrame(
+  target: ScratchTarget,
+  factory: UniqueFactory,
+  rng: DeterministicGenerator,
+  domain: string
+): DispatcherThreadedFrame {
+    const keys: readonly DispatcherThreadedFrameKey[] = [
+        'recordIndex', 'wordDomain', 'round', 'word', 'left', 'right', 'mix',
+        'roundValue', 'temporary', 'matches', 'selectedHandler', 'nextKeyLeft',
+        'nextKeyRight', 'tagLeft', 'tagRight', 'selectedSlot', 'selectedKeyLeft',
+        'selectedKeyRight'
+    ];
+    const frame = Object.fromEntries(keys.map(key => [key, {
+            variableId: factory.symbol('v_', `${domain}-${key}`),
+            variableName: factory.name('no-preserve', `${domain}-${key}`)
+        }])) as DispatcherThreadedFrame;
+    for (const key of rng.fork('declaration-order').shuffle(keys)) {
+        const variable = frame[key];
+        target.variables[variable.variableId] = [variable.variableName, 0];
+    }
+    return frame;
+}
+function threadedRoundTExpression(
+  frame: DispatcherPacketFrame,
+  threaded: DispatcherThreadedFrame,
+  program: DispatcherThreadedProgram
+): DispatcherExpression {
+    const variable = dispatcherVariable;
+    const roundKey = threadedSum(variable(frame.label), threadedProduct(variable(frame.continuation), variable(threaded.round)));
+    const tweak = threadedSum(
+      threadedProduct(variable(threaded.recordIndex), dispatcherNumber(program.nonceScale)),
+      threadedProduct(variable(threaded.wordDomain), dispatcherNumber(program.wordScale)),
+      threadedProduct(variable(frame.handler), dispatcherNumber(program.handlerScale)),
+      threadedProduct(
+        variable(threaded.selectedHandler),
+        dispatcherNumber(program.selectedHandlerScale)
+      ),
+      threadedProduct(variable(frame.step), dispatcherNumber(program.stepScale)),
+      threadedProduct(
+        dispatcherEquals(
+          dispatcherAdd(variable(frame.step), dispatcherNumber(1)),
+          dispatcherNumber(program.routeCount)
+        ),
+        dispatcherNumber(program.terminalScale)
+      )
+    );
+    return threadedSum(variable(threaded.left), threadedSum(roundKey, tweak));
+}
+function threadedRoundValueExpression(
+  threaded: DispatcherThreadedFrame,
+  program: DispatcherThreadedProgram
+): DispatcherExpression {
+    const variable = dispatcherVariable;
+    const a = threadedSum(dispatcherNumber(program.roundABase), threadedProduct(dispatcherNumber(program.roundAStep), variable(threaded.round)));
+    const b = threadedSum(dispatcherNumber(program.roundBBase), threadedProduct(dispatcherNumber(program.roundBStep), variable(threaded.round)));
+    return threadedSum(threadedProduct(variable(threaded.mix), variable(threaded.mix)), threadedSum(threadedProduct(a, variable(threaded.mix)), b));
+}
+function emitThreadedDecryptProcedure(
+  target: ScratchTarget,
+  frame: DispatcherPacketFrame,
+  threaded: DispatcherThreadedFrame,
+  program: DispatcherThreadedProgram,
+  definitionId: string,
+  prototypeId: string,
+  proccode: string,
+  factory: UniqueFactory,
+  domain: string
+): void {
+    const leftId = factory.block(`${domain}-left`);
+    const rightId = factory.block(`${domain}-right`);
+    const roundId = factory.block(`${domain}-round`);
+    const repeatId = factory.block(`${domain}-repeat`);
+    const mixId = factory.block(`${domain}-mix`);
+    const roundValueId = factory.block(`${domain}-round-value`);
+    const temporaryId = factory.block(`${domain}-temporary`);
+    const leftUpdateId = factory.block(`${domain}-left-update`);
+    const rightUpdateId = factory.block(`${domain}-right-update`);
+    const roundChangeId = factory.block(`${domain}-round-change`);
+    emitDispatcherSetVariable(target, leftId, definitionId, rightId, threaded.left, dispatcherFloor(dispatcherBinary('operator_divide', 'NUM1', dispatcherVariable(threaded.word), 'NUM2', dispatcherNumber(THREADED_RECORD_PRIME))), factory, `${domain}-left-value`);
+    emitDispatcherSetVariable(target, rightId, leftId, roundId, threaded.right, dispatcherMod(dispatcherVariable(threaded.word), THREADED_RECORD_PRIME), factory, `${domain}-right-value`);
+    emitDispatcherSetVariable(target, roundId, rightId, repeatId, threaded.round, dispatcherNumber(THREADED_FEISTEL_ROUNDS), factory, `${domain}-round-value`);
+    target.blocks[repeatId] = {
+        opcode: 'control_repeat',
+        next: null,
+        parent: roundId,
+        inputs: { TIMES: numericInput(THREADED_FEISTEL_ROUNDS), SUBSTACK: [2, mixId] },
+        fields: {}, shadow: false, topLevel: false
+    };
+    emitDispatcherSetVariable(target, mixId, repeatId, roundValueId, threaded.mix, threadedRoundTExpression(frame, threaded, program), factory, `${domain}-mix-value`);
+    emitDispatcherSetVariable(target, roundValueId, mixId, temporaryId, threaded.roundValue, threadedRoundValueExpression(threaded, program), factory, `${domain}-round-function-value`);
+    emitDispatcherSetVariable(target, temporaryId, roundValueId, leftUpdateId, threaded.temporary, dispatcherVariable(threaded.left), factory, `${domain}-temporary-value`);
+    emitDispatcherSetVariable(target, leftUpdateId, temporaryId, rightUpdateId, threaded.left, threadedCanonical(dispatcherSubtract(dispatcherVariable(threaded.right), dispatcherVariable(threaded.roundValue))), factory, `${domain}-left-update-value`);
+    emitDispatcherSetVariable(target, rightUpdateId, leftUpdateId, roundChangeId, threaded.right, dispatcherVariable(threaded.temporary), factory, `${domain}-right-update-value`);
+    emitDispatcherChangeVariable(target, roundChangeId, rightUpdateId, null, threaded.round, -1);
+    target.blocks[definitionId] = makeProcedureDefinition(prototypeId, leftId);
+    target.blocks[prototypeId] = makeProcedurePrototype(definitionId, proccode, true);
+}
+function emitThreadedTransientDispatcherProcedure(
+  target: ScratchTarget,
+  run: ConnectableLinearRun,
+  handlers: readonly DispatcherExpandedAliasHandler[],
+  frame: DispatcherPacketFrame,
+  bridge: DispatcherExpandedBridge,
+  program: DispatcherThreadedProgram,
+  definitionId: string,
+  prototypeId: string,
+  proccode: string,
+  factory: UniqueFactory,
+  rng: DeterministicGenerator,
+  domain: string
+): void {
+    const number = dispatcherNumber;
+    const variable = dispatcherVariable;
+    const threaded = makeDispatcherThreadedFrame(target, factory, rng.fork('threaded-frame'), `${domain}-threaded-frame`);
+    const existingCodes = collectProcedureCodes(target);
+    existingCodes.add(proccode);
+    let decryptCode = factory.name('no-preserve', `${domain}-decrypt-code`);
+    for (let suffix = 0; existingCodes.has(decryptCode); suffix += 1) {
+        decryptCode += suffix % 2 === 0 ? '\u200b' : '\u2060';
+    }
+    const decryptDefinitionId = factory.block(`${domain}-decrypt-definition`);
+    const decryptPrototypeId = factory.block(`${domain}-decrypt-prototype`);
+    emitThreadedDecryptProcedure(target, frame, threaded, program, decryptDefinitionId, decryptPrototypeId, decryptCode, factory, `${domain}-decrypt`);
+    const stateVariables = [
+        frame.handler,
+        frame.slot,
+        frame.label,
+        frame.continuation,
+        frame.salt,
+        frame.tag,
+        frame.row
+    ];
+    const stateLoadIds = stateVariables.map((_, index) => factory.block(`${domain}-state-${index}`));
+    const checksumResetId = factory.block(`${domain}-checksum-reset`);
+    const invalidResetId = factory.block(`${domain}-invalid-reset`);
+    const wordIndexResetId = factory.block(`${domain}-word-index-reset`);
+    const checksumRepeatId = factory.block(`${domain}-checksum-repeat`);
+    const checksumWordId = factory.block(`${domain}-checksum-word`);
+    const checksumCanonicalId = factory.block(`${domain}-checksum-canonical`);
+    const checksumInvalidId = factory.block(`${domain}-checksum-invalid`);
+    const checksumFoldId = factory.block(`${domain}-checksum-fold`);
+    const checksumIndexChangeId = factory.block(`${domain}-checksum-index-change`);
+    const commonCheckId = factory.block(`${domain}-common-check`);
+    const commonStopId = factory.block(`${domain}-common-stop`);
+    const phaseId = factory.block(`${domain}-phase`);
+    const terminalCheckId = factory.block(`${domain}-terminal-check`);
+    const terminalCommitId = factory.block(`${domain}-terminal-commit`);
+    const terminalStopId = factory.block(`${domain}-terminal-stop`);
+    const liveCheckId = factory.block(`${domain}-live-check`);
+    const liveStopId = factory.block(`${domain}-live-stop`);
+    const failureSentinelId = factory.block(`${domain}-failure-sentinel`);
+    const armedFailureId = factory.block(`${domain}-armed-failure`);
+    const armedStopId = factory.block(`${domain}-armed-stop`);
+    const nonceCacheId = factory.block(`${domain}-nonce-cache`);
+    const resultHashId = factory.block(`${domain}-result-hash`);
+    const rollingKeyId = factory.block(`${domain}-rolling-key`);
+    const selectedHandlerId = factory.block(`${domain}-selected-handler`);
+    const matchesResetId = factory.block(`${domain}-matches-reset`);
+    const recordIndexResetId = factory.block(`${domain}-record-index-reset`);
+    const scanRepeatId = factory.block(`${domain}-scan-repeat`);
+    const recordWordIndexId = factory.block(`${domain}-record-word-index`);
+    const recordWordIds = Array.from({ length: THREADED_RECORD_WORDS }, (_, index) => factory.block(`${domain}-record-word-${index}`));
+    const wordDomainIds = Array.from({ length: THREADED_RECORD_WORDS }, (_, index) => factory.block(`${domain}-word-domain-${index}`));
+    const decryptCallIds = Array.from({ length: THREADED_RECORD_WORDS }, (_, index) => factory.block(`${domain}-decrypt-call-${index}`));
+    const decodedLeftIds = Array.from({ length: THREADED_RECORD_WORDS }, (_, index) => factory.block(`${domain}-decoded-left-${index}`));
+    const decodedRightIds = Array.from({ length: THREADED_RECORD_WORDS }, (_, index) => factory.block(`${domain}-decoded-right-${index}`));
+    const nextWordIds = Array.from({ length: THREADED_RECORD_WORDS - 1 }, (_, index) => factory.block(`${domain}-next-word-${index}`));
+    const tagContextId = factory.block(`${domain}-tag-context`);
+    const recordMatchId = factory.block(`${domain}-record-match`);
+    const matchIncrementId = factory.block(`${domain}-match-increment`);
+    const selectedSlotId = factory.block(`${domain}-selected-slot`);
+    const selectedKeyLeftId = factory.block(`${domain}-selected-key-left`);
+    const selectedKeyRightId = factory.block(`${domain}-selected-key-right`);
+    const recordIndexChangeId = factory.block(`${domain}-record-index-change`);
+    const scanFailureId = factory.block(`${domain}-scan-failure`);
+    const scanStopId = factory.block(`${domain}-scan-stop`);
+    const stepChangeId = factory.block(`${domain}-step`);
+    const wrapId = factory.block(`${domain}-wrap`);
+    const handlerCommitId = factory.block(`${domain}-handler-commit`);
+    const slotCommitId = factory.block(`${domain}-slot-commit`);
+    const keyLeftCommitId = factory.block(`${domain}-key-left-commit`);
+    const keyRightCommitId = factory.block(`${domain}-key-right-commit`);
+    const tagCommitId = factory.block(`${domain}-tag-commit`);
+    const stateWriteIds = Array.from({ length: TRANSIENT_EXPANDED_STATE_CELLS }, (_, index) => factory.block(`${domain}-state-write-${index}`));
+    const authorityId = factory.block(`${domain}-authority`);
+    const rhoId = factory.block(`${domain}-rho`);
+    const armedCommitId = factory.block(`${domain}-armed-commit`);
+    for (let index = 0; index < stateLoadIds.length; index += 1) {
+        emitDispatcherSetVariable(target, requireItem(stateLoadIds, index, 'threaded state load'), index === 0 ? definitionId : requireItem(stateLoadIds, index - 1, 'prior threaded state load'), stateLoadIds[index + 1] ?? checksumResetId, requireItem(stateVariables, index, 'threaded state variable'), dispatcherListItem(bridge.program, number(index + 1)), factory, `${domain}-state-value-${index}`);
+    }
+    emitDispatcherSetVariable(target, checksumResetId, requireItem(stateLoadIds, stateLoadIds.length - 1, 'final state load'), invalidResetId, frame.checksum, number(0), factory, `${domain}-checksum-reset-value`);
+    emitDispatcherSetVariable(target, invalidResetId, checksumResetId, wordIndexResetId, frame.epoch, number(0), factory, `${domain}-invalid-reset-value`);
+    emitDispatcherSetVariable(target, wordIndexResetId, invalidResetId, checksumRepeatId, frame.index, number(1), factory, `${domain}-word-index-reset-value`);
+    const recordWordCount = program.records.length * THREADED_RECORD_WORDS;
+    target.blocks[checksumRepeatId] = {
+        opcode: 'control_repeat',
+        next: commonCheckId,
+        parent: wordIndexResetId,
+        inputs: { TIMES: numericInput(recordWordCount), SUBSTACK: [2, checksumWordId] },
+        fields: {}, shadow: false, topLevel: false
+    };
+    emitDispatcherSetVariable(target, checksumWordId, checksumRepeatId, checksumCanonicalId, threaded.word, dispatcherListItem(bridge.powers, variable(frame.index)), factory, `${domain}-checksum-word-value`);
+    const packedLimit = THREADED_RECORD_PRIME ** 2;
+    target.blocks[checksumCanonicalId] = {
+        opcode: 'control_if',
+        next: checksumFoldId,
+        parent: checksumWordId,
+        inputs: {
+            CONDITION: emitDispatcherExpression(target, checksumCanonicalId, dispatcherNot(dispatcherAll([
+                dispatcherEquals(variable(threaded.word), dispatcherFloor(variable(threaded.word))),
+                dispatcherGreater(variable(threaded.word), number(-1)),
+                dispatcherNot(dispatcherGreater(variable(threaded.word), number(packedLimit - 1)))
+            ])), factory, `${domain}-checksum-canonical-condition`),
+            SUBSTACK: [2, checksumInvalidId]
+        },
+        fields: {}, shadow: false, topLevel: false
+    };
+    emitDispatcherSetVariable(target, checksumInvalidId, checksumCanonicalId, null, frame.epoch, number(1), factory, `${domain}-checksum-invalid-value`);
+    emitDispatcherSetVariable(target, checksumFoldId, checksumCanonicalId, checksumIndexChangeId, frame.checksum, threadedChecksumFoldExpression(variable(frame.checksum), variable(threaded.word), variable(frame.index)), factory, `${domain}-checksum-fold-value`);
+    emitDispatcherChangeVariable(target, checksumIndexChangeId, checksumFoldId, null, frame.index, 1);
+    const canonicalField = (
+      value: DispatcherExpression,
+      nonzero = false
+    ): DispatcherExpression => dispatcherAll([
+        dispatcherEquals(value, dispatcherFloor(value)),
+        dispatcherGreater(value, number(nonzero ? 0 : -1)),
+        dispatcherNot(dispatcherGreater(value, number(THREADED_RECORD_PRIME - 1)))
+    ]);
+    target.blocks[commonCheckId] = {
+        opcode: 'control_if',
+        next: phaseId,
+        parent: checksumRepeatId,
+        inputs: {
+            CONDITION: emitDispatcherExpression(target, commonCheckId, dispatcherNot(dispatcherAll([
+                dispatcherEquals(dispatcherListLength(bridge.program), number(TRANSIENT_EXPANDED_STATE_CELLS)),
+                dispatcherEquals(dispatcherListLength(bridge.powers), number(recordWordCount)),
+                dispatcherEquals(variable(frame.checksum), number(bridge.programChecksum)),
+                dispatcherEquals(variable(frame.epoch), number(0)),
+                canonicalField(variable(frame.handler)),
+                dispatcherNot(dispatcherGreater(variable(frame.handler), number(bridge.aliasCount - 1))),
+                canonicalField(variable(frame.slot), true),
+                canonicalField(variable(frame.label), true),
+                canonicalField(variable(frame.continuation), true),
+                canonicalField(variable(frame.salt)),
+                canonicalField(variable(frame.row)),
+                canonicalField(variable(frame.tag)),
+                dispatcherEquals(variable(frame.tag), threadedStateTag(frame, bridge)),
+                dispatcherEquals(variable(frame.y), threadedRawAuthority(frame, bridge, variable(frame.tag))),
+                dispatcherEquals(variable(frame.rho), threadedHandlerAuthority(frame, bridge))
+            ])), factory, `${domain}-common-condition`),
+            SUBSTACK: [2, commonStopId]
+        },
+        fields: {}, shadow: false, topLevel: false
+    };
+    target.blocks[commonStopId] = makeDispatcherStop(commonCheckId);
+    target.blocks[phaseId] = {
+        opcode: 'control_if_else',
+        next: null,
+        parent: commonCheckId,
+        inputs: {
+            CONDITION: emitDispatcherExpression(target, phaseId, dispatcherEquals(variable(frame.armed), number(2)), factory, `${domain}-phase-condition`),
+            SUBSTACK: [2, terminalCheckId],
+            SUBSTACK2: [2, liveCheckId]
+        },
+        fields: {}, shadow: false, topLevel: false
+    };
+    const terminalRecords = bridge.terminalRecords;
+    if (terminalRecords === undefined || terminalRecords.length !== bridge.aliasCount) {
+        throw new Error('threaded terminal selector set is incomplete');
+    }
+    const terminalSelector = dispatcherAny(terminalRecords.map(record => dispatcherAll([
+        dispatcherEquals(variable(frame.handler), number(record.handlerIndex)),
+        dispatcherEquals(variable(frame.slot), number(record.localSlot))
+    ])));
+    target.blocks[terminalCheckId] = {
+        opcode: 'control_if_else',
+        next: null,
+        parent: phaseId,
+        inputs: {
+            CONDITION: emitDispatcherExpression(target, terminalCheckId, dispatcherAll([
+                dispatcherEquals(variable(frame.step), number(run.blockIds.length)),
+                terminalSelector
+            ]), factory, `${domain}-terminal-condition`),
+            SUBSTACK: [2, terminalCommitId],
+            SUBSTACK2: [2, terminalStopId]
+        },
+        fields: {}, shadow: false, topLevel: false
+    };
+    emitDispatcherSetVariable(target, terminalCommitId, terminalCheckId, null, frame.armed, number(0), factory, `${domain}-terminal-commit-value`);
+    target.blocks[terminalStopId] = makeDispatcherStop(terminalCheckId);
+    target.blocks[liveCheckId] = {
+        opcode: 'control_if_else',
+        next: null,
+        parent: phaseId,
+        inputs: {
+            CONDITION: emitDispatcherExpression(target, liveCheckId, dispatcherAll([
+                dispatcherEquals(variable(frame.armed), number(0)),
+                dispatcherNot(dispatcherGreater(variable(frame.step), number(run.blockIds.length - 1)))
+            ]), factory, `${domain}-live-condition`),
+            SUBSTACK: [2, failureSentinelId],
+            SUBSTACK2: [2, liveStopId]
+        },
+        fields: {}, shadow: false, topLevel: false
+    };
+    target.blocks[liveStopId] = makeDispatcherStop(liveCheckId);
+    emitDispatcherSetVariable(target, failureSentinelId, liveCheckId, '', frame.armed, number(-1), factory, `${domain}-failure-sentinel-value`);
+    const handlerOrder = rng.fork('handler-order').shuffle(Array.from({ length: bridge.aliasCount }, (_, value) => value));
+    const routes = handlerOrder.map(handlerIndex => {
+        const owned = rng.fork(`handler-${handlerIndex}-slot-order`).shuffle(handlers.filter(candidate => candidate.handlerIndex === handlerIndex));
+        if (owned.length !== run.blockIds.length) {
+            throw new Error('threaded universal handler command set is incomplete');
+        }
+        return {
+            handlerIndex,
+            outerIfId: factory.block(`${domain}-handler-${handlerIndex}`),
+            inner: owned.map(candidate => ({
+                handler: candidate,
+                ifId: factory.block(`${domain}-handler-${handlerIndex}-slot-${candidate.localSlot}`)
+            }))
+        };
+    });
+    requireBlock(target, failureSentinelId).next = requireItem(routes, 0, 'first threaded handler').outerIfId;
+    for (const [routeOrdinal, route] of routes.entries()) {
+        const priorId = routeOrdinal === 0
+            ? failureSentinelId
+            : requireItem(routes, routeOrdinal - 1, 'prior threaded handler').outerIfId;
+        const nextId = routes[routeOrdinal + 1]?.outerIfId ?? armedFailureId;
+        const firstInner = requireItem(route.inner, 0, 'first threaded command');
+        target.blocks[route.outerIfId] = {
+            opcode: 'control_if',
+            next: nextId,
+            parent: priorId,
+            inputs: {
+                CONDITION: emitDispatcherExpression(target, route.outerIfId, dispatcherEquals(variable(frame.handler), number(route.handlerIndex)), factory, `${domain}-handler-condition-${route.handlerIndex}`),
+                SUBSTACK: [2, firstInner.ifId]
+            },
+            fields: {}, shadow: false, topLevel: false
+        };
+        for (const [innerOrdinal, command] of route.inner.entries()) {
+            target.blocks[command.ifId] = {
+                opcode: 'control_if',
+                next: route.inner[innerOrdinal + 1]?.ifId ?? null,
+                parent: innerOrdinal === 0
+                    ? route.outerIfId
+                    : requireItem(route.inner, innerOrdinal - 1, 'prior threaded command').ifId,
+                inputs: {
+                    CONDITION: emitDispatcherExpression(target, command.ifId, dispatcherEquals(variable(frame.slot), number(command.handler.localSlot)), factory, `${domain}-slot-condition-${route.handlerIndex}-${command.handler.localSlot}`),
+                    SUBSTACK: [2, command.handler.commandId]
+                },
+                fields: {}, shadow: false, topLevel: false
+            };
+            requireBlock(target, command.handler.commandId).parent = command.ifId;
+        }
+    }
+    target.blocks[armedFailureId] = {
+        opcode: 'control_if',
+        next: nonceCacheId,
+        parent: requireItem(routes, routes.length - 1, 'final threaded handler').outerIfId,
+        inputs: {
+            CONDITION: emitDispatcherExpression(target, armedFailureId, dispatcherNot(dispatcherEquals(variable(frame.armed), number(1))), factory, `${domain}-armed-condition`),
+            SUBSTACK: [2, armedStopId]
+        },
+        fields: {}, shadow: false, topLevel: false
+    };
+    target.blocks[armedStopId] = makeDispatcherStop(armedFailureId);
+    emitDispatcherSetVariable(target, nonceCacheId, armedFailureId, resultHashId, frame.row, threadedTimerNonce(), factory, `${domain}-nonce-cache-value`);
+    emitDispatcherSetVariable(target, resultHashId, nonceCacheId, rollingKeyId, frame.hash, threadedSum(threadedTagMixExpression(variable(frame.hash), threadedWitnessMix(frame), 65_537), threadedTagMixExpression(variable(frame.salt), variable(frame.row), 131_071), variable(frame.step)), factory, `${domain}-result-hash-value`);
+    emitDispatcherSetVariable(target, rollingKeyId, resultHashId, selectedHandlerId, frame.key, threadedSum(threadedTagMixExpression(variable(frame.key), variable(frame.hash), 262_147), threadedTagMixExpression(variable(frame.label), variable(frame.continuation), 524_309), threadedWitnessMix(frame), variable(frame.row)), factory, `${domain}-rolling-key-value`);
+    emitDispatcherSetVariable(target, selectedHandlerId, rollingKeyId, matchesResetId, threaded.selectedHandler, dispatcherMod(dispatcherAdd(variable(frame.handler), dispatcherAdd(dispatcherMod(threadedSum(variable(frame.row), threadedWitnessMix(frame), variable(frame.key), variable(frame.hash), variable(frame.salt)), bridge.aliasCount), number(1))), bridge.aliasCount), factory, `${domain}-selected-handler-value`);
+    emitDispatcherSetVariable(target, matchesResetId, selectedHandlerId, recordIndexResetId, threaded.matches, number(0), factory, `${domain}-matches-reset-value`);
+    emitDispatcherSetVariable(target, recordIndexResetId, matchesResetId, scanRepeatId, threaded.recordIndex, number(1), factory, `${domain}-record-index-reset-value`);
+    target.blocks[scanRepeatId] = {
+        opcode: 'control_repeat',
+        next: scanFailureId,
+        parent: recordIndexResetId,
+        inputs: { TIMES: numericInput(program.records.length), SUBSTACK: [2, recordWordIndexId] },
+        fields: {}, shadow: false, topLevel: false
+    };
+    emitDispatcherSetVariable(target, recordWordIndexId, scanRepeatId, requireItem(recordWordIds, 0, 'first threaded record word'), frame.index, dispatcherAdd(dispatcherMultiply(dispatcherSubtract(variable(threaded.recordIndex), number(1)), number(THREADED_RECORD_WORDS)), number(1)), factory, `${domain}-record-word-index-value`);
+    const decodedPairs: readonly (readonly [
+      DispatcherFrameVariable,
+      DispatcherFrameVariable
+    ])[] = [
+        [threaded.nextKeyLeft, threaded.nextKeyRight],
+        [threaded.tagLeft, threaded.tagRight]
+    ];
+    for (let wordIndex = 0; wordIndex < THREADED_RECORD_WORDS; wordIndex += 1) {
+        const priorId = wordIndex === 0
+            ? recordWordIndexId
+            : requireItem(nextWordIds, wordIndex - 1, 'prior threaded word advance');
+        emitDispatcherSetVariable(target, requireItem(recordWordIds, wordIndex, 'threaded record word'), priorId, requireItem(wordDomainIds, wordIndex, 'threaded word domain'), threaded.word, dispatcherListItem(bridge.powers, variable(frame.index)), factory, `${domain}-record-word-value-${wordIndex}`);
+        emitDispatcherSetVariable(target, requireItem(wordDomainIds, wordIndex, 'threaded word domain'), requireItem(recordWordIds, wordIndex, 'threaded record word'), requireItem(decryptCallIds, wordIndex, 'threaded decrypt call'), threaded.wordDomain, number(wordIndex + 1), factory, `${domain}-word-domain-value-${wordIndex}`);
+        target.blocks[requireItem(decryptCallIds, wordIndex, 'threaded decrypt call')] = makeProcedureCall(decryptCode, requireItem(wordDomainIds, wordIndex, 'threaded word domain'), requireItem(decodedLeftIds, wordIndex, 'threaded decoded left'), false, true);
+        const decodedPair = requireItem(decodedPairs, wordIndex, 'threaded decoded pair');
+        emitDispatcherSetVariable(target, requireItem(decodedLeftIds, wordIndex, 'threaded decoded left'), requireItem(decryptCallIds, wordIndex, 'threaded decrypt call'), requireItem(decodedRightIds, wordIndex, 'threaded decoded right'), decodedPair[0], variable(threaded.left), factory, `${domain}-decoded-left-value-${wordIndex}`);
+        emitDispatcherSetVariable(target, requireItem(decodedRightIds, wordIndex, 'threaded decoded right'), requireItem(decodedLeftIds, wordIndex, 'threaded decoded left'), wordIndex + 1 < THREADED_RECORD_WORDS
+            ? requireItem(nextWordIds, wordIndex, 'threaded word advance')
+            : tagContextId, decodedPair[1], variable(threaded.right), factory, `${domain}-decoded-right-value-${wordIndex}`);
+        if (wordIndex + 1 < THREADED_RECORD_WORDS) {
+            emitDispatcherChangeVariable(target, requireItem(nextWordIds, wordIndex, 'threaded word advance'), requireItem(decodedRightIds, wordIndex, 'threaded decoded right'), requireItem(recordWordIds, wordIndex + 1, 'next threaded record word'), frame.index, 1);
+        }
+    }
+    const tagContext = threadedRecordTagContextExpression(
+      frame,
+      threaded,
+      program
+    );
+    emitDispatcherSetVariable(
+      target,
+      tagContextId,
+      requireItem(decodedRightIds, THREADED_RECORD_WORDS - 1, 'final decoded word'),
+      recordMatchId,
+      threaded.mix,
+      tagContext,
+      factory,
+      `${domain}-tag-context-value`
+    );
+    const [expectedTagLeft, expectedTagRight] = threadedRecordTagExpressions(
+      frame,
+      threaded,
+      program
+    );
+    target.blocks[recordMatchId] = {
+        opcode: 'control_if',
+        next: recordIndexChangeId,
+        parent: tagContextId,
+        inputs: {
+            CONDITION: emitDispatcherExpression(target, recordMatchId, dispatcherAll([
+                dispatcherGreater(variable(threaded.nextKeyLeft), number(0)),
+                dispatcherGreater(variable(threaded.nextKeyRight), number(0)),
+                dispatcherEquals(variable(threaded.tagLeft), expectedTagLeft),
+                dispatcherEquals(variable(threaded.tagRight), expectedTagRight)
+            ]), factory, `${domain}-record-match-condition`),
+            SUBSTACK: [2, matchIncrementId]
+        },
+        fields: {}, shadow: false, topLevel: false
+    };
+    emitDispatcherChangeVariable(target, matchIncrementId, recordMatchId, selectedKeyLeftId, threaded.matches, 1);
+    emitDispatcherSetVariable(target, selectedKeyLeftId, matchIncrementId, selectedKeyRightId, threaded.selectedKeyLeft, variable(threaded.nextKeyLeft), factory, `${domain}-selected-key-left-value`);
+    emitDispatcherSetVariable(target, selectedKeyRightId, selectedKeyLeftId, null, threaded.selectedKeyRight, variable(threaded.nextKeyRight), factory, `${domain}-selected-key-right-value`);
+    emitDispatcherChangeVariable(target, recordIndexChangeId, recordMatchId, null, threaded.recordIndex, 1);
+    target.blocks[scanFailureId] = {
+        opcode: 'control_if',
+        next: selectedSlotId,
+        parent: scanRepeatId,
+        inputs: {
+            CONDITION: emitDispatcherExpression(target, scanFailureId, dispatcherNot(dispatcherEquals(variable(threaded.matches), number(1))), factory, `${domain}-scan-failure-condition`),
+            SUBSTACK: [2, scanStopId]
+        },
+        fields: {}, shadow: false, topLevel: false
+    };
+    target.blocks[scanStopId] = makeDispatcherStop(scanFailureId);
+    emitDispatcherSetVariable(
+      target,
+      selectedSlotId,
+      scanFailureId,
+      stepChangeId,
+      threaded.selectedSlot,
+      threadedSlotExpression(
+        variable(threaded.selectedKeyLeft),
+        variable(threaded.selectedKeyRight),
+        dispatcherAdd(variable(frame.step), number(1)),
+        variable(threaded.selectedHandler),
+        program
+      ),
+      factory,
+      `${domain}-selected-slot-value`
+    );
+    emitDispatcherChangeVariable(target, stepChangeId, selectedSlotId, wrapId, frame.step, 1);
+    emitDispatcherSetVariable(target, wrapId, stepChangeId, handlerCommitId, frame.salt, threadedSum(threadedTagMixExpression(variable(frame.salt), variable(frame.row), 1_048_583), threadedTagMixExpression(variable(threaded.selectedKeyLeft), variable(threaded.selectedKeyRight), 2_097_169), threadedProduct(variable(threaded.selectedHandler), variable(threaded.selectedSlot)), threadedWitnessMix(frame), variable(frame.key), variable(frame.hash), variable(frame.step)), factory, `${domain}-wrap-value`);
+    emitDispatcherSetVariable(target, handlerCommitId, wrapId, slotCommitId, frame.handler, variable(threaded.selectedHandler), factory, `${domain}-handler-commit-value`);
+    emitDispatcherSetVariable(target, slotCommitId, handlerCommitId, keyLeftCommitId, frame.slot, variable(threaded.selectedSlot), factory, `${domain}-slot-commit-value`);
+    emitDispatcherSetVariable(target, keyLeftCommitId, slotCommitId, keyRightCommitId, frame.label, variable(threaded.selectedKeyLeft), factory, `${domain}-key-left-commit-value`);
+    emitDispatcherSetVariable(target, keyRightCommitId, keyLeftCommitId, tagCommitId, frame.continuation, variable(threaded.selectedKeyRight), factory, `${domain}-key-right-commit-value`);
+    emitDispatcherSetVariable(target, tagCommitId, keyRightCommitId, requireItem(stateWriteIds, 0, 'first threaded state write'), frame.tag, threadedStateTag(frame, bridge), factory, `${domain}-tag-commit-value`);
+    const stateValues = [
+        variable(frame.handler),
+        variable(frame.slot),
+        variable(frame.label),
+        variable(frame.continuation),
+        variable(frame.salt),
+        variable(frame.tag),
+        variable(frame.row)
+    ];
+    for (let index = 0; index < stateWriteIds.length; index += 1) {
+        emitDispatcherReplaceListItem(target, requireItem(stateWriteIds, index, 'threaded state write'), index === 0 ? tagCommitId : requireItem(stateWriteIds, index - 1, 'prior threaded state write'), stateWriteIds[index + 1] ?? authorityId, bridge.program, number(index + 1), requireItem(stateValues, index, 'threaded state value'), factory, `${domain}-state-write-${index}`);
+    }
+    emitDispatcherSetVariable(target, authorityId, requireItem(stateWriteIds, stateWriteIds.length - 1, 'final threaded state write'), rhoId, frame.y, threadedRawAuthority(frame, bridge, variable(frame.tag)), factory, `${domain}-authority-value`);
+    emitDispatcherSetVariable(target, rhoId, authorityId, armedCommitId, frame.rho, threadedHandlerAuthority(frame, bridge), factory, `${domain}-rho-value`);
+    emitDispatcherSetVariable(target, armedCommitId, rhoId, null, frame.armed, number(0), factory, `${domain}-armed-commit-value`);
+    target.blocks[definitionId] = makeProcedureDefinition(prototypeId, requireItem(stateLoadIds, 0, 'threaded dispatcher state entry'));
+    target.blocks[prototypeId] = makeProcedurePrototype(definitionId, proccode, true);
+}
+function emitRuntimeBoundTransientDispatcherProcedure(
+  target: ScratchTarget,
+  run: ConnectableLinearRun,
+  handlers: readonly DispatcherExpandedAliasHandler[],
+  frame: DispatcherPacketFrame,
+  bridge: DispatcherExpandedBridge,
+  definitionId: string,
+  prototypeId: string,
+  proccode: string,
+  factory: UniqueFactory,
+  rng: DeterministicGenerator,
+  domain: string
+): void {
+  if (bridge.threadedProgram === undefined) {
+    throw new Error('threaded dispatcher program is unavailable');
+  }
+  emitThreadedTransientDispatcherProcedure(
+    target,
+    run,
+    handlers,
+    frame,
+    bridge,
+    bridge.threadedProgram,
+    definitionId,
+    prototypeId,
+    proccode,
+    factory,
+    rng.fork('threaded-program'),
+    `${domain}-threaded`
+  );
+  return;
+}
+
+function emitThreadedTransientDispatcherEntry(
+  target: ScratchTarget,
+  run: ConnectableLinearRun,
+  frame: DispatcherPacketFrame,
+  scheme: DispatcherPacketScheme,
+  bridge: DispatcherExpandedBridge,
+  dispatcherCode: string,
+  factory: UniqueFactory,
+  domain: string
+): void {
   const entryParent = run.connector?.kind === 'top-level'
     ? null
     : (run.connector?.ownerId ?? run.predecessorId);
-  const entryFirstRailId = entryTagFirst ? entryTagSetId : entrySetId;
-  const entrySecondRailId = entryTagFirst ? entrySetId : entryTagSetId;
-  target.blocks[entryKeySetId] = makeSetStateFromListBlock(
+  const entryLeft = bridge.entryRecord.baseKeyLeft;
+  const entryRight = bridge.entryRecord.baseKeyRight;
+  if (entryLeft === undefined || entryRight === undefined) {
+    throw new Error('threaded dispatcher entry key pair is unavailable');
+  }
+  const program = bridge.threadedProgram;
+  if (program === undefined) throw new Error('threaded dispatcher program is unavailable');
+  const setters: readonly {
+    readonly key: DispatcherPacketFrameKey;
+    readonly value: DispatcherExpression;
+  }[] = [
+    {key: 'step', value: dispatcherNumber(0)},
+    {key: 'witness', value: dispatcherNumber(scheme.entry.witness)},
+    {key: 'hash', value: threadedWitnessMix(frame)},
+    {key: 'key', value: dispatcherNumber(scheme.entry.key)},
+    {key: 'row', value: dispatcherNumber(scheme.entry.rho)},
+    {key: 'handler', value: dispatcherNumber(bridge.entryRecord.handlerIndex)},
+    {
+      key: 'slot',
+      value: threadedSlotExpression(
+        dispatcherNumber(entryLeft),
+        dispatcherNumber(entryRight),
+        dispatcherNumber(0),
+        dispatcherNumber(bridge.entryRecord.handlerIndex),
+        program
+      )
+    },
+    {key: 'label', value: dispatcherNumber(entryLeft)},
+    {key: 'continuation', value: dispatcherNumber(entryRight)},
+    {
+      key: 'salt',
+      value: threadedSum(
+        dispatcherVariable(frame.key),
+        dispatcherVariable(frame.hash),
+        dispatcherVariable(frame.row),
+        dispatcherVariable(frame.handler),
+        dispatcherVariable(frame.slot)
+      )
+    },
+    {key: 'tag', value: threadedStateTag(frame, bridge)},
+    {key: 'armed', value: dispatcherNumber(-1)}
+  ];
+  const setterIds = setters.map((_, index) => factory.block(`${domain}-set-${index}`));
+  const stateWriteIds = Array.from(
+    {length: TRANSIENT_EXPANDED_STATE_CELLS},
+    (_, index) => factory.block(`${domain}-state-write-${index}`)
+  );
+  const authorityId = factory.block(`${domain}-authority`);
+  const rhoId = factory.block(`${domain}-rho`);
+  const armedId = factory.block(`${domain}-armed`);
+  const driverCallIds = Array.from(
+    {length: run.blockIds.length},
+    (_, index) => factory.block(`${domain}-call-${index}`)
+  );
+  const terminalPhaseId = factory.block(`${domain}-terminal-phase`);
+  const terminalCallId = factory.block(`${domain}-terminal-call`);
+  const terminalFailureId = factory.block(`${domain}-terminal-failure`);
+  for (let index = 0; index < setters.length; index += 1) {
+    const setter = requireItem(setters, index, 'threaded entry setter');
+    emitDispatcherSetVariable(
+      target,
+      requireItem(setterIds, index, 'threaded entry setter id'),
+      index === 0 ? entryParent : requireItem(setterIds, index - 1, 'prior threaded entry setter'),
+      setterIds[index + 1] ?? requireItem(stateWriteIds, 0, 'first threaded entry state write'),
+      frame[setter.key],
+      setter.value,
+      factory,
+      `${domain}-set-value-${index}`,
+      index === 0 ? run.wasTopLevel : false,
+      index === 0 ? run.x : undefined,
+      index === 0 ? run.y : undefined
+    );
+  }
+  const stateValues = [
+    dispatcherVariable(frame.handler),
+    dispatcherVariable(frame.slot),
+    dispatcherVariable(frame.label),
+    dispatcherVariable(frame.continuation),
+    dispatcherVariable(frame.salt),
+    dispatcherVariable(frame.tag),
+    dispatcherVariable(frame.row)
+  ];
+  for (let index = 0; index < stateWriteIds.length; index += 1) {
+    emitDispatcherReplaceListItem(
+      target,
+      requireItem(stateWriteIds, index, 'threaded entry state write'),
+      index === 0
+        ? requireItem(setterIds, setterIds.length - 1, 'final threaded entry setter')
+        : requireItem(stateWriteIds, index - 1, 'prior threaded entry state write'),
+      stateWriteIds[index + 1] ?? authorityId,
+      bridge.program,
+      dispatcherNumber(index + 1),
+      requireItem(stateValues, index, 'threaded entry state value'),
+      factory,
+      `${domain}-state-write-${index}`
+    );
+  }
+  emitDispatcherSetVariable(
+    target,
+    authorityId,
+    requireItem(stateWriteIds, stateWriteIds.length - 1, 'final threaded entry state write'),
+    rhoId,
+    frame.y,
+    threadedRawAuthority(frame, bridge, dispatcherVariable(frame.tag)),
+    factory,
+    `${domain}-authority-value`
+  );
+  emitDispatcherSetVariable(
+    target,
+    rhoId,
+    authorityId,
+    armedId,
+    frame.rho,
+    threadedHandlerAuthority(frame, bridge),
+    factory,
+    `${domain}-rho-value`
+  );
+  emitDispatcherSetVariable(
+    target,
+    armedId,
+    rhoId,
+    requireItem(driverCallIds, 0, 'threaded dispatcher entry call'),
+    frame.armed,
+    dispatcherNumber(0),
+    factory,
+    `${domain}-armed-value`
+  );
+  for (const [index, callId] of driverCallIds.entries()) {
+    target.blocks[callId] = makeProcedureCall(
+      dispatcherCode,
+      index === 0 ? armedId : requireItem(driverCallIds, index - 1, 'prior threaded call'),
+      driverCallIds[index + 1] ?? terminalPhaseId,
+      false,
+      true
+    );
+  }
+  emitDispatcherChangeVariable(
+    target,
+    terminalPhaseId,
+    requireItem(driverCallIds, driverCallIds.length - 1, 'final threaded call'),
+    terminalCallId,
+    frame.armed,
+    2
+  );
+  target.blocks[terminalCallId] = makeProcedureCall(
+    dispatcherCode, terminalPhaseId, terminalFailureId, false, true
+  );
+  target.blocks[terminalFailureId] = {
+    opcode: 'control_if_else',
+    next: null,
+    parent: terminalCallId,
+    inputs: {
+      CONDITION: [1, [12, frame.armed.variableName, frame.armed.variableId]],
+      ...(run.successorId === null ? {} : {SUBSTACK2: [2, run.successorId]})
+    },
+    fields: {}, shadow: false, topLevel: false
+  };
+  replaceRunEntry(target, run, requireItem(setterIds, 0, 'threaded entry'));
+  if (run.successorId !== null) requireBlock(target, run.successorId).parent = terminalFailureId;
+}
+
+function emitTransientExpandedDispatcherEntry(
+  target: ScratchTarget,
+  run: ConnectableLinearRun,
+  frame: DispatcherPacketFrame,
+  scheme: DispatcherPacketScheme,
+  bridge: DispatcherExpandedBridge,
+  dispatcherCode: string,
+  factory: UniqueFactory,
+  domain: string
+): void {
+  if (bridge.threadedProgram === undefined) {
+    throw new Error('threaded dispatcher entry program is unavailable');
+  }
+  emitThreadedTransientDispatcherEntry(
+    target,
+    run,
+    frame,
+    scheme,
+    bridge,
+    dispatcherCode,
+    factory,
+    `${domain}-threaded`
+  );
+  return;
+}
+
+function emitPacketDispatcherEntry(
+  target: ScratchTarget,
+  run: ConnectableLinearRun,
+  frame: DispatcherPacketFrame,
+  scheme: DispatcherPacketScheme,
+  dispatcherCode: string,
+  factory: UniqueFactory,
+  domain: string
+): void {
+  const entryParent = run.connector?.kind === 'top-level'
+    ? null
+    : (run.connector?.ownerId ?? run.predecessorId);
+  const stepId = factory.block(`${domain}-entry-step`);
+  const witnessId = factory.block(`${domain}-entry-witness`);
+  const keyId = factory.block(`${domain}-entry-key`);
+  const xId = factory.block(`${domain}-entry-x`);
+  const yId = factory.block(`${domain}-entry-y`);
+  const armedId = factory.block(`${domain}-entry-armed`);
+  const driverCallIds = Array.from({length: run.blockIds.length}, (_, index) => (
+    factory.block(`${domain}-entry-call-${index}`)
+  ));
+  const terminalPhaseId = factory.block(`${domain}-entry-terminal-phase`);
+  const terminalCallId = factory.block(`${domain}-entry-terminal-call`);
+  const terminalFailureId = factory.block(`${domain}-entry-terminal-failure`);
+  emitDispatcherSetVariable(
+    target,
+    stepId,
     entryParent,
-    entryFirstRailId,
-    keyName,
-    keyId,
-    entryKeyReporterId,
+    witnessId,
+    frame.step,
+    dispatcherNumber(0),
+    factory,
+    `${domain}-entry-step-value`,
     run.wasTopLevel,
     run.x,
     run.y
   );
-  addKeyIndexedListReporter(
+  emitDispatcherSetVariable(
     target,
-    entryKeyReporterId,
-    entryKeyIndexId,
-    entryKeySetId,
-    keyListName,
-    keyListId,
-    keyName,
+    witnessId,
+    stepId,
     keyId,
-    keyStore.modulus
-  );
-  target.blocks[entrySetId] = makeSetStateFromListBlock(
-    entryTagFirst ? entryTagSetId : entryKeySetId,
-    entryTagFirst ? entryCallId : entryTagSetId,
-    stateName,
-    stateId,
-    entryReporterId,
-    false
-  );
-  addKeyIndexedListReporter(
-    target,
-    entryReporterId,
-    entryIndexId,
-    entrySetId,
-    transitionListName,
-    transitionListId,
-    keyName,
-    keyId,
-    stateStore.modulus
-  );
-  target.blocks[entryTagSetId] = makeSetStateFromListBlock(
-    entryTagFirst ? entryKeySetId : entrySetId,
-    entryTagFirst ? entrySetId : entryCallId,
-    tagName,
-    tagId,
-    entryTagReporterId,
-    false
-  );
-  addKeyIndexedListReporter(
-    target,
-    entryTagReporterId,
-    entryTagIndexId,
-    entryTagSetId,
-    tagListName,
-    tagListId,
-    keyName,
-    keyId,
-    tagStore.modulus
-  );
-  target.blocks[entryCallId] = makeProcedureCall(dispatcherCode, entrySecondRailId, run.successorId, false);
-  replaceRunEntry(target, run, entryKeySetId);
-  const successor = run.successorId ? blockAt(target, run.successorId) : undefined;
-  if (successor) successor.parent = entryCallId;
-  insertDualRail(
-    target,
-    {targetIndex: run.targetIndex, predecessorId: entrySecondRailId, successorId: entryCallId},
-    railState,
+    frame.witness,
+    dispatcherNumber(scheme.entry.witness),
     factory,
-    rng.fork('entry-dual-rail'),
-    `dispatcher-dual-${run.targetIndex}-${firstId}`
+    `${domain}-entry-witness-value`
+  );
+  emitDispatcherSetVariable(
+    target,
+    keyId,
+    witnessId,
+    xId,
+    frame.key,
+    dispatcherNumber(scheme.entry.key),
+    factory,
+    `${domain}-entry-key-value`
+  );
+  emitDispatcherSetVariable(
+    target,
+    xId,
+    keyId,
+    yId,
+    frame.rho,
+    dispatcherNumber(scheme.entry.rho),
+    factory,
+    `${domain}-entry-x-value`
+  );
+  emitDispatcherSetVariable(
+    target,
+    yId,
+    xId,
+    armedId,
+    frame.y,
+    dispatcherNumber(scheme.entry.y),
+    factory,
+    `${domain}-entry-y-value`
+  );
+  emitDispatcherSetVariable(
+    target,
+    armedId,
+    yId,
+    requireItem(driverCallIds, 0, 'dispatcher entry call'),
+    frame.armed,
+    dispatcherNumber(0),
+    factory,
+    `${domain}-entry-armed-value`
+  );
+  for (const [index, callId] of driverCallIds.entries()) {
+    target.blocks[callId] = makeProcedureCall(
+      dispatcherCode,
+      index === 0 ? armedId : requireItem(driverCallIds, index - 1, 'previous dispatcher entry call'),
+      driverCallIds[index + 1] ?? terminalPhaseId,
+      false,
+      true
+    );
+  }
+  emitDispatcherChangeVariable(
+    target,
+    terminalPhaseId,
+    requireItem(driverCallIds, driverCallIds.length - 1, 'final dispatcher entry call'),
+    terminalCallId,
+    frame.armed,
+    2
+  );
+  target.blocks[terminalCallId] = makeProcedureCall(
+    dispatcherCode,
+    terminalPhaseId,
+    terminalFailureId,
+    false,
+    true
+  );
+  target.blocks[terminalFailureId] = {
+    opcode: 'control_if_else',
+    next: null,
+    parent: terminalCallId,
+    inputs: {
+      CONDITION: [1, [12, frame.armed.variableName, frame.armed.variableId]],
+      ...(run.successorId === null ? {} : {SUBSTACK2: [2, run.successorId]})
+    },
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  replaceRunEntry(target, run, stepId);
+  if (run.successorId !== null) requireBlock(target, run.successorId).parent = terminalFailureId;
+}
+
+function emitPacketDispatcherProcedure(
+  target: ScratchTarget,
+  run: ConnectableLinearRun,
+  handlers: readonly DispatcherHandler[],
+  frame: DispatcherPacketFrame,
+  scheme: DispatcherPacketScheme,
+  definitionId: string,
+  prototypeId: string,
+  proccode: string,
+  factory: UniqueFactory,
+  rng: DeterministicGenerator,
+  domain: string
+): void {
+  const number = dispatcherNumber;
+  const variable = (value: DispatcherFrameVariable): DispatcherExpression => dispatcherVariable(value);
+  const item = (list: DispatcherPacketList, index: DispatcherExpression): DispatcherExpression => (
+    dispatcherListItem(list, index)
+  );
+  const equals = dispatcherEquals;
+  const add = dispatcherAdd;
+  const subtract = dispatcherSubtract;
+  const multiply = dispatcherMultiply;
+  const modulo = (value: DispatcherExpression, modulus = scheme.modulus): DispatcherExpression => (
+    dispatcherMod(value, modulus)
+  );
+  const routeIdentity = (polynomial: DispatcherRoutePolynomial): DispatcherExpression => {
+    return add(
+      number(polynomial.slope),
+      multiply(variable(frame.key), variable(frame.witness))
+    );
+  };
+  const realRowCount = 2 * (run.blockIds.length + 1);
+  const listLength = realRowCount;
+  const packetLists = [
+    scheme.bank0,
+    scheme.bank1
+  ];
+  if (
+    scheme.descriptors.length !== realRowCount
+    || packetLists.some(list => {
+      const values = target.lists[list.listId]?.[1];
+      return !Array.isArray(values) || values.length !== listLength;
+    })
+  ) throw new Error('dispatcher table dimensions are inconsistent');
+
+  const checksumResetId = factory.block(`${domain}-body-checksum-reset`);
+  const indexResetId = factory.block(`${domain}-body-index-reset`);
+  const rowResetId = factory.block(`${domain}-body-row-reset`);
+  const scanRepeatId = factory.block(`${domain}-body-scan-repeat`);
+  const checksumSetId = factory.block(`${domain}-body-checksum-set`);
+  const routeMatchId = factory.block(`${domain}-body-route-match`);
+  const routeRowBranchId = factory.block(`${domain}-body-route-row-branch`);
+  const routeRowSetId = factory.block(`${domain}-body-route-row`);
+  const routeDuplicateSetId = factory.block(`${domain}-body-route-duplicate`);
+  const scanIndexChangeId = factory.block(`${domain}-body-scan-index`);
+  const commonFailureId = factory.block(`${domain}-body-common-failure`);
+  const commonStopId = factory.block(`${domain}-body-common-stop`);
+  const phaseBranchId = factory.block(`${domain}-body-phase-branch`);
+  const terminalFailureId = factory.block(`${domain}-body-terminal-failure`);
+  const terminalStopId = factory.block(`${domain}-body-terminal-stop`);
+  const failureSentinelId = factory.block(`${domain}-body-failure-sentinel`);
+  const armedFailureId = factory.block(`${domain}-body-armed-failure`);
+  const armedStopId = factory.block(`${domain}-body-armed-stop`);
+  const packetWordBranchId = factory.block(`${domain}-body-packet-word-branch`);
+  const packetWord0SetId = factory.block(`${domain}-body-packet-word-0`);
+  const packetWord1SetId = factory.block(`${domain}-body-packet-word-1`);
+  const packetFailureId = factory.block(`${domain}-body-packet-failure`);
+  const packetStopId = factory.block(`${domain}-body-packet-stop`);
+  const nextRhoSetId = factory.block(`${domain}-body-next-rho`);
+  const oldKeySetId = factory.block(`${domain}-body-old-key`);
+  const keySetId = factory.block(`${domain}-body-key`);
+  const stepChangeId = factory.block(`${domain}-body-step`);
+  const rhoCommitId = factory.block(`${domain}-body-rho-commit`);
+  const ySetId = factory.block(`${domain}-body-y`);
+  const armedCommitId = factory.block(`${domain}-body-armed-commit`);
+
+  emitDispatcherSetVariable(
+    target,
+    checksumResetId,
+    definitionId,
+    indexResetId,
+    frame.checksum,
+    number(0),
+    factory,
+    `${domain}-body-checksum-reset-value`
+  );
+  emitDispatcherSetVariable(
+    target,
+    indexResetId,
+    checksumResetId,
+    rowResetId,
+    frame.index,
+    number(1),
+    factory,
+    `${domain}-body-index-reset-value`
+  );
+  emitDispatcherSetVariable(
+    target,
+    rowResetId,
+    indexResetId,
+    scanRepeatId,
+    frame.row,
+    number(0),
+    factory,
+    `${domain}-body-row-reset-value`
+  );
+  target.blocks[scanRepeatId] = {
+    opcode: 'control_repeat',
+    next: commonFailureId,
+    parent: rowResetId,
+    inputs: {
+      TIMES: emitDispatcherExpression(
+        target,
+        scanRepeatId,
+        dispatcherListLength(scheme.bank0),
+        factory,
+        `${domain}-body-scan-length`
+      ),
+      SUBSTACK: [2, checksumSetId]
+    },
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  const checksumBank0 = item(scheme.bank0, variable(frame.index));
+  const checksumBank1 = item(scheme.bank1, variable(frame.index));
+  const checksumExpression = add(
+    multiply(
+      add(
+        dispatcherMod(variable(frame.checksum), DISPATCHER_CHECKSUM_STATE_MODULUS),
+        checksumBank0
+      ),
+      add(
+        dispatcherMod(checksumBank1, DISPATCHER_CHECKSUM_BANK_MODULUS),
+        number(DISPATCHER_CHECKSUM_BANK_OFFSET)
+      )
+    ),
+    checksumBank1
+  );
+  emitDispatcherSetVariable(
+    target,
+    checksumSetId,
+    scanRepeatId,
+    routeMatchId,
+    frame.checksum,
+    dispatcherMod(checksumExpression, DISPATCHER_CHECKSUM_MODULUS),
+    factory,
+    `${domain}-body-checksum-value`
+  );
+  target.blocks[routeMatchId] = {
+    opcode: 'control_if',
+    next: scanIndexChangeId,
+    parent: checksumSetId,
+    inputs: {
+      CONDITION: emitDispatcherExpression(
+        target,
+        routeMatchId,
+        equals(
+          dispatcherPackedDigit(
+            item(scheme.bank0, variable(frame.index)),
+            scheme.bank0,
+            0,
+            scheme.modulus
+          ),
+          variable(frame.rho)
+        ),
+        factory,
+        `${domain}-body-route-match-condition`
+      ),
+      SUBSTACK: [2, routeRowBranchId]
+    },
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[routeRowBranchId] = {
+    opcode: 'control_if_else',
+    next: null,
+    parent: routeMatchId,
+    inputs: {
+      CONDITION: emitDispatcherExpression(
+        target,
+        routeRowBranchId,
+        equals(variable(frame.row), number(0)),
+        factory,
+        `${domain}-body-route-row-empty`
+      ),
+      SUBSTACK: [2, routeRowSetId],
+      SUBSTACK2: [2, routeDuplicateSetId]
+    },
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  emitDispatcherSetVariable(
+    target,
+    routeRowSetId,
+    routeRowBranchId,
+    null,
+    frame.row,
+    variable(frame.index),
+    factory,
+    `${domain}-body-route-row-value`
+  );
+  emitDispatcherSetVariable(
+    target,
+    routeDuplicateSetId,
+    routeRowBranchId,
+    null,
+    frame.row,
+    number(-1),
+    factory,
+    `${domain}-body-route-duplicate-value`
+  );
+  emitDispatcherChangeVariable(target, scanIndexChangeId, routeMatchId, null, frame.index, 1);
+
+  const commonFailure = dispatcherNot(dispatcherAll([
+    equals(dispatcherListLength(scheme.bank0), number(listLength)),
+    equals(dispatcherListLength(scheme.bank1), number(listLength)),
+    equals(variable(frame.checksum), number(scheme.checksum)),
+    dispatcherBinary('operator_gt', 'OPERAND1', variable(frame.row), 'OPERAND2', number(0))
+  ]));
+  target.blocks[commonFailureId] = {
+    opcode: 'control_if',
+    next: oldKeySetId,
+    parent: scanRepeatId,
+    inputs: {
+      CONDITION: emitDispatcherExpression(
+        target,
+        commonFailureId,
+        commonFailure,
+        factory,
+        `${domain}-body-common-failure-condition`
+      ),
+      SUBSTACK: [2, commonStopId]
+    },
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[commonStopId] = makeDispatcherStop(commonFailureId);
+  emitDispatcherSetVariable(
+    target,
+    oldKeySetId,
+    commonFailureId,
+    phaseBranchId,
+    frame.index,
+    multiply(variable(frame.key), variable(frame.witness)),
+    factory,
+    `${domain}-body-route-mask-value`
   );
 
-  const routeRecords = handlers.map((handler, index) => ({
-    stateCode: handler.stateCode,
-    tagCode: handler.tagCode,
-    proccode: requireMapItem(handlerCodeByOriginal, handler.originalId, 'dispatcher handler code'),
-    ifId: factory.block(`dispatcher-if-${run.targetIndex}-${firstId}-${index}`),
-    andId: factory.block(`dispatcher-and-${run.targetIndex}-${firstId}-${index}`),
-    equalsId: factory.block(`dispatcher-equals-${run.targetIndex}-${firstId}-${index}`),
-    reporterId: factory.block(`dispatcher-variable-${run.targetIndex}-${firstId}-${index}`),
-    stateExpectedId: factory.block(`dispatcher-state-expected-${run.targetIndex}-${firstId}-${index}`),
-    stateKeyReporterId: factory.block(`dispatcher-state-key-${run.targetIndex}-${firstId}-${index}`),
-    tagEqualsId: factory.block(`dispatcher-tag-equals-${run.targetIndex}-${firstId}-${index}`),
-    tagReporterId: factory.block(`dispatcher-tag-variable-${run.targetIndex}-${firstId}-${index}`),
-    tagExpectedId: factory.block(`dispatcher-tag-expected-${run.targetIndex}-${firstId}-${index}`),
-    tagKeyReporterId: factory.block(`dispatcher-tag-key-${run.targetIndex}-${firstId}-${index}`),
-    callId: factory.block(`dispatcher-route-${run.targetIndex}-${firstId}-${index}`)
-  }));
-  routeRecords.push({
-    stateCode: fakeStateCode,
-    tagCode: fakeTagCode,
-    proccode: fakeCode,
-    ifId: factory.block(`dispatcher-if-${run.targetIndex}-${firstId}-fake`),
-    andId: factory.block(`dispatcher-and-${run.targetIndex}-${firstId}-fake`),
-    equalsId: factory.block(`dispatcher-equals-${run.targetIndex}-${firstId}-fake`),
-    reporterId: factory.block(`dispatcher-variable-${run.targetIndex}-${firstId}-fake`),
-    stateExpectedId: factory.block(`dispatcher-state-expected-${run.targetIndex}-${firstId}-fake`),
-    stateKeyReporterId: factory.block(`dispatcher-state-key-${run.targetIndex}-${firstId}-fake`),
-    tagEqualsId: factory.block(`dispatcher-tag-equals-${run.targetIndex}-${firstId}-fake`),
-    tagReporterId: factory.block(`dispatcher-tag-variable-${run.targetIndex}-${firstId}-fake`),
-    tagExpectedId: factory.block(`dispatcher-tag-expected-${run.targetIndex}-${firstId}-fake`),
-    tagKeyReporterId: factory.block(`dispatcher-tag-key-${run.targetIndex}-${firstId}-fake`),
-    callId: factory.block(`dispatcher-route-${run.targetIndex}-${firstId}-fake`)
-  });
-  const dispatchOrder = rng.fork('dispatch-order').shuffle(routeRecords);
-  const template: DispatcherTemplate = rng.fork('dispatcher-template').integer(2) === 0
-    ? 'nested-if-else'
-    : 'sequential-if';
-  let branchParentId = dispatcherDefinitionId;
-  for (let index = 0; index < dispatchOrder.length; index += 1) {
-    const route = requireItem(dispatchOrder, index, 'dispatcher route');
-    const nextRoute = dispatchOrder[index + 1];
-    target.blocks[route.ifId] = makeDispatcherBranch(
-      branchParentId,
-      route.andId,
-      route.callId,
-      nextRoute?.ifId ?? null,
-      template
-    );
-    target.blocks[route.andId] = makeDispatcherConjunction(route.ifId, route.equalsId, route.tagEqualsId);
-    target.blocks[route.equalsId] = makeReporterEquality(route.andId, route.reporterId, route.stateExpectedId);
-    target.blocks[route.reporterId] = makeVariableReporter(route.equalsId, {variableId: stateId, variableName: stateName});
-    target.blocks[route.stateExpectedId] = makeKeyedRouteExpression(
-      route.equalsId,
-      route.stateKeyReporterId,
-      route.stateCode,
-      'operator_add'
-    );
-    target.blocks[route.stateKeyReporterId] = makeVariableReporter(
-      route.stateExpectedId,
-      {variableId: keyId, variableName: keyName}
-    );
-    target.blocks[route.tagEqualsId] = makeReporterEquality(route.andId, route.tagReporterId, route.tagExpectedId);
-    target.blocks[route.tagReporterId] = makeVariableReporter(
-      route.tagEqualsId,
-      {variableId: tagId, variableName: tagName}
-    );
-    target.blocks[route.tagExpectedId] = makeKeyedRouteExpression(
-      route.tagEqualsId,
-      route.tagKeyReporterId,
-      route.tagCode,
-      'operator_subtract'
-    );
-    target.blocks[route.tagKeyReporterId] = makeVariableReporter(
-      route.tagExpectedId,
-      {variableId: keyId, variableName: keyName}
-    );
-    target.blocks[route.callId] = makeProcedureCall(route.proccode, route.ifId, null, false);
-    branchParentId = route.ifId;
-  }
-
-  const firstRouteId = requireItem(dispatchOrder, 0, 'dispatcher route').ifId;
-  target.blocks[dispatcherDefinitionId] = makeProcedureDefinition(dispatcherPrototypeId, firstRouteId);
-  target.blocks[dispatcherPrototypeId] = makeProcedurePrototype(dispatcherDefinitionId, dispatcherCode);
-  target.blocks[fakeDefinitionId] = makeProcedureDefinition(fakePrototypeId, fakeBodyId);
-  target.blocks[fakePrototypeId] = makeProcedurePrototype(fakeDefinitionId, fakeCode);
-  target.blocks[fakeBodyId] = {
-    opcode: 'data_deletealloflist',
-    next: fakeTagBodyId,
-    parent: fakeDefinitionId,
-    inputs: {},
-    fields: {LIST: [transitionListName, transitionListId]},
-    shadow: false,
-    topLevel: false
-  };
-  target.blocks[fakeTagBodyId] = {
-    opcode: 'data_deletealloflist',
-    next: fakeKeyBodyId,
-    parent: fakeBodyId,
-    inputs: {},
-    fields: {LIST: [tagListName, tagListId]},
-    shadow: false,
-    topLevel: false
-  };
-  target.blocks[fakeKeyBodyId] = {
-    opcode: 'data_deletealloflist',
+  target.blocks[phaseBranchId] = {
+    opcode: 'control_if_else',
     next: null,
-    parent: fakeTagBodyId,
-    inputs: {},
-    fields: {LIST: [keyListName, keyListId]},
+    parent: oldKeySetId,
+    inputs: {
+      CONDITION: emitDispatcherExpression(
+        target,
+        phaseBranchId,
+        equals(variable(frame.armed), number(2)),
+        factory,
+        `${domain}-body-phase-condition`
+      ),
+      SUBSTACK: [2, terminalFailureId],
+      SUBSTACK2: [2, failureSentinelId]
+    },
+    fields: {},
     shadow: false,
     topLevel: false
   };
-  for (const [bucketIndex, bucket] of rng.fork('definition-order').shuffle(handlerBuckets).entries()) {
-    buildDispatcherHandlerBucket(
-      target,
-      bucket,
-      stateName,
-      stateId,
-      tagName,
-      tagId,
-      factory,
-      `${run.targetIndex}-${firstId}-${bucketIndex}`
+  const terminalValid = dispatcherAll([
+    equals(
+      variable(frame.y),
+      routeIdentity(requireItem(
+        scheme.routePolynomials,
+        run.blockIds.length,
+        'terminal route polynomial'
+      ))
+    ),
+    equals(variable(frame.step), number(run.blockIds.length))
+  ]);
+  target.blocks[terminalFailureId] = {
+    opcode: 'control_if',
+    next: null,
+    parent: phaseBranchId,
+    inputs: {
+      CONDITION: emitDispatcherExpression(
+        target,
+        terminalFailureId,
+        terminalValid,
+        factory,
+        `${domain}-body-terminal-condition`
+      ),
+      SUBSTACK: [2, terminalStopId]
+    },
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  emitDispatcherSetVariable(
+    target,
+    terminalStopId,
+    terminalFailureId,
+    null,
+    frame.armed,
+    number(0),
+    factory,
+    `${domain}-body-terminal-success-value`
+  );
+  const routeRecords = handlers.map(handler => ({
+    handler,
+    ifId: factory.block(`${domain}-body-route-${handler.routeIndex}`),
+    equalsId: factory.block(`${domain}-body-route-equals-${handler.routeIndex}`)
+  }));
+  const routeOrder = rng.fork('route-order').shuffle(routeRecords);
+  const firstRouteId = requireItem(routeOrder, 0, 'dispatcher route').ifId;
+  emitDispatcherSetVariable(
+    target,
+    failureSentinelId,
+    phaseBranchId,
+    firstRouteId,
+    frame.armed,
+    number(-1),
+    factory,
+    `${domain}-body-failure-sentinel-value`
+  );
+  for (const [routeOrdinal, route] of routeOrder.entries()) {
+    const nextRouteId = routeOrder[routeOrdinal + 1]?.ifId ?? armedFailureId;
+    const routePolynomial = requireItem(
+      scheme.routePolynomials,
+      route.handler.routeIndex,
+      'dispatcher route polynomial'
     );
+    target.blocks[route.ifId] = {
+      opcode: 'control_if',
+      next: nextRouteId,
+      parent: routeOrdinal === 0 ? failureSentinelId : requireItem(routeOrder, routeOrdinal - 1, 'dispatcher route').ifId,
+      inputs: {CONDITION: [2, route.equalsId], SUBSTACK: [2, route.handler.originalId]},
+      fields: {},
+      shadow: false,
+      topLevel: false
+    };
+    target.blocks[route.equalsId] = {
+      opcode: 'operator_equals',
+      next: null,
+      parent: route.ifId,
+      inputs: {
+        OPERAND1: [1, [12, frame.y.variableName, frame.y.variableId]],
+        OPERAND2: emitDispatcherExpression(
+          target,
+          route.equalsId,
+          routeIdentity(routePolynomial),
+          factory,
+          `${domain}-body-route-selector-${route.handler.routeIndex}`
+        )
+      },
+      fields: {},
+      shadow: false,
+      topLevel: false
+    };
+    requireBlock(target, route.handler.originalId).parent = route.ifId;
   }
-}
+  target.blocks[armedFailureId] = {
+    opcode: 'control_if',
+    next: packetWordBranchId,
+    parent: requireItem(routeOrder, routeOrder.length - 1, 'dispatcher route').ifId,
+    inputs: {
+      CONDITION: emitDispatcherExpression(
+        target,
+        armedFailureId,
+        equals(variable(frame.armed), number(-1)),
+        factory,
+        `${domain}-body-armed-condition`
+      ),
+      SUBSTACK: [2, armedStopId]
+    },
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[armedStopId] = makeDispatcherStop(armedFailureId);
 
-function makeIndexedStore(
-  keys: readonly number[],
-  source: readonly number[],
-  modulus: number,
-  rng: DeterministicGenerator
-): IndexedStore {
-  if (keys.length !== source.length) throw new Error('dispatcher indexed store inputs are inconsistent');
-  const values: Array<string | number> = Array.from({length: modulus - 1}, (_, index) => (
-    index % 2 === 0 ? rng.integer(0x3fff_ffff) : `j_${rng.id('q_', 10)}`
+  const selectBank1 = dispatcherBinary(
+    'operator_gt',
+    'OPERAND1',
+    multiply(variable(frame.key), variable(frame.witness)),
+    'OPERAND2',
+    number(Math.floor((scheme.modulus ** 2) / 2))
+  );
+  target.blocks[packetWordBranchId] = {
+    opcode: 'control_if_else',
+    next: packetFailureId,
+    parent: armedFailureId,
+    inputs: {
+      CONDITION: emitDispatcherExpression(
+        target,
+        packetWordBranchId,
+        selectBank1,
+        factory,
+        `${domain}-body-packet-bank-condition`
+      ),
+      SUBSTACK: [2, packetWord1SetId],
+      SUBSTACK2: [2, packetWord0SetId]
+    },
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  emitDispatcherSetVariable(
+    target,
+    packetWord0SetId,
+    packetWordBranchId,
+    null,
+    frame.checksum,
+    item(scheme.bank0, variable(frame.row)),
+    factory,
+    `${domain}-body-packet-word-0-value`
+  );
+  emitDispatcherSetVariable(
+    target,
+    packetWord1SetId,
+    packetWordBranchId,
+    null,
+    frame.checksum,
+    item(scheme.bank1, variable(frame.row)),
+    factory,
+    `${domain}-body-packet-word-1-value`
+  );
+  const packet0Word = variable(frame.checksum);
+  const selectedDigit = (logicalIndex: number): DispatcherExpression => (
+    dispatcherPackedDigit(packet0Word, scheme.bank0, logicalIndex, scheme.modulus)
+  );
+  const packetWordIsCanonical = equals(
+    packet0Word,
+    dispatcherMod(dispatcherFloor(packet0Word), scheme.modulus ** 4)
+  );
+  target.blocks[packetFailureId] = {
+    opcode: 'control_if',
+    next: nextRhoSetId,
+    parent: packetWordBranchId,
+    inputs: {
+      CONDITION: emitDispatcherExpression(
+        target,
+        packetFailureId,
+        dispatcherNot(packetWordIsCanonical),
+        factory,
+        `${domain}-body-packet-domain-condition`
+      ),
+      SUBSTACK: [2, packetStopId]
+    },
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[packetStopId] = makeDispatcherStop(packetFailureId);
+
+  const rhoShare0 = selectedDigit(1);
+  const rhoShare1 = selectedDigit(2);
+  emitDispatcherSetVariable(
+    target,
+    nextRhoSetId,
+    packetFailureId,
+    keySetId,
+    frame.row,
+    modulo(multiply(rhoShare0, rhoShare1)),
+    factory,
+    `${domain}-body-next-rho-value`
+  );
+  const keyExpression = modulo(add(
+    add(multiply(variable(frame.key), variable(frame.witness)), packet0Word),
+    variable(frame.row)
   ));
-  const occupied = new Set<number>();
-  for (const [index, key] of keys.entries()) {
-    const slot = scratchPositiveRemainder(key, modulus);
-    if (slot === 0 || occupied.has(slot)) throw new Error('dispatcher indexed store key collision');
-    occupied.add(slot);
-    values[slot - 1] = requireItem(source, index, 'dispatcher indexed store value');
-  }
-  return {values, modulus};
-}
-
-function scratchPositiveRemainder(value: number, modulus: number): number {
-  const remainder = value % modulus;
-  return remainder < 0 ? remainder + modulus : remainder;
+  emitDispatcherSetVariable(
+    target,
+    keySetId,
+    nextRhoSetId,
+    stepChangeId,
+    frame.key,
+    keyExpression,
+    factory,
+    `${domain}-body-key-value`
+  );
+  emitDispatcherChangeVariable(target, stepChangeId, keySetId, ySetId, frame.step, 1);
+  emitDispatcherSetVariable(
+    target,
+    rhoCommitId,
+    ySetId,
+    armedCommitId,
+    frame.rho,
+    variable(frame.row),
+    factory,
+    `${domain}-body-rho-commit-value`
+  );
+  emitDispatcherSetVariable(
+    target,
+    ySetId,
+    stepChangeId,
+    rhoCommitId,
+    frame.y,
+    add(
+      modulo(subtract(
+        selectedDigit(3),
+        dispatcherRouteMaskExpression(
+          scheme.routeMaskTemplate,
+          subtract(variable(frame.armed), variable(frame.index)),
+          variable(frame.rho),
+          variable(frame.row),
+          variable(frame.step)
+        )
+      )),
+      multiply(variable(frame.key), variable(frame.witness))
+    ),
+    factory,
+    `${domain}-body-y-value`
+  );
+  emitDispatcherSetVariable(
+    target,
+    armedCommitId,
+    rhoCommitId,
+    null,
+    frame.armed,
+    number(0),
+    factory,
+    `${domain}-body-armed-commit-value`
+  );
+  target.blocks[definitionId] = makeProcedureDefinition(prototypeId, checksumResetId);
+  target.blocks[prototypeId] = makeProcedurePrototype(definitionId, proccode, true);
 }
 
 function outlineRun(
@@ -1332,21 +3576,15 @@ function replaceRunEntry(target: ScratchTarget, run: ConnectableLinearRun, repla
   if (run.predecessorId) requireBlock(target, run.predecessorId).next = replacementId;
 }
 
-function estimateDispatcherGrowth(length: number): number {
-  return (40 * length) + 44;
-}
-
 function boundDispatcherRuns(project: ScratchProject, run: ConnectableLinearRun): ConnectableLinearRun[] {
-  const maximumLength = 5;
+  const minimumLength = 4;
+  const cohortLength = 8;
   const target = requireTarget(project, run.targetIndex);
-  if (run.blockIds.length <= maximumLength) return [run];
+  if (run.blockIds.length === minimumLength || run.blockIds.length === cohortLength) return [run];
   const bounded: ConnectableLinearRun[] = [];
   let cursor = 0;
-  while (run.blockIds.length - cursor >= 4) {
-    const remaining = run.blockIds.length - cursor;
-    const length = remaining === maximumLength + 4
-      ? maximumLength - 1
-      : Math.min(maximumLength, remaining);
+  while (run.blockIds.length - cursor >= minimumLength) {
+    const length = run.blockIds.length - cursor >= cohortLength ? cohortLength : minimumLength;
     const blockIds = run.blockIds.slice(cursor, cursor + length);
     requireBlock(target, requireItem(blockIds, 0, 'bounded dispatcher run'));
     const predecessorId = cursor === 0
@@ -1367,152 +3605,1238 @@ function boundDispatcherRuns(project: ScratchProject, run: ConnectableLinearRun)
       ...(cursor === 0 && run.y !== undefined ? {y: run.y} : {})
     });
     cursor += length;
-    if (run.blockIds.length - cursor >= 5) cursor += 1;
+    if (run.blockIds.length - cursor >= minimumLength + 1) cursor += 1;
+    else break;
   }
   return bounded;
 }
 
-function uniqueDispatcherNumbers(count: number, rng: DeterministicGenerator): number[] {
-  const values = new Set<number>();
-  while (values.size < count) {
-    values.add(0x1_0000 + rng.integer(0x1fff_0000));
+function makeDispatcherPacketScheme(
+  target: ScratchTarget,
+  routeCount: number,
+  factory: UniqueFactory,
+  rng: DeterministicGenerator,
+  domain: string,
+  expandedAliasCount: number
+): DispatcherPacketScheme {
+  if (routeCount !== 4 && routeCount !== 8) {
+    throw new Error('dispatcher packet scheme requires four or eight routes');
   }
-  return [...values];
+  if (expandedAliasCount > 0) {
+    return makeExpandedDispatcherScheme(target, routeCount, expandedAliasCount, factory, rng, domain);
+  }
+  const modulus = requireItem(
+    DISPATCHER_PACKET_PRIMES,
+    rng.fork('modulus').integer(DISPATCHER_PACKET_PRIMES.length),
+    'dispatcher packet modulus'
+  );
+  const realRowCount = 2 * (routeCount + 1);
+  const packetDomain = 2;
+  const rhoDomain = rng.fork('rho').shuffle(
+    Array.from({length: modulus - 1}, (_, index) => index + 1)
+  );
+  const physicalStates = rng.fork('physical-state-order').shuffle(
+    Array.from({length: routeCount + 1}, (_, routeIndex) => (
+      [0, 1].map(lane => ({routeIndex, lane}))
+    )).flat()
+  );
+  const descriptors: DispatcherPacketDescriptor[] = physicalStates.map((state, index) => ({
+    row: index + 1,
+    rho: requireItem(rhoDomain, index, 'dispatcher physical rho'),
+    routeIndex: state.routeIndex,
+    lane: state.lane
+  }));
+
+  const routePolynomials = rng.fork('route-polynomials').shuffle(
+    Array.from({length: modulus - 3}, (_, index): DispatcherRoutePolynomial => ({slope: index + 3}))
+  ).slice(0, routeCount + 1);
+  const routeMaskTemplate = rng.fork('route-mask-template').integer(2) as 0 | 1;
+
+  const bankDigits: [number[][], number[][]] = [[], []];
+  for (const descriptor of descriptors) {
+    const targetRouteIndex = Math.min(descriptor.routeIndex + 1, routeCount);
+    const physicalTargets = rng.fork('physical-targets-' + descriptor.row).shuffle(
+      descriptors.filter(candidate => candidate.routeIndex === targetRouteIndex)
+    );
+    if (physicalTargets.length !== packetDomain) {
+      throw new Error('dispatcher physical route pair is incomplete');
+    }
+    for (let witnessSlot = 0; witnessSlot < packetDomain; witnessSlot += 1) {
+      const recordRng = rng.fork('packet-' + descriptor.row + '-' + witnessSlot);
+      const next = requireItem(physicalTargets, witnessSlot, 'dispatcher physical target');
+      const rhoShare0 = 1 + recordRng.fork('rho-share').integer(modulus - 1);
+      const rhoShare1 = packetMod(next.rho * packetInverse(rhoShare0, modulus), modulus);
+      if (rhoShare1 === 0) {
+        throw new Error('dispatcher multiplicative share is zero');
+      }
+      const currentRoute = requireItem(
+        routePolynomials,
+        descriptor.routeIndex,
+        'dispatcher current route identity'
+      );
+      const nextRoute = requireItem(
+        routePolynomials,
+        targetRouteIndex,
+        'dispatcher successor route identity'
+      );
+      const routeCipher = packetMod(
+        nextRoute.slope + packetRouteMask(
+          routeMaskTemplate,
+          currentRoute.slope,
+          descriptor.rho,
+          next.rho,
+          targetRouteIndex,
+          modulus
+        ),
+        modulus
+      );
+      requireItem(bankDigits, witnessSlot, 'dispatcher packet bank').push([
+        descriptor.rho,
+        rhoShare0,
+        rhoShare1,
+        routeCipher
+      ]);
+    }
+  }
+  const pendingLists: Array<{readonly list: DispatcherPacketList; readonly values: readonly number[]}> = [];
+  const digitOrder = (label: string): readonly number[] => {
+    const order = [
+      0,
+      ...rng.fork(`digit-order-compact-${label}`).shuffle([1, 2, 3])
+    ];
+    if (order.every((logicalIndex, power) => logicalIndex === power)) {
+      const swappable = rng.fork(`digit-swap-${label}`).shuffle([1, 2, 3]);
+      const first = requireItem(swappable, 0, 'dispatcher digit permutation');
+      const second = requireItem(swappable, 1, 'dispatcher digit permutation');
+      const firstValue = requireItem(order, first, 'dispatcher digit permutation');
+      const secondValue = requireItem(order, second, 'dispatcher digit permutation');
+      order[first] = secondValue;
+      order[second] = firstValue;
+    }
+    return order;
+  };
+  const makeList = (
+    label: string,
+    rows: readonly (readonly number[])[],
+    digitOrder: readonly number[]
+  ): DispatcherPacketList => {
+    const list: DispatcherPacketList = {
+      listId: factory.symbol('l_', domain + '-' + label),
+      listName: factory.name('no-preserve', domain + '-' + label),
+      digitOrder
+    };
+    const values = rows.map(digits => packDispatcherWord(digits, list.digitOrder, modulus));
+    for (const [index, word] of values.entries()) {
+      const digits = requireItem(rows, index, 'dispatcher source word');
+      for (let logicalIndex = 0; logicalIndex < 4; logicalIndex += 1) {
+        if (
+          unpackDispatcherWord(word, list.digitOrder, logicalIndex, modulus)
+          !== requireItem(digits, logicalIndex, 'dispatcher source digit')
+        ) throw new Error('dispatcher packet word roundtrip failed');
+      }
+    }
+    pendingLists.push({list, values});
+    return list;
+  };
+  const packetDigitOrder = digitOrder('packet-banks');
+  const bank0 = makeList('packet-bank-0', bankDigits[0], packetDigitOrder);
+  const bank1 = makeList('packet-bank-1', bankDigits[1], packetDigitOrder);
+  for (const declaration of rng.fork('list-declaration-order').shuffle(pendingLists)) {
+    target.lists[declaration.list.listId] = [declaration.list.listName, [...declaration.values]];
+  }
+  const listValues = (list: DispatcherPacketList): readonly number[] => {
+    const values = target.lists[list.listId]?.[1];
+    if (!Array.isArray(values) || !values.every(value => typeof value === 'number')) {
+      throw new Error('dispatcher packet list is unavailable');
+    }
+    return values;
+  };
+  let checksum = 0;
+  for (let index = 0; index < realRowCount; index += 1) {
+    const bank0Word = requireItem(listValues(bank0), index, 'dispatcher checksum word');
+    const bank1Word = requireItem(listValues(bank1), index, 'dispatcher checksum word');
+    checksum = packetIntegrityFold(checksum, bank0Word, bank1Word);
+  }
+  const entryDescriptor = requireItem(
+    rng.fork('entry-row').shuffle(descriptors.filter(descriptor => descriptor.routeIndex === 0)),
+    0,
+    'dispatcher entry state'
+  );
+  const entryKey = 1 + rng.fork('entry-key').integer(modulus - 1);
+  const entryWitness = rng.fork('entry-witness').integer(modulus);
+  const entryRoutePolynomial = requireItem(routePolynomials, 0, 'dispatcher entry route polynomial');
+  return {
+    modulus,
+    packetDomain,
+    descriptors,
+    bank0,
+    bank1,
+    routePolynomials,
+    routeMaskTemplate,
+    checksum,
+    entry: {
+      key: entryKey,
+      witness: entryWitness,
+      rho: entryDescriptor.rho,
+      y: entryRoutePolynomial.slope + (entryKey * entryWitness)
+    }
+  };
 }
 
-function uniqueDispatcherKeys(
+type ThreadedPair = readonly [number, number];
+
+interface ThreadedFeistelParameters {
+  readonly roundABase: number;
+  readonly roundAStep: number;
+  readonly roundBBase: number;
+  readonly roundBStep: number;
+  readonly nonceScale: number;
+  readonly wordScale: number;
+  readonly handlerScale: number;
+  readonly selectedHandlerScale: number;
+  readonly stepScale: number;
+  readonly terminalScale: number;
+}
+
+function threadedField(value: bigint): number {
+  const modulus = BigInt(THREADED_RECORD_PRIME);
+  return Number(((value % modulus) + modulus) % modulus);
+}
+
+function threadedAdd(...values: readonly number[]): number {
+  let result = 0n;
+  for (const value of values) result = BigInt(threadedField(result + BigInt(value)));
+  return Number(result);
+}
+
+function threadedMultiply(left: number, right: number): number {
+  return threadedField(BigInt(left) * BigInt(right));
+}
+
+function threadedPack([left, right]: ThreadedPair): number {
+  if (
+    !Number.isSafeInteger(left)
+    || !Number.isSafeInteger(right)
+    || left < 0
+    || right < 0
+    || left >= THREADED_RECORD_PRIME
+    || right >= THREADED_RECORD_PRIME
+  ) throw new Error('threaded record rail is outside its canonical field range');
+  const packed = Number((BigInt(left) * BigInt(THREADED_RECORD_PRIME)) + BigInt(right));
+  if (!Number.isSafeInteger(packed)) throw new Error('threaded record packing exceeded exact arithmetic');
+  return packed;
+}
+
+function threadedUnpack(word: number): ThreadedPair {
+  const maximum = THREADED_RECORD_PRIME ** 2;
+  if (!Number.isSafeInteger(word) || word < 0 || word >= maximum) {
+    throw new Error('threaded record word is outside its canonical packed range');
+  }
+  const left = Math.floor(word / THREADED_RECORD_PRIME);
+  const right = word % THREADED_RECORD_PRIME;
+  if (threadedPack([left, right]) !== word) throw new Error('threaded record did not round trip');
+  return [left, right];
+}
+
+function threadedRoundMaterial(
+  key: ThreadedPair,
+  nonce: number,
+  wordDomain: number,
+  handlerIndex: number,
+  selectedHandlerIndex: number,
+  step: number,
+  terminalExpected: number,
+  round: number,
+  parameters: ThreadedFeistelParameters
+): {readonly roundKey: number; readonly tweak: number; readonly a: number; readonly b: number} {
+  const roundKey = threadedAdd(key[0], threadedMultiply(key[1], round));
+  const tweak = threadedAdd(
+    threadedMultiply(nonce, parameters.nonceScale),
+    threadedMultiply(wordDomain, parameters.wordScale),
+    threadedMultiply(handlerIndex, parameters.handlerScale),
+    threadedMultiply(selectedHandlerIndex, parameters.selectedHandlerScale),
+    threadedMultiply(step, parameters.stepScale),
+    threadedMultiply(terminalExpected, parameters.terminalScale)
+  );
+  const a = threadedAdd(parameters.roundABase, threadedMultiply(parameters.roundAStep, round));
+  const b = threadedAdd(parameters.roundBBase, threadedMultiply(parameters.roundBStep, round));
+  if (a === 0) throw new Error('threaded Feistel round multiplier is zero');
+  return {roundKey, tweak, a, b};
+}
+
+function threadedRoundFunction(
+  right: number,
+  material: ReturnType<typeof threadedRoundMaterial>
+): number {
+  const t = threadedAdd(right, threadedAdd(material.roundKey, material.tweak));
+  const u = threadedMultiply(t, t);
+  const v = threadedAdd(threadedMultiply(material.a, t), material.b);
+  return threadedAdd(u, v);
+}
+
+function threadedEncrypt(
+  pair: ThreadedPair,
+  key: ThreadedPair,
+  nonce: number,
+  wordDomain: number,
+  handlerIndex: number,
+  selectedHandlerIndex: number,
+  step: number,
+  terminalExpected: number,
+  parameters: ThreadedFeistelParameters
+): ThreadedPair {
+  let [left, right] = pair;
+  for (let round = 1; round <= THREADED_FEISTEL_ROUNDS; round += 1) {
+    const material = threadedRoundMaterial(
+      key,
+      nonce,
+      wordDomain,
+      handlerIndex,
+      selectedHandlerIndex,
+      step,
+      terminalExpected,
+      round,
+      parameters
+    );
+    [left, right] = [right, threadedAdd(left, threadedRoundFunction(right, material))];
+  }
+  return [left, right];
+}
+
+function threadedDecrypt(
+  pair: ThreadedPair,
+  key: ThreadedPair,
+  nonce: number,
+  wordDomain: number,
+  handlerIndex: number,
+  selectedHandlerIndex: number,
+  step: number,
+  terminalExpected: number,
+  parameters: ThreadedFeistelParameters
+): ThreadedPair {
+  let [left, right] = pair;
+  for (let round = THREADED_FEISTEL_ROUNDS; round >= 1; round -= 1) {
+    const material = threadedRoundMaterial(
+      key,
+      nonce,
+      wordDomain,
+      handlerIndex,
+      selectedHandlerIndex,
+      step,
+      terminalExpected,
+      round,
+      parameters
+    );
+    [left, right] = [
+      threadedAdd(right, -threadedRoundFunction(left, material)),
+      left
+    ];
+  }
+  return [left, right];
+}
+
+function threadedTag(
+  currentKey: ThreadedPair,
+  nonce: number,
+  nextKey: ThreadedPair,
+  currentHandlerIndex: number,
+  selectedHandlerIndex: number,
+  step: number,
+  terminalExpected: number,
+  constants: readonly number[]
+): ThreadedPair {
+  const constant = (index: number): number => requireItem(
+    constants, index, 'threaded record tag constant'
+  );
+  const nextStep = step + 1;
+  let context = threadedAdd(nonce, constant(0));
+  for (const value of [
+    currentHandlerIndex + 1,
+    selectedHandlerIndex + 1,
+    step,
+    nextStep,
+    terminalExpected
+  ]) {
+    context = threadedAdd(threadedMultiply(context, constant(1)), value);
+  }
+  context = threadedAdd(context, constant(2));
+  const left = threadedAdd(
+    threadedMultiply(
+      threadedAdd(currentKey[0], nextKey[0], context),
+      threadedAdd(currentKey[1], nextKey[1], context)
+    ),
+    constant(3)
+  );
+  const right = threadedAdd(
+    threadedMultiply(
+      threadedAdd(currentKey[0], nextKey[1], context),
+      threadedAdd(currentKey[1], nextKey[0], context, nonce)
+    ),
+    constant(4)
+  );
+  return [left, right];
+}
+
+function threadedSlot(
+  key: ThreadedPair,
+  step: number,
+  handlerIndex: number,
+  aliasCount: number,
+  constants: readonly number[]
+): number {
+  const constant = (index: number): number => requireItem(
+    constants,
+    index,
+    'threaded slot constant'
+  );
+  const stateOrdinal = threadedAdd(
+    threadedMultiply(step, aliasCount),
+    handlerIndex,
+    1
+  );
+  const slotField = threadedAdd(
+    threadedMultiply(key[0], key[1]),
+    threadedMultiply(stateOrdinal, constant(0)),
+    constant(1)
+  );
+  return 1 + (slotField % (THREADED_RECORD_PRIME - 1));
+}
+
+function threadedProgramChecksum(words: readonly number[]): number {
+  let checksum = 0;
+  for (let index = 0; index < words.length; index += 1) {
+    const [left, right] = threadedUnpack(requireItem(words, index, 'threaded record word'));
+    const position = index + 1;
+    const cross = Number(
+      (BigInt(left + (position * 17)) * BigInt(right + (position * 31) + 7))
+      % BigInt(DISPATCHER_CHECKSUM_MODULUS)
+    );
+    checksum = Number(
+      (
+        (BigInt(checksum) * 37n)
+        + BigInt(cross)
+        + (BigInt(left) * 41n)
+        + (BigInt(right) * 43n)
+        + BigInt(position)
+      ) % BigInt(DISPATCHER_CHECKSUM_MODULUS)
+    );
+  }
+  return checksum;
+}
+
+function threadedDistinctValues(
   count: number,
-  moduli: readonly number[],
-  rng: DeterministicGenerator
+  rng: DeterministicGenerator,
+  domain: string
 ): number[] {
   const values: number[] = [];
-  const occupied = moduli.map(() => new Set<number>());
-  while (values.length < count) {
-    const candidate = 0x1_0000 + rng.integer(0x1fff_0000);
-    const residues = moduli.map(modulus => scratchPositiveRemainder(candidate, modulus));
-    if (residues.some((residue, index) => residue === 0 || occupied[index]?.has(residue) === true)) continue;
-    values.push(candidate);
-    for (const [index, residue] of residues.entries()) occupied[index]?.add(residue);
+  const seen = new Set<number>();
+  for (let attempt = 0; values.length < count && attempt < count * 1_024; attempt += 1) {
+    const value = 1 + rng.fork(`${domain}-${attempt}`).integer(THREADED_RECORD_PRIME - 1);
+    if (seen.has(value)) continue;
+    seen.add(value);
+    values.push(value);
   }
+  if (values.length !== count) throw new Error('threaded field domain is exhausted');
   return values;
 }
 
-function uniqueDispatcherTagNumbers(
-  stateCodes: readonly number[],
-  rng: DeterministicGenerator
-): number[] {
-  const values = new Set<number>();
-  const sums = new Set<number>();
-  const result: number[] = [];
-  for (const stateCode of stateCodes) {
-    for (;;) {
-      const candidate = 0x1_0000 + rng.integer(0x1fff_0000);
-      const sum = stateCode + candidate;
-      if (values.has(candidate) || sums.has(sum)) continue;
-      values.add(candidate);
-      sums.add(sum);
-      result.push(candidate);
-      break;
+function makeThreadedTransientExpandedDispatcherScheme(
+  target: ScratchTarget,
+  routeCount: number,
+  aliasCount: number,
+  factory: UniqueFactory,
+  rng: DeterministicGenerator,
+  domain: string
+): DispatcherPacketScheme {
+  const stateCount = (routeCount + 1) * aliasCount;
+  const keyLeftValues = threadedDistinctValues(
+    stateCount,
+    rng.fork('threaded-key-left'),
+    'left'
+  );
+  const keyRightValues = threadedDistinctValues(
+    stateCount,
+    rng.fork('threaded-key-right'),
+    'right'
+  );
+  const keyPairs = new Set<string>();
+  for (let stateIndex = 0; stateIndex < stateCount; stateIndex += 1) {
+    const keySignature = `${requireItem(keyLeftValues, stateIndex, 'threaded left base key')}:${requireItem(keyRightValues, stateIndex, 'threaded right base key')}`;
+    if (keyPairs.has(keySignature)) throw new Error('threaded base key pair was reused');
+    keyPairs.add(keySignature);
+  }
+  let slotConstants: readonly number[] | undefined;
+  for (let attempt = 0; attempt < 1_024 && slotConstants === undefined; attempt += 1) {
+    const candidate = Array.from(
+      {length: 2},
+      (_, index) => 1 + rng.fork(`threaded-slot-${attempt}-${index}`).integer(
+        THREADED_RECORD_PRIME - 1
+      )
+    );
+    const slots = Array.from({length: stateCount}, (_, stateIndex) => threadedSlot(
+      [
+        requireItem(keyLeftValues, stateIndex, 'threaded slot left key'),
+        requireItem(keyRightValues, stateIndex, 'threaded slot right key')
+      ],
+      Math.floor(stateIndex / aliasCount),
+      stateIndex % aliasCount,
+      aliasCount,
+      candidate
+    ));
+    if (slots.every(slot => slot > 0) && new Set(slots).size === stateCount) {
+      slotConstants = candidate;
     }
+  }
+  if (slotConstants === undefined) throw new Error('threaded branch slot domain is exhausted');
+  const baseRecords = Array.from({length: routeCount + 1}, (_, routeIndex) => (
+    Array.from({length: aliasCount}, (_, handlerIndex): DispatcherExpandedRecord => {
+      const stateIndex = (routeIndex * aliasCount) + handlerIndex;
+      const baseKeyLeft = requireItem(keyLeftValues, stateIndex, 'threaded left base key');
+      const baseKeyRight = requireItem(keyRightValues, stateIndex, 'threaded right base key');
+      return {
+        cellIndex: stateIndex,
+        routeIndex,
+        handlerIndex,
+        localSlot: threadedSlot(
+          [baseKeyLeft, baseKeyRight],
+          routeIndex,
+          handlerIndex,
+          aliasCount,
+          slotConstants
+        ),
+        transitionSlot: 0,
+        currentLabel: 0,
+        continuationShare: 0,
+        salt: 0,
+        baseKeyLeft,
+        baseKeyRight
+      };
+    })
+  ));
+  const records = baseRecords.slice(0, routeCount);
+  const terminalRecords = requireItem(baseRecords, routeCount, 'threaded terminal states');
+
+  let parameters: ThreadedFeistelParameters | undefined;
+  for (let attempt = 0; attempt < 1_024 && parameters === undefined; attempt += 1) {
+    const parameterRng = rng.fork(`threaded-feistel-parameters-${attempt}`);
+    const candidate: ThreadedFeistelParameters = {
+      roundABase: 1 + parameterRng.fork('a-base').integer(THREADED_RECORD_PRIME - 1),
+      roundAStep: 1 + parameterRng.fork('a-step').integer(THREADED_RECORD_PRIME - 1),
+      roundBBase: parameterRng.fork('b-base').integer(THREADED_RECORD_PRIME),
+      roundBStep: 1 + parameterRng.fork('b-step').integer(THREADED_RECORD_PRIME - 1),
+      nonceScale: 1 + parameterRng.fork('nonce').integer(THREADED_RECORD_PRIME - 1),
+      wordScale: 1 + parameterRng.fork('word').integer(THREADED_RECORD_PRIME - 1),
+      handlerScale: 1 + parameterRng.fork('handler').integer(THREADED_RECORD_PRIME - 1),
+      selectedHandlerScale: 1 + parameterRng.fork('selected-handler').integer(
+        THREADED_RECORD_PRIME - 1
+      ),
+      stepScale: 1 + parameterRng.fork('step').integer(THREADED_RECORD_PRIME - 1),
+      terminalScale: 1 + parameterRng.fork('terminal').integer(THREADED_RECORD_PRIME - 1)
+    };
+    const multipliers = Array.from({length: THREADED_FEISTEL_ROUNDS}, (_, index) => (
+      threadedAdd(candidate.roundABase, threadedMultiply(candidate.roundAStep, index + 1))
+    ));
+    if (multipliers.every(value => value !== 0)) parameters = candidate;
+  }
+  if (parameters === undefined) throw new Error('threaded Feistel parameters are exhausted');
+  const tagConstants = Array.from(
+    {length: 5},
+    (_, index) => 1 + rng.fork(`threaded-tag-${index}`).integer(THREADED_RECORD_PRIME - 1)
+  );
+
+  const logicalRecords = records.flatMap((routeRecords, routeIndex) => (
+    routeRecords.flatMap(source => Array.from({length: aliasCount}, (_, nextHandlerIndex) => {
+      const successor = requireItem(
+        requireItem(baseRecords, routeIndex + 1, 'threaded successor states'),
+        nextHandlerIndex,
+        'threaded successor state'
+      );
+      const nextLeft = successor.baseKeyLeft;
+      const nextRight = successor.baseKeyRight;
+      const currentLeft = source.baseKeyLeft;
+      const currentRight = source.baseKeyRight;
+      if (
+        nextLeft === undefined
+        || nextRight === undefined
+        || currentLeft === undefined
+        || currentRight === undefined
+      ) throw new Error('threaded base key material is unavailable');
+      return {
+        routeIndex,
+        handlerIndex: source.handlerIndex,
+        nextHandlerIndex,
+        currentKey: [currentLeft, currentRight] as const,
+        nextKey: [nextLeft, nextRight] as const
+      };
+    }))
+  ));
+  const threadedRecords = rng.fork('threaded-record-order').shuffle(logicalRecords).map(
+    (logical, index): DispatcherThreadedRecord => {
+      const nonce = index + 1;
+      const tag = threadedTag(
+        logical.currentKey,
+        nonce,
+        logical.nextKey,
+        logical.handlerIndex,
+        logical.nextHandlerIndex,
+        logical.routeIndex,
+        logical.routeIndex + 1 === routeCount ? 1 : 0,
+        tagConstants
+      );
+      const plainWords = [logical.nextKey, tag] as const;
+      const words = plainWords.map((plain, wordIndex) => {
+        const encrypted = threadedEncrypt(
+          plain,
+          logical.currentKey,
+          nonce,
+          wordIndex + 1,
+          logical.handlerIndex,
+          logical.nextHandlerIndex,
+          logical.routeIndex,
+          logical.routeIndex + 1 === routeCount ? 1 : 0,
+          parameters
+        );
+        const decrypted = threadedDecrypt(
+          encrypted,
+          logical.currentKey,
+          nonce,
+          wordIndex + 1,
+          logical.handlerIndex,
+          logical.nextHandlerIndex,
+          logical.routeIndex,
+          logical.routeIndex + 1 === routeCount ? 1 : 0,
+          parameters
+        );
+        if (decrypted[0] !== plain[0] || decrypted[1] !== plain[1]) {
+          throw new Error('threaded Feistel inverse did not round trip');
+        }
+        return threadedPack(encrypted);
+      });
+      if (words.length !== THREADED_RECORD_WORDS) {
+        throw new Error('threaded record word count is invalid');
+      }
+      return {
+        nonce,
+        routeIndex: logical.routeIndex,
+        handlerIndex: logical.handlerIndex,
+        nextHandlerIndex: logical.nextHandlerIndex,
+        words: words as unknown as readonly [number, number]
+      };
+    }
+  );
+
+  const decode = (
+    record: DispatcherThreadedRecord,
+    currentKey: ThreadedPair,
+    handlerIndex: number,
+    selectedHandlerIndex: number,
+    step: number
+  ): readonly [ThreadedPair, ThreadedPair] => {
+    const decoded = record.words.map((word, wordIndex) => threadedDecrypt(
+      threadedUnpack(word),
+      currentKey,
+      record.nonce,
+      wordIndex + 1,
+      handlerIndex,
+      selectedHandlerIndex,
+      step,
+      step + 1 === routeCount ? 1 : 0,
+      parameters
+    ));
+    return decoded as unknown as readonly [ThreadedPair, ThreadedPair];
+  };
+  const authenticatedNextKey = (
+    record: DispatcherThreadedRecord,
+    currentKey: ThreadedPair,
+    handlerIndex: number,
+    selectedHandlerIndex: number,
+    step: number
+  ): ThreadedPair | undefined => {
+    const [nextKey, tag] = decode(
+      record, currentKey, handlerIndex, selectedHandlerIndex, step
+    );
+    const expectedTag = threadedTag(
+      currentKey,
+      record.nonce,
+      nextKey,
+      handlerIndex,
+      selectedHandlerIndex,
+      step,
+      step + 1 === routeCount ? 1 : 0,
+      tagConstants
+    );
+    const valid = nextKey[0] > 0
+      && nextKey[1] > 0
+      && tag[0] === expectedTag[0]
+      && tag[1] === expectedTag[1];
+    return valid ? nextKey : undefined;
+  };
+  const ciphertextSignatures = threadedRecords.map(record => record.words.join(':'));
+  if (new Set(ciphertextSignatures).size !== ciphertextSignatures.length) {
+    throw new Error('threaded record ciphertext tuple was reused');
+  }
+  for (let routeIndex = 0; routeIndex < routeCount; routeIndex += 1) {
+    for (let handlerIndex = 0; handlerIndex < aliasCount; handlerIndex += 1) {
+      const current = requireItem(
+        requireItem(records, routeIndex, 'threaded source records'),
+        handlerIndex,
+        'threaded source record'
+      );
+      if (current.baseKeyLeft === undefined || current.baseKeyRight === undefined) {
+        throw new Error('threaded source key is unavailable');
+      }
+      const currentKey = [current.baseKeyLeft, current.baseKeyRight] as const;
+      for (let selectedHandlerIndex = 0; selectedHandlerIndex < aliasCount; selectedHandlerIndex += 1) {
+        const matches = threadedRecords.flatMap(record => {
+          const nextKey = authenticatedNextKey(
+            record,
+            currentKey,
+            handlerIndex,
+            selectedHandlerIndex,
+            routeIndex
+          );
+          return nextKey === undefined ? [] : [nextKey];
+        });
+        if (matches.length !== 1) {
+          throw new Error('threaded record program does not have exactly one authenticated match');
+        }
+        const nextKey = requireItem(matches, 0, 'threaded authenticated next key');
+        const successor = requireItem(
+          requireItem(baseRecords, routeIndex + 1, 'threaded expected successor states'),
+          selectedHandlerIndex,
+          'threaded expected successor state'
+        );
+        if (
+          successor.baseKeyLeft !== nextKey[0]
+          || successor.baseKeyRight !== nextKey[1]
+          || threadedSlot(
+            nextKey,
+            routeIndex + 1,
+            selectedHandlerIndex,
+            aliasCount,
+            slotConstants
+          )
+            !== successor.localSlot
+        ) {
+          throw new Error('threaded record authenticated the wrong successor state');
+        }
+      }
+    }
+  }
+
+  const makeList = (label: string): DispatcherPacketList => ({
+    listId: factory.symbol('l_', `${domain}-threaded-${label}`),
+    listName: factory.name('no-preserve', `${domain}-threaded-${label}`),
+    digitOrder: []
+  });
+  const program = makeList('state');
+  const powers = makeList('records');
+  const recordWords = threadedRecords.flatMap(record => record.words);
+  target.lists[program.listId] = [
+    program.listName,
+    Array.from({length: TRANSIENT_EXPANDED_STATE_CELLS}, () => 0)
+  ];
+  target.lists[powers.listId] = [powers.listName, recordWords];
+  const entryRecord = requireItem(
+    rng.fork('threaded-entry-record').shuffle(requireItem(records, 0, 'threaded entry states')),
+    0,
+    'threaded entry state'
+  );
+  if (entryRecord.baseKeyLeft === undefined || entryRecord.baseKeyRight === undefined) {
+    throw new Error('threaded entry key is unavailable');
+  }
+  const entryKey = [entryRecord.baseKeyLeft, entryRecord.baseKeyRight] as const;
+  if (
+    threadedSlot(entryKey, 0, entryRecord.handlerIndex, aliasCount, slotConstants)
+    !== entryRecord.localSlot
+  ) {
+    throw new Error('threaded entry slot did not match its key-derived value');
+  }
+  for (let selectedHandlerIndex = 0; selectedHandlerIndex < aliasCount; selectedHandlerIndex += 1) {
+    const entryMatches = threadedRecords.filter(record => authenticatedNextKey(
+      record,
+      entryKey,
+      entryRecord.handlerIndex,
+      selectedHandlerIndex,
+      0
+    ) !== undefined);
+    if (entryMatches.length !== 1) {
+      throw new Error('threaded entry key did not expose exactly its outgoing records');
+    }
+  }
+  for (let step = 1; step <= routeCount; step += 1) {
+    for (let handlerIndex = 0; handlerIndex < aliasCount; handlerIndex += 1) {
+      for (let selectedHandlerIndex = 0; selectedHandlerIndex < aliasCount; selectedHandlerIndex += 1) {
+        if (threadedRecords.some(record => authenticatedNextKey(
+          record,
+          entryKey,
+          handlerIndex,
+          selectedHandlerIndex,
+          step
+        ) !== undefined)) {
+          throw new Error('threaded entry key authenticated a non-entry record');
+        }
+      }
+    }
+  }
+  const tagCoefficients = Array.from(
+    {length: 13},
+    (_, index) => 1 + rng.fork(`threaded-state-tag-${index}`).integer(
+      THREADED_RECORD_PRIME - 1
+    )
+  );
+  return {
+    modulus: EXPANDED_DISPATCHER_DOMAIN,
+    packetDomain: EXPANDED_DISPATCHER_DOMAIN,
+    descriptors: [...records.flat(), ...terminalRecords].map(record => ({
+      row: record.cellIndex + 1,
+      rho: record.currentLabel,
+      routeIndex: record.routeIndex,
+      lane: record.handlerIndex
+    })),
+    bank0: program,
+    bank1: powers,
+    routePolynomials: Array.from({length: routeCount}, () => ({slope: 0})),
+    routeMaskTemplate: 0,
+    checksum: 0,
+    expandedBridge: {
+      program,
+      powers,
+      delimiter: String.fromCharCode(0xe000)
+        + rng.fork('threaded-token-delimiter').integer(0x1000).toString(16)
+        + String.fromCharCode(0xe001),
+      aliasCount,
+      records,
+      fieldMasks: [],
+      tagCoefficients,
+      powerSlots: [],
+      programChecksum: threadedProgramChecksum(recordWords),
+      entryRecord,
+      terminalRecords,
+      threadedProgram: {
+        prime: THREADED_RECORD_PRIME,
+        records: threadedRecords,
+        ...parameters,
+        routeCount,
+        aliasCount,
+        tagConstants,
+        slotConstants
+      }
+    },
+    entry: {
+      key: 1 + rng.fork('threaded-entry-rolling-key').integer(THREADED_RECORD_PRIME - 1),
+      witness: rng.fork('threaded-entry-witness').integer(THREADED_RECORD_PRIME),
+      rho: rng.fork('threaded-entry-nonce').integer(THREADED_RECORD_PRIME),
+      y: 0
+    }
+  };
+}
+
+function makeTransientExpandedDispatcherScheme(
+  target: ScratchTarget,
+  routeCount: number,
+  aliasCount: number,
+  factory: UniqueFactory,
+  rng: DeterministicGenerator,
+  domain: string
+): DispatcherPacketScheme {
+  if (
+    aliasCount < MIN_EXPANDED_DISPATCHER_ALIASES
+    || aliasCount > MAX_EXPANDED_DISPATCHER_ALIASES
+  ) {
+    throw new Error('transient dispatcher handler domain is outside its bounded range');
+  }
+  return makeThreadedTransientExpandedDispatcherScheme(
+    target,
+    routeCount,
+    aliasCount,
+    factory,
+    rng.fork('threaded-record-program'),
+    domain
+  );
+}
+
+function makeExpandedDispatcherScheme(
+  target: ScratchTarget,
+  routeCount: number,
+  aliasCount: number,
+  factory: UniqueFactory,
+  rng: DeterministicGenerator,
+  domain: string
+): DispatcherPacketScheme {
+  if (
+    aliasCount < MIN_EXPANDED_DISPATCHER_ALIASES
+    || aliasCount > MAX_EXPANDED_DISPATCHER_ALIASES
+  ) {
+    throw new Error('expanded universal dispatcher requires a bounded handler count');
+  }
+  if (routeCount !== 4 && routeCount !== 8) {
+    throw new Error('expanded universal dispatcher requires a four- or eight-command cohort');
+  }
+  return makeTransientExpandedDispatcherScheme(
+    target,
+    routeCount,
+    aliasCount,
+    factory,
+    rng.fork('transient-runtime-bridge'),
+    domain
+  );
+}
+function packetIntegrityFold(
+  checksum: number,
+  bank0Word: number,
+  bank1Word: number
+): number {
+  const mixed = (
+    ((checksum % DISPATCHER_CHECKSUM_STATE_MODULUS) + bank0Word)
+    * ((bank1Word % DISPATCHER_CHECKSUM_BANK_MODULUS) + DISPATCHER_CHECKSUM_BANK_OFFSET)
+  ) + bank1Word;
+  if (!Number.isSafeInteger(mixed)) throw new Error('dispatcher checksum arithmetic exceeded the exact integer domain');
+  return mixed % DISPATCHER_CHECKSUM_MODULUS;
+}
+
+function packetRouteMask(
+  template: 0 | 1,
+  secret: number,
+  currentRho: number,
+  nextRho: number,
+  nextStep: number,
+  modulus: number
+): number {
+  const first = template === 0 ? secret + nextRho : secret + currentRho;
+  const second = template === 0 ? currentRho + nextStep : nextRho + nextStep;
+  const product = (first * second) * secret;
+  if (!Number.isSafeInteger(product)) throw new Error('dispatcher route-mask arithmetic exceeded the exact integer domain');
+  return packetMod(product, modulus);
+}
+
+function packetMod(value: number, modulus: number): number {
+  return ((value % modulus) + modulus) % modulus;
+}
+
+function packetInverse(value: number, modulus: number): number {
+  let result = 1;
+  let base = packetMod(value, modulus);
+  let exponent = modulus - 2;
+  while (exponent > 0) {
+    if ((exponent & 1) === 1) result = packetMod(result * base, modulus);
+    base = packetMod(base * base, modulus);
+    exponent = Math.floor(exponent / 2);
+  }
+  if (packetMod(value * result, modulus) !== 1) {
+    throw new Error('dispatcher multiplicative share is not invertible');
   }
   return result;
 }
 
-function makeDispatcherHandlerBuckets(
-  handlers: readonly DispatcherHandler[],
-  targetIndex: number,
-  firstId: string,
-  factory: UniqueFactory,
-  rng: DeterministicGenerator,
-  allocateCode: (domain: string, ordinal: number) => string
-): DispatcherHandlerBucket[] {
-  const order = rng.fork('membership').shuffle(handlers);
-  const bucketCount = 1;
-  const buckets: DispatcherHandlerBucket[] = [];
-  let cursor = 0;
-  for (let bucketIndex = 0; bucketIndex < bucketCount; bucketIndex += 1) {
-    const remaining = order.length - cursor;
-    const remainingBuckets = bucketCount - bucketIndex;
-    const size = Math.ceil(remaining / remainingBuckets);
-    const members = order.slice(cursor, cursor + size);
-    cursor += size;
-    buckets.push({
-      definitionId: factory.block(`handler-bucket-def-${targetIndex}-${firstId}-${bucketIndex}`),
-      prototypeId: factory.block(`handler-bucket-proto-${targetIndex}-${firstId}-${bucketIndex}`),
-      proccode: allocateCode(`handler-bucket-code-${bucketIndex}`, bucketIndex),
-      handlers: members
-    });
+function packDispatcherWord(
+  logicalDigits: readonly number[],
+  digitOrder: readonly number[],
+  modulus: number
+): number {
+  if (logicalDigits.length !== 4 || digitOrder.length !== 4) {
+    throw new Error('dispatcher packed word requires four digits');
   }
-  return buckets;
+  let word = 0;
+  for (let power = 0; power < 4; power += 1) {
+    const logicalIndex = requireItem(digitOrder, power, 'dispatcher digit order');
+    const digit = requireItem(logicalDigits, logicalIndex, 'dispatcher logical digit');
+    if (!Number.isInteger(digit) || digit < 0 || digit >= modulus) {
+      throw new Error('dispatcher packed digit is outside its field');
+    }
+    word += digit * (modulus ** power);
+  }
+  if (!Number.isSafeInteger(word)) throw new Error('dispatcher packed word exceeds exact arithmetic');
+  return word;
 }
 
-function buildDispatcherHandlerBucket(
+function unpackDispatcherWord(
+  word: number,
+  digitOrder: readonly number[],
+  logicalIndex: number,
+  modulus: number
+): number {
+  const power = digitOrder.indexOf(logicalIndex);
+  if (power < 0) throw new Error('dispatcher logical digit is unavailable');
+  return Math.floor(word / (modulus ** power)) % modulus;
+}
+
+type DispatcherExpression =
+  | {readonly kind: 'number'; readonly value: number}
+  | {readonly kind: 'string'; readonly value: string}
+  | {readonly kind: 'variable'; readonly variable: DispatcherFrameVariable}
+  | {readonly kind: 'list-length'; readonly list: DispatcherPacketList}
+  | {
+      readonly kind: 'list-item';
+      readonly list: DispatcherPacketList;
+      readonly index: DispatcherExpression;
+    }
+  | {
+      readonly kind: 'operator';
+      readonly opcode: string;
+      readonly inputs: Readonly<Record<string, DispatcherExpression>>;
+      readonly fields?: Readonly<Record<string, readonly JsonValue[]>>;
+    };
+
+function dispatcherNumber(value: number): DispatcherExpression {
+  return {kind: 'number', value};
+}
+
+function dispatcherString(value: string): DispatcherExpression {
+  return {kind: 'string', value};
+}
+
+function dispatcherVariable(variable: DispatcherFrameVariable): DispatcherExpression {
+  return {kind: 'variable', variable};
+}
+
+function dispatcherListItem(
+  list: DispatcherPacketList,
+  index: DispatcherExpression
+): DispatcherExpression {
+  return {kind: 'list-item', list, index};
+}
+
+function dispatcherListLength(list: DispatcherPacketList): DispatcherExpression {
+  return {kind: 'list-length', list};
+}
+
+function dispatcherOperator(
+  opcode: string,
+  inputs: Readonly<Record<string, DispatcherExpression>>,
+  fields?: Readonly<Record<string, readonly JsonValue[]>>
+): DispatcherExpression {
+  return {kind: 'operator', opcode, inputs, ...(fields === undefined ? {} : {fields})};
+}
+
+function emitDispatcherExpression(
   target: ScratchTarget,
-  bucket: DispatcherHandlerBucket,
-  stateName: string,
-  stateId: string,
-  tagName: string,
-  tagId: string,
+  parentId: string,
+  expression: DispatcherExpression,
   factory: UniqueFactory,
   domain: string
-): void {
-  const buildSelection = (index: number, parentId: string): string => {
-    const handler = requireItem(bucket.handlers, index, 'dispatcher bucket handler');
-    const next = bucket.handlers[index + 1];
-    if (!next) {
-      requireBlock(target, handler.originalId).parent = parentId;
-      return handler.originalId;
+): ScratchInput {
+  let ordinal = 0;
+  const emit = (parent: string, value: DispatcherExpression): ScratchInput => {
+    if (value.kind === 'number') return numericInput(value.value);
+    if (value.kind === 'string') return [1, [10, value.value]];
+    if (value.kind === 'variable') {
+      return [1, [12, value.variable.variableName, value.variable.variableId]];
     }
-
-    const branchId = factory.block(`handler-bucket-branch-${domain}-${index}`);
-    const equalsId = factory.block(`handler-bucket-equals-${domain}-${index}`);
-    const sumId = factory.block(`handler-bucket-sum-${domain}-${index}`);
-    const stateReporterId = factory.block(`handler-bucket-state-${domain}-${index}`);
-    const tagReporterId = factory.block(`handler-bucket-tag-${domain}-${index}`);
-    const alternateId = buildSelection(index + 1, branchId);
-    requireBlock(target, handler.originalId).parent = branchId;
-    target.blocks[branchId] = {
-      opcode: 'control_if_else',
+    const id = factory.block(domain + '-' + ordinal);
+    ordinal += 1;
+    if (value.kind === 'list-length') {
+      target.blocks[id] = {
+        opcode: 'data_lengthoflist',
+        next: null,
+        parent,
+        inputs: {},
+        fields: {LIST: [value.list.listName, value.list.listId]},
+        shadow: false,
+        topLevel: false
+      };
+      return [2, id];
+    }
+    if (value.kind === 'list-item') {
+      target.blocks[id] = {
+        opcode: 'data_itemoflist',
+        next: null,
+        parent,
+        inputs: {INDEX: emit(id, value.index)},
+        fields: {LIST: [value.list.listName, value.list.listId]},
+        shadow: false,
+        topLevel: false
+      };
+      return [2, id];
+    }
+    target.blocks[id] = {
+      opcode: value.opcode,
       next: null,
-      parent: parentId,
-      inputs: {
-        CONDITION: [2, equalsId],
-        SUBSTACK: [2, handler.originalId],
-        SUBSTACK2: [2, alternateId]
-      },
-      fields: {},
+      parent,
+      inputs: Object.fromEntries(
+        Object.entries(value.inputs).map(([name, input]) => [name, emit(id, input)])
+      ),
+      fields: Object.fromEntries(
+        Object.entries(value.fields ?? {}).map(([name, field]) => [name, [...field]])
+      ),
       shadow: false,
       topLevel: false
     };
-    target.blocks[equalsId] = {
-      opcode: 'operator_equals',
-      next: null,
-      parent: branchId,
-      inputs: {
-        OPERAND1: [2, sumId],
-        OPERAND2: numericInput(handler.stateCode + handler.tagCode)
-      },
-      fields: {},
-      shadow: false,
-      topLevel: false
-    };
-    target.blocks[sumId] = {
-      opcode: 'operator_add',
-      next: null,
-      parent: equalsId,
-      inputs: {NUM1: [2, stateReporterId], NUM2: [2, tagReporterId]},
-      fields: {},
-      shadow: false,
-      topLevel: false
-    };
-    target.blocks[stateReporterId] = makeVariableReporter(sumId, {variableId: stateId, variableName: stateName});
-    target.blocks[tagReporterId] = makeVariableReporter(sumId, {variableId: tagId, variableName: tagName});
-    return branchId;
+    return [2, id];
   };
+  return emit(parentId, expression);
+}
 
-  const entryId = buildSelection(0, bucket.definitionId);
-  target.blocks[bucket.definitionId] = makeProcedureDefinition(bucket.prototypeId, entryId);
-  target.blocks[bucket.prototypeId] = makeProcedurePrototype(bucket.definitionId, bucket.proccode);
+function dispatcherBinary(
+  opcode: string,
+  leftName: string,
+  left: DispatcherExpression,
+  rightName: string,
+  right: DispatcherExpression
+): DispatcherExpression {
+  return dispatcherOperator(opcode, {[leftName]: left, [rightName]: right});
+}
+
+function dispatcherAdd(left: DispatcherExpression, right: DispatcherExpression): DispatcherExpression {
+  return dispatcherBinary('operator_add', 'NUM1', left, 'NUM2', right);
+}
+
+function dispatcherSubtract(left: DispatcherExpression, right: DispatcherExpression): DispatcherExpression {
+  return dispatcherBinary('operator_subtract', 'NUM1', left, 'NUM2', right);
+}
+
+function dispatcherMultiply(left: DispatcherExpression, right: DispatcherExpression): DispatcherExpression {
+  return dispatcherBinary('operator_multiply', 'NUM1', left, 'NUM2', right);
+}
+
+function dispatcherJoin(left: DispatcherExpression, right: DispatcherExpression): DispatcherExpression {
+  return dispatcherBinary('operator_join', 'STRING1', left, 'STRING2', right);
+}
+
+function dispatcherLength(value: DispatcherExpression): DispatcherExpression {
+  return dispatcherOperator('operator_length', {STRING: value});
+}
+
+function dispatcherGreater(left: DispatcherExpression, right: DispatcherExpression): DispatcherExpression {
+  return dispatcherBinary('operator_gt', 'OPERAND1', left, 'OPERAND2', right);
+}
+
+function dispatcherRouteMaskExpression(
+  template: 0 | 1,
+  secret: DispatcherExpression,
+  currentRho: DispatcherExpression,
+  nextRho: DispatcherExpression,
+  nextStep: DispatcherExpression
+): DispatcherExpression {
+  const first = template === 0
+    ? dispatcherAdd(secret, nextRho)
+    : dispatcherAdd(secret, currentRho);
+  const second = template === 0
+    ? dispatcherAdd(currentRho, nextStep)
+    : dispatcherAdd(nextRho, nextStep);
+  return dispatcherMultiply(dispatcherMultiply(first, second), secret);
+}
+
+function dispatcherMod(value: DispatcherExpression, modulus: number): DispatcherExpression {
+  return dispatcherBinary('operator_mod', 'NUM1', value, 'NUM2', dispatcherNumber(modulus));
+}
+
+function dispatcherEquals(left: DispatcherExpression, right: DispatcherExpression): DispatcherExpression {
+  return dispatcherBinary('operator_equals', 'OPERAND1', left, 'OPERAND2', right);
+}
+
+function dispatcherAnd(left: DispatcherExpression, right: DispatcherExpression): DispatcherExpression {
+  return dispatcherBinary('operator_and', 'OPERAND1', left, 'OPERAND2', right);
+}
+
+function dispatcherOr(left: DispatcherExpression, right: DispatcherExpression): DispatcherExpression {
+  return dispatcherBinary('operator_or', 'OPERAND1', left, 'OPERAND2', right);
+}
+
+function dispatcherNot(value: DispatcherExpression): DispatcherExpression {
+  return dispatcherOperator('operator_not', {OPERAND: value});
+}
+
+function dispatcherAll(expressions: readonly DispatcherExpression[]): DispatcherExpression {
+  const first = requireItem(expressions, 0, 'dispatcher conjunction');
+  return expressions.slice(1).reduce(
+    (combined, expression) => dispatcherAnd(combined, expression),
+    first
+  );
+}
+
+function dispatcherAny(expressions: readonly DispatcherExpression[]): DispatcherExpression {
+  const first = requireItem(expressions, 0, 'dispatcher disjunction');
+  return expressions.slice(1).reduce(
+    (combined, expression) => dispatcherOr(combined, expression),
+    first
+  );
+}
+
+function dispatcherFloor(value: DispatcherExpression): DispatcherExpression {
+  return dispatcherOperator('operator_mathop', {NUM: value}, {OPERATOR: ['floor', null]});
+}
+
+function dispatcherRound(value: DispatcherExpression): DispatcherExpression {
+  return dispatcherOperator('operator_round', {NUM: value});
+}
+
+function dispatcherPackedDigit(
+  wordValue: DispatcherExpression,
+  list: DispatcherPacketList,
+  logicalIndex: number,
+  modulus: number
+): DispatcherExpression {
+  const power = list.digitOrder.indexOf(logicalIndex);
+  if (power < 0) throw new Error('dispatcher packed digit is unavailable');
+  if (power === 0) return dispatcherMod(wordValue, modulus);
+  const divided = dispatcherFloor(dispatcherBinary(
+    'operator_divide',
+    'NUM1',
+    wordValue,
+    'NUM2',
+    dispatcherNumber(modulus ** power)
+  ));
+  return power === 3 ? divided : dispatcherMod(divided, modulus);
+}
+
+function emitDispatcherSetVariable(
+  target: ScratchTarget,
+  id: string,
+  parent: string | null,
+  next: string | null,
+  variable: DispatcherFrameVariable,
+  value: DispatcherExpression,
+  factory: UniqueFactory,
+  domain: string,
+  topLevel = false,
+  x?: number,
+  y?: number
+): void {
+  target.blocks[id] = {
+    opcode: 'data_setvariableto',
+    next,
+    parent,
+    inputs: {VALUE: emitDispatcherExpression(target, id, value, factory, domain)},
+    fields: {VARIABLE: [variable.variableName, variable.variableId]},
+    shadow: false,
+    topLevel,
+    ...(x === undefined ? {} : {x}),
+    ...(y === undefined ? {} : {y})
+  };
+}
+
+function emitDispatcherChangeVariable(
+  target: ScratchTarget,
+  id: string,
+  parent: string,
+  next: string | null,
+  variable: DispatcherFrameVariable,
+  value: number
+): void {
+  target.blocks[id] = {
+    opcode: 'data_changevariableby',
+    next,
+    parent,
+    inputs: {VALUE: numericInput(value)},
+    fields: {VARIABLE: [variable.variableName, variable.variableId]},
+    shadow: false,
+    topLevel: false
+  };
+}
+
+function makeDispatcherStop(parent: string): ScratchBlock {
+  return {
+    opcode: 'control_stop',
+    next: null,
+    parent,
+    inputs: {},
+    fields: {STOP_OPTION: ['this script', null]},
+    shadow: false,
+    topLevel: false,
+    mutation: {tagName: 'mutation', children: [], hasnext: 'false'}
+  };
 }
 
 function makeProcedureDefinition(prototypeId: string, bodyId: string): ScratchBlock {
@@ -1579,119 +4903,54 @@ function makeProcedureCall(
   };
 }
 
-function makeSetStateFromListBlock(
-  parent: string | null,
-  next: string | null,
-  variableName: string,
-  variableId: string,
-  reporterId: string,
-  topLevel: boolean,
-  x?: number,
-  y?: number
-): ScratchBlock {
-  return {
-    opcode: 'data_setvariableto',
-    next,
-    parent,
-    inputs: {VALUE: [2, reporterId]},
-    fields: {VARIABLE: [variableName, variableId]},
+function addDispatcherWitnessBucket(
+  target: ScratchTarget,
+  handler: DispatcherHandler,
+  modulus: number
+): void {
+  target.blocks[handler.witnessModId] = {
+    opcode: 'operator_mod',
+    next: null,
+    parent: handler.setWitnessId,
+    inputs: {NUM1: [2, handler.witnessLengthId], NUM2: numericInput(modulus)},
+    fields: {},
     shadow: false,
-    topLevel,
-    ...(x === undefined ? {} : {x}),
-    ...(y === undefined ? {} : {y})
+    topLevel: false
   };
-}
-
-function makeChangeStateFromListBlock(
-  parent: string,
-  next: string,
-  variableName: string,
-  variableId: string,
-  reporterId: string
-): ScratchBlock {
-  return {
-    opcode: 'data_changevariableby',
-    next,
-    parent,
-    inputs: {VALUE: [2, reporterId]},
-    fields: {VARIABLE: [variableName, variableId]},
+  target.blocks[handler.witnessLengthId] = {
+    opcode: 'operator_length',
+    next: null,
+    parent: handler.witnessModId,
+    inputs: {STRING: [2, handler.witnessReporterId]},
+    fields: {},
+    shadow: false,
+    topLevel: false
+  };
+  target.blocks[handler.witnessReporterId] = {
+    opcode: handler.witness.opcode,
+    next: null,
+    parent: handler.witnessLengthId,
+    inputs: {},
+    fields: Object.fromEntries(
+      Object.entries(handler.witness.fields).map(([name, field]) => [name, [...field]])
+    ),
     shadow: false,
     topLevel: false
   };
 }
 
-function makeDispatcherBranch(
-  parentId: string,
-  conditionId: string,
-  handlerCallId: string,
-  nextBranchId: string | null,
-  template: DispatcherTemplate
-): ScratchBlock {
-  if (template === 'sequential-if') {
-    return {
-      opcode: 'control_if',
-      next: nextBranchId,
-      parent: parentId,
-      inputs: {
-        CONDITION: [2, conditionId],
-        SUBSTACK: [2, handlerCallId]
-      },
-      fields: {},
-      shadow: false,
-      topLevel: false
-    };
-  }
-  return {
-    opcode: 'control_if_else',
+function addDispatcherRawWitness(
+  target: ScratchTarget,
+  handler: Pick<DispatcherHandler, 'setWitnessId' | 'witnessReporterId' | 'witness'>
+): void {
+  target.blocks[handler.witnessReporterId] = {
+    opcode: handler.witness.opcode,
     next: null,
-    parent: parentId,
-    inputs: {
-      CONDITION: [2, conditionId],
-      SUBSTACK: [2, handlerCallId],
-      SUBSTACK2: [2, nextBranchId]
-    },
-    fields: {},
-    shadow: false,
-    topLevel: false
-  };
-}
-
-function makeDispatcherConjunction(parentId: string, stateEqualsId: string, tagEqualsId: string): ScratchBlock {
-  return {
-    opcode: 'operator_and',
-    next: null,
-    parent: parentId,
-    inputs: {OPERAND1: [2, stateEqualsId], OPERAND2: [2, tagEqualsId]},
-    fields: {},
-    shadow: false,
-    topLevel: false
-  };
-}
-
-function makeReporterEquality(parentId: string, reporterId: string, expectedReporterId: string): ScratchBlock {
-  return {
-    opcode: 'operator_equals',
-    next: null,
-    parent: parentId,
-    inputs: {OPERAND1: [2, reporterId], OPERAND2: [2, expectedReporterId]},
-    fields: {},
-    shadow: false,
-    topLevel: false
-  };
-}
-
-function makeKeyedRouteExpression(
-  parentId: string,
-  keyReporterId: string,
-  code: number,
-  opcode: 'operator_add' | 'operator_subtract'
-): ScratchBlock {
-  return {
-    opcode,
-    next: null,
-    parent: parentId,
-    inputs: {NUM1: numericInput(code), NUM2: [2, keyReporterId]},
-    fields: {},
+    parent: handler.setWitnessId,
+    inputs: {},
+    fields: Object.fromEntries(
+      Object.entries(handler.witness.fields).map(([name, field]) => [name, [...field]])
+    ),
     shadow: false,
     topLevel: false
   };
@@ -1796,40 +5055,6 @@ function makeNamedListItemReporter(
     parent,
     inputs: {INDEX: numericInput(slot)},
     fields: {LIST: [listName, listId]},
-    shadow: false,
-    topLevel: false
-  };
-}
-
-function addKeyIndexedListReporter(
-  target: ScratchTarget,
-  reporterId: string,
-  indexId: string,
-  parent: string,
-  listName: string,
-  listId: string,
-  keyName: string,
-  keyId: string,
-  modulus: number
-): void {
-  target.blocks[reporterId] = {
-    opcode: 'data_itemoflist',
-    next: null,
-    parent,
-    inputs: {INDEX: [2, indexId]},
-    fields: {LIST: [listName, listId]},
-    shadow: false,
-    topLevel: false
-  };
-  target.blocks[indexId] = {
-    opcode: 'operator_mod',
-    next: null,
-    parent: reporterId,
-    inputs: {
-      NUM1: [1, [12, keyName, keyId]],
-      NUM2: numericInput(modulus)
-    },
-    fields: {},
     shadow: false,
     topLevel: false
   };
@@ -2086,7 +5311,7 @@ function collectInsertionEdges(project: ScratchProject): InsertionEdge[] {
         const block = blockAt(target, currentId);
         if (!block) break;
         const successorId = block.next;
-        if (successorId && (isVirtualizableStackBlock(block) || isHatOpcode(block.opcode))) {
+        if (successorId && (isVirtualizableStackBlock(block) || isOfficialHatOpcode(block.opcode))) {
           edges.push({targetIndex, predecessorId: currentId, successorId});
         }
         currentId = successorId;
@@ -2116,10 +5341,6 @@ function collectTopLevelSequentialEdges(project: ScratchProject): InsertionEdge[
     }
   }
   return edges;
-}
-
-function isHatOpcode(opcode: string): boolean {
-  return opcode.startsWith('event_when') || opcode === 'control_start_as_clone';
 }
 
 function insertDualRail(
@@ -2167,10 +5388,13 @@ function insertDualRail(
     topLevel: false
   };
   target.blocks[secondRailId] = {
-    opcode: 'data_addtolist',
+    opcode: 'data_replaceitemoflist',
     next: null,
     parent: railId,
-    inputs: {ITEM: textInput(`r_${rng.id('d_', 10)}`)},
+    inputs: {
+      INDEX: numericInput(1),
+      ITEM: textInput(`r_${rng.id('d_', 10)}`)
+    },
     fields: {LIST: [state.listName, state.listId]},
     shadow: false,
     topLevel: false
@@ -2502,11 +5726,11 @@ function addCoherentDecoySubsystems(
   factory: UniqueFactory,
   rng: DeterministicGenerator,
   vocabulary: DecoyVocabulary,
-  stats: ObfuscationStats
+  stats: ObfuscationStats,
+  maximumSiteGrowth: number
 ): void {
   if (mode !== 'no-preserve') return;
   const maximumDepth = 128;
-  const maximumSiteGrowth = 256;
   let remainingGrowth = maximumAdditionalGrowth;
   let ordinal = 0;
   const entryBroadcasts: FakeBroadcast[] = [];
@@ -2912,10 +6136,10 @@ function fillDecoyBudget(
   factory: UniqueFactory,
   rng: DeterministicGenerator,
   vocabulary: DecoyVocabulary,
-  stats: ObfuscationStats
+  stats: ObfuscationStats,
+  maximumSiteGrowth: number
 ): void {
   const maximumDepth = mode === 'lossy' ? 32 : 128;
-  const maximumSiteGrowth = mode === 'lossy' ? 64 : 256;
   const sites = [...guards];
   let siteCursor = 0;
   let decoyOrdinal = 0;
@@ -3163,11 +6387,5 @@ function requireBlock(target: ScratchTarget, id: string): ScratchBlock {
 function requireItem<T>(values: readonly T[], index: number, description: string): T {
   const value = values[index];
   if (value === undefined) throw new Error(`${description} is incomplete`);
-  return value;
-}
-
-function requireMapItem<K, V>(values: ReadonlyMap<K, V>, key: K, description: string): V {
-  const value = values.get(key);
-  if (value === undefined) throw new Error(`${description} is unavailable`);
   return value;
 }

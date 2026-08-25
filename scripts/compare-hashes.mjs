@@ -8,7 +8,17 @@ const expectedNames = [
   'no-preserve.sb3',
   'lossless-anticheat.sb3',
   'lossy-anticheat.sb3',
-  'no-preserve-anticheat.sb3'
+  'lossy-anticheat-allowsize.sb3',
+  'lossy-allowsize.sb3',
+  'no-preserve-allowsize.sb3',
+  'no-preserve-anticheat.sb3',
+  'no-preserve-anticheat-allowsize.sb3',
+  'no-preserve-anticheat-extra.sb3',
+  'no-preserve-anticheat-extra-allowsize.sb3',
+  'lossless-antisave.sb3',
+  'lossy-antisave.sb3',
+  'no-preserve-antisave.sb3',
+  'no-preserve-anticheat-extra-allowsize-antisave.sb3'
 ].sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
 
 const root = process.argv[2];
