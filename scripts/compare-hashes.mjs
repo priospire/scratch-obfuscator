@@ -4,6 +4,7 @@ import {join} from 'node:path';
 
 const expectedNames = [
   'lossless.sb3',
+  'lossless-extra2.sb3',
   'lossy.sb3',
   'no-preserve.sb3',
   'lossless-anticheat.sb3',

@@ -2,6 +2,7 @@ import {isPrimitive, isScratchBlock} from '../model/blocks.js';
 import {cloneProject, hasOwn} from '../model/json.js';
 import type {JsonValue, ScratchBlock, ScratchInput, ScratchProject, ScratchTarget} from '../types.js';
 import {validateProject} from '../validation/index.js';
+import {isOfficialHatOpcode} from '../validation/extensions.js';
 
 type StaticValue = boolean | number | string;
 
@@ -19,6 +20,7 @@ export interface OptimizationStats {
   reporterBlocksRemoved: number;
   inactiveFallbacksRemoved: number;
   inactiveFallbackBlocksRemoved: number;
+  orphanedShadowHatRootsRestored: number;
   staleInvisibleMonitorsRemoved: number;
   commentsRemoved: number;
 }
@@ -157,6 +159,7 @@ export function optimizeProject(project: ScratchProject, options: OptimizationOp
   validateProject(project, {
     allowRecoverableLocalSymbolIdCollisions: true,
     allowRecoverableInactiveShadowOwnership: true,
+    allowRecoverableOrphanedShadowHatRoots: true,
     allowRecoverableStaleInvisibleMonitors: true
   });
   const output = cloneProject(project);
@@ -186,6 +189,7 @@ function createStats(): OptimizationStats {
     reporterBlocksRemoved: 0,
     inactiveFallbacksRemoved: 0,
     inactiveFallbackBlocksRemoved: 0,
+    orphanedShadowHatRootsRestored: 0,
     staleInvisibleMonitorsRemoved: 0,
     commentsRemoved: 0
   };
@@ -199,8 +203,30 @@ function optimizeValidatedProject(
   removeStaleInvisibleMonitors(project, stats);
   for (const target of project.targets) {
     const incoming = collectIncomingReferences(target);
+    restoreOrphanedShadowHatRoots(target, incoming, stats);
     removeInactiveFallbacks(target, incoming, stats);
     if (options.foldConstants !== false) foldStaticReporterInputs(target, incoming, stats);
+  }
+}
+
+function restoreOrphanedShadowHatRoots(
+  target: ScratchTarget,
+  incoming: ReadonlyMap<string, number>,
+  stats: OptimizationStats
+): void {
+  for (const [id, value] of Object.entries(target.blocks)) {
+    if (
+      !isScratchBlock(value)
+      || !value.shadow
+      || value.topLevel
+      || value.parent !== null
+      || (incoming.get(id) ?? 0) !== 0
+      || !isOfficialHatOpcode(value.opcode)
+    ) continue;
+    value.topLevel = true;
+    value.x = 0;
+    value.y = 0;
+    stats.orphanedShadowHatRootsRestored += 1;
   }
 }
 

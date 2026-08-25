@@ -39,20 +39,23 @@ const [
   losslessAntiSavePath,
   lossyAntiSavePath,
   noPreserveAntiSavePath,
-  noPreserveAntiExtraAllowSizeAntiSavePath
+  noPreserveAntiExtraAllowSizeAntiSavePath,
+  losslessExtra2Path
 ] = process.argv.slice(2);
 if (!fixturePath || !losslessPath || !lossyPath || !noPreservePath ||
     !losslessAntiPath || !lossyAntiPath || !noPreserveAntiPath || !noPreserveAntiExtraPath ||
     !lossyAllowSizePath || !noPreserveAllowSizePath || !noPreserveAntiExtraAllowSizePath ||
     !lossyAntiAllowSizePath || !noPreserveAntiAllowSizePath || !losslessAntiSavePath ||
-    !lossyAntiSavePath || !noPreserveAntiSavePath || !noPreserveAntiExtraAllowSizeAntiSavePath) {
+    !lossyAntiSavePath || !noPreserveAntiSavePath || !noPreserveAntiExtraAllowSizeAntiSavePath ||
+    !losslessExtra2Path) {
   throw new Error(
     'usage: assert-release-outputs.mjs <fixture.sb3> <lossless.sb3> <lossy.sb3> <no-preserve.sb3> ' +
     '<lossless-anticheat.sb3> <lossy-anticheat.sb3> <no-preserve-anticheat.sb3> ' +
     '<no-preserve-anticheat-extra.sb3> <lossy-allowsize.sb3> <no-preserve-allowsize.sb3> ' +
     '<no-preserve-anticheat-extra-allowsize.sb3> <lossy-anticheat-allowsize.sb3> ' +
     '<no-preserve-anticheat-allowsize.sb3> <lossless-antisave.sb3> <lossy-antisave.sb3> ' +
-    '<no-preserve-antisave.sb3> <no-preserve-anticheat-extra-allowsize-antisave.sb3>'
+    '<no-preserve-antisave.sb3> <no-preserve-anticheat-extra-allowsize-antisave.sb3> ' +
+    '<lossless-extra2.sb3>'
   );
 }
 
@@ -123,6 +126,7 @@ const outputs = await Promise.all(specifications.map(async specification => ({
 const extraArchive = await loadArchive(noPreserveAntiExtraPath);
 const extraAllowSizeArchive = await loadArchive(noPreserveAntiExtraAllowSizePath);
 const extraAllowSizeAntiSaveArchive = await loadArchive(noPreserveAntiExtraAllowSizeAntiSavePath);
+const extra2Archive = await loadArchive(losslessExtra2Path);
 const antiCheatCheckpoints = new Map();
 
 assertFixtureContract(fixture.project);
@@ -235,6 +239,35 @@ assertExtraPrivacy(
   extraAllowSizeAntiSaveCheckpoint,
   true
 );
+const extra2Replay = replayDeterministicOutput(strictFixture, extra2Archive, {
+  mode: 'lossless',
+  allowSize: false,
+  extra: true,
+  extraLevel: 2,
+  antiCheat: false,
+  antiSave: false,
+  label: 'lossless + extra 2'
+});
+const extra1Replay = obfuscateProject(
+  strictFixture.project,
+  'lossless',
+  deriveModeSeed(strictFixture.seed, 'lossless'),
+  {
+    allowSize: false,
+    extra: true,
+    extraLevel: 1,
+    antiCheat: false,
+    antiSave: false
+  }
+);
+assertExtraEditorShadowOutput(
+  fixture,
+  extra2Archive,
+  extra2Replay.project,
+  extra1Replay.project,
+  originalIds,
+  originalRenamableNames
+);
 assertExpandedPolicyEffective(
   outputs,
   antiCheatCheckpoints,
@@ -243,7 +276,7 @@ assertExpandedPolicyEffective(
 );
 await strictFixture.cleanup();
 
-process.stdout.write('Release fixture assertions passed for all 16 mode, protection, privacy, and size-policy outputs.\n');
+process.stdout.write('Release fixture assertions passed for all 17 mode, protection, privacy, and size-policy outputs.\n');
 
 function assertExpandedPolicyEffective(outputs, antiCheatCheckpoints, extraCheckpoint, extraAllowSizeCheckpoint) {
   const byLabel = new Map(outputs.map(output => [output.label, output]));
@@ -346,7 +379,8 @@ function replayDeterministicOutput(fixtureArchive, suppliedArchive, options) {
       antiCheat: options.antiCheat,
       antiSave: options.antiSave,
       allowSize: options.allowSize,
-      extra: options.extra
+      extra: options.extra,
+      extraLevel: options.extraLevel
     }
   );
   const replayedBytes = serializeProjectPayload(replay.project);
@@ -735,6 +769,72 @@ function assertExtraPrivacy(
     : assertNoAntiSave(transformed, label);
   assertGrowthCap(original, transformed, 'no-preserve', allowSize, label, antiCheatCheckpoint, antiSaveAudit);
   assertSerializedGrowth(original, transformed, 'no-preserve', allowSize, label, antiCheatCheckpoint);
+}
+
+function assertExtraEditorShadowOutput(
+  fixtureArchive,
+  suppliedArchive,
+  replayedProject,
+  levelOneProject,
+  originalIds,
+  originalRenamableNames
+) {
+  const label = 'lossless + extra 2';
+  const transformed = suppliedArchive.project;
+  assertAssetsEqual(fixtureArchive.entries, suppliedArchive.entries, label);
+  assert(
+    Buffer.compare(
+      Buffer.from(serializeProjectPayload(replayedProject)),
+      Buffer.from(suppliedArchive.projectBytes)
+    ) === 0,
+    `${label} replay differs from the supplied archive`
+  );
+
+  const strings = collectStrings(transformed);
+  for (const id of originalIds) assert(!strings.has(id), `${label} retained original identifier ${JSON.stringify(id)}`);
+  for (const name of originalRenamableNames) {
+    assert(!strings.has(name), `${label} retained renamable name ${JSON.stringify(name)}`);
+  }
+  assertNoInactiveFallbacks(transformed, label);
+  assertWatermark(transformed, label);
+  assertOpaqueSymbolNames(transformed, label);
+  assertStaticOptimization(transformed, 'lossless', label);
+  assertVariablePacking(transformed, 'lossless', false, label);
+  assertNoAntiCheat(transformed, label);
+  assertNoAntiSave(transformed, label);
+
+  const officialHats = objectBlocks(transformed).filter(entry => (
+    entry.block.topLevel && isOfficialHatOpcode(entry.block.opcode)
+  ));
+  assert(officialHats.length > 0, `${label} fixture has no final official native top-level hat`);
+  assert(
+    officialHats.every(entry => entry.block.shadow === true),
+    `${label} left a final official native top-level hat unshadowed`
+  );
+
+  const restored = JSON.parse(Buffer.from(serializeProjectPayload(transformed)).toString('utf8'));
+  let changedHats = 0;
+  for (const {targetIndex, id, block} of objectBlocks(restored)) {
+    if (!block.topLevel || !isOfficialHatOpcode(block.opcode)) continue;
+    const baseline = levelOneProject.targets[targetIndex]?.blocks?.[id];
+    assert(
+      isObjectBlock(baseline) && baseline.topLevel && baseline.opcode === block.opcode,
+      `${label} changed the native-hat topology at target ${targetIndex}, block ${JSON.stringify(id)}`
+    );
+    if (baseline.shadow !== true) changedHats += 1;
+    block.shadow = baseline.shadow;
+  }
+  assert(changedHats > 0, `${label} did not exercise a false-to-true native-hat shadow change`);
+  assert(
+    Buffer.compare(
+      Buffer.from(serializeProjectPayload(restored)),
+      Buffer.from(serializeProjectPayload(levelOneProject))
+    ) === 0,
+    `${label} changed non-hat shadow data or topology beyond extra level 1`
+  );
+
+  assertGrowthCap(fixtureArchive.project, transformed, 'lossless', false, label);
+  assertSerializedGrowth(fixtureArchive.project, transformed, 'lossless', false, label);
 }
 
 function withoutDisplayName(descriptor) {

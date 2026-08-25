@@ -2,7 +2,11 @@ import {InputError} from '../errors.js';
 import {isPrimitive, isScratchBlock} from '../model/blocks.js';
 import {assertJsonTree, hasOwn, isRecord} from '../model/json.js';
 import type {ScratchBlock, ScratchBlockValue, ScratchProject, ScratchTarget} from '../types.js';
-import {OFFICIAL_LITERAL_SHADOW_OPCODES, validateOfficialExtensions} from './extensions.js';
+import {
+  isOfficialHatOpcode,
+  OFFICIAL_LITERAL_SHADOW_OPCODES,
+  validateOfficialExtensions
+} from './extensions.js';
 import {validateOfficialSchema} from './schema.js';
 
 type SymbolKind = 'variable' | 'list' | 'broadcast';
@@ -11,6 +15,7 @@ type RegisterImplicitReference = (kind: SymbolKind, name: string, effectiveId: s
 export interface ProjectValidationOptions {
   readonly allowRecoverableLocalSymbolIdCollisions?: boolean;
   readonly allowRecoverableInactiveShadowOwnership?: boolean;
+  readonly allowRecoverableOrphanedShadowHatRoots?: boolean;
   readonly allowRecoverableStaleInvisibleMonitors?: boolean;
 }
 
@@ -348,6 +353,13 @@ function validateGraphOwnership(
       && incoming[0]?.inactiveShadow === true
       && (!value.topLevel || OFFICIAL_LITERAL_SHADOW_OPCODES.has(value.opcode));
     if (recoverableInactiveShadow) continue;
+    const recoverableOrphanedShadowHatRoot = options.allowRecoverableOrphanedShadowHatRoots === true
+      && value.shadow
+      && !value.topLevel
+      && value.parent === null
+      && incoming.length === 0
+      && isOfficialHatOpcode(value.opcode);
+    if (recoverableOrphanedShadowHatRoot) continue;
     if (value.topLevel) {
       if (value.parent !== null) fail(`${path}.${blockId}.parent`, 'top-level block must have a null parent');
       if (incoming.length > 0) fail(`${path}.${blockId}`, 'top-level block must not have an incoming block edge');

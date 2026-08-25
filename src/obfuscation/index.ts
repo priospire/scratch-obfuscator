@@ -3,6 +3,7 @@ import {InputError} from '../errors.js';
 import {countBlockEquivalents} from '../model/blocks.js';
 import {cloneProject} from '../model/json.js';
 import type {
+  ExtraPrivacyLevel,
   ObfuscationMode,
   ObfuscationOptions,
   ObfuscationResult,
@@ -37,16 +38,21 @@ import {
 import {applyCommonTransforms} from './common.js';
 import {applySafeOptimizations} from './optimizer.js';
 import {
+  applyExtraEditorShadowTransform,
   applyExtraPrivacyTransform,
+  EXTRA_EDITOR_SHADOW_ALLOWED_CHANGES,
+  EXTRA_EDITOR_SHADOW_PASS_NAME,
   EXTRA_PRIVACY_ALLOWED_CHANGES,
   EXTRA_PRIVACY_GENERATOR_DOMAIN,
-  EXTRA_PRIVACY_PASS_NAME
+  EXTRA_PRIVACY_PASS_NAME,
+  type ExtraEditorShadowManifest
 } from './privacy.js';
 
 const MODES = new Set<ObfuscationMode>(['lossless', 'lossy', 'no-preserve']);
 const RECOVERABLE_INPUT_OPTIONS = Object.freeze({
   allowRecoverableLocalSymbolIdCollisions: true,
   allowRecoverableInactiveShadowOwnership: true,
+  allowRecoverableOrphanedShadowHatRoots: true,
   allowRecoverableStaleInvisibleMonitors: true
 });
 const OPTIMIZER_CHANGES = Object.freeze<VerificationChangeCategory[]>([
@@ -114,9 +120,14 @@ export function obfuscateProject(
   const fallback = runTransformAttempt(project, mode, seed, options, progress, false, false, 'lossless');
   if (fallback.verification.verdict === 'failed') throw verificationFailure(fallback.verification);
   const attribution = verificationFailureAttribution(primary.verification);
-  const fallbackDescription = options.antiCheat === true
-    ? 'common lossless transforms plus anti-cheat instrumentation were emitted instead'
-    : 'common lossless transforms were emitted instead';
+  const retainedModifiers = [
+    ...(options.antiCheat === true ? ['anti-cheat'] : []),
+    ...(options.antiSave === true ? ['anti-save'] : []),
+    ...(resolveExtraLevel(options) > 0 ? [`extra level ${resolveExtraLevel(options)}`] : [])
+  ];
+  const fallbackDescription = retainedModifiers.length === 0
+    ? 'common lossless transforms were emitted instead'
+    : `common lossless transforms were emitted with requested modifiers retained (${retainedModifiers.join(', ')})`;
   fallback.result.stats.warnings.push(
     `Static verification rejected the ${mode} structural candidate (${attribution}); ${fallbackDescription}.`
   );
@@ -169,12 +180,15 @@ function transformValidatedProject(
   const output = cloneProject(project);
   const blocksBefore = countBlockEquivalents(output);
   const stats = createStats(mode, blocksBefore);
+  const extraLevel = resolveExtraLevel(options);
+  stats.extraPrivacyLevel = extraLevel;
   const generator = new DeterministicGenerator(
     seed,
     options.antiCheat === true ? `obfuscation:${mode}\u0000anti-cheat:v2` : `obfuscation:${mode}`
   );
   const passTrace: VerificationPassBoundary[] = [];
   let antiSaveManifest: AntiSaveVerificationManifest | undefined;
+  let extraEditorShadowManifest: ExtraEditorShadowManifest | undefined;
   let previousSnapshot = captureProjectVerificationSnapshot(project);
   const recordPass = (
     pass: string,
@@ -202,6 +216,12 @@ function transformValidatedProject(
   stats.constantsFolded = optimized.reporterTreesFolded;
   stats.inactiveFallbacksRemoved = optimized.inactiveFallbacksRemoved;
   stats.commentsRemoved += optimized.commentsRemoved;
+  if (optimized.orphanedShadowHatRootsRestored > 0) {
+    const suffix = optimized.orphanedShadowHatRootsRestored === 1 ? '' : 's';
+    stats.warnings.push(
+      `Restored ${optimized.orphanedShadowHatRootsRestored} VM-normalized shadow event stack root${suffix} for deterministic re-obfuscation.`
+    );
+  }
   if (optimized.staleInvisibleMonitorsRemoved > 0) {
     const suffix = optimized.staleInvisibleMonitorsRemoved === 1 ? '' : 's';
     stats.warnings.push(
@@ -263,7 +283,7 @@ function transformValidatedProject(
   stats.commentsRemoved += cleaned.commentsRemoved;
   let losslessCoreSnapshot = recordPass('post-transform-cleanup', CLEANUP_CHANGES);
 
-  if (options.extra === true) {
+  if (extraLevel >= 1) {
     if (reportProgress) {
       progress('applying-extra-privacy', 86, 'obscuring project names and optional editor metadata');
     }
@@ -331,6 +351,24 @@ function transformValidatedProject(
     recordPass('watermark', WATERMARK_CHANGES);
   }
 
+  if (extraLevel === 2) {
+    if (reportProgress) {
+      progress('applying-extra-editor-shadowing', 97, 'marking native event hats as editor-disrupting shadows');
+    }
+    const editorShadow = applyExtraEditorShadowTransform(output);
+    extraEditorShadowManifest = editorShadow.manifest;
+    stats.privacyHatShadowSites = editorShadow.coveredHatCount;
+    stats.privacyHatShadowChanges = editorShadow.changedHatCount;
+    for (const caveat of editorShadow.caveats) appendUnique(stats.caveats ??= [], caveat);
+    recordPass(EXTRA_EDITOR_SHADOW_PASS_NAME, EXTRA_EDITOR_SHADOW_ALLOWED_CHANGES);
+    if (reportProgress) {
+      progress('applying-extra-editor-shadowing', 97, 'native event hats marked as editor-disrupting shadows', {
+        coveredHats: editorShadow.coveredHatCount,
+        changedHats: editorShadow.changedHatCount
+      });
+    }
+  }
+
   stats.blocksAfter = countBlockEquivalents(output);
   if (reportProgress) progress('validating-result', 98, 'checking the transformed reference graph and growth limits');
   const verification = verifyPostTransform(project, output, {
@@ -338,10 +376,12 @@ function transformValidatedProject(
     antiCheat: options.antiCheat === true,
     antiSave: options.antiSave === true,
     allowSize: options.allowSize === true,
-    extra: options.extra === true,
+    extra: extraLevel >= 1,
+    extraLevel,
     stats: verificationMode === mode ? stats : {...stats, mode: verificationMode},
     passTrace,
     ...(antiSaveManifest === undefined ? {} : {antiSaveManifest}),
+    ...(extraEditorShadowManifest === undefined ? {} : {extraEditorShadowManifest}),
     ...(verificationMode === 'lossless' && (options.antiCheat === true || options.antiSave === true)
       ? {losslessCoreSnapshot}
       : {})
@@ -379,10 +419,15 @@ export function getAntiCheatReleaseCheckpoint(
   if (!attempt) throw new Error('release checkpoint requested for an unregistered obfuscation result');
   const matches = attempt.passTrace.filter(boundary => boundary.pass === 'anti-cheat-instrumentation');
   const checkpoint = matches.length === 1 ? matches[0] : undefined;
+  const terminal = attempt.passTrace.at(-1);
+  const editorShadowAfterAntiCheat = checkpoint !== undefined
+    && terminal?.pass === EXTRA_EDITOR_SHADOW_PASS_NAME
+    && terminal.before.fullDigest === checkpoint.after.fullDigest
+    && terminal.after.fullDigest === attempt.verification.transformed.fullDigest;
   if (
     checkpoint === undefined
-    || attempt.passTrace.at(-1) !== checkpoint
-    || checkpoint.after.fullDigest !== attempt.verification.transformed.fullDigest
+    || (!editorShadowAfterAntiCheat && attempt.passTrace.at(-1) !== checkpoint)
+    || (!editorShadowAfterAntiCheat && checkpoint.after.fullDigest !== attempt.verification.transformed.fullDigest)
   ) return undefined;
   return checkpoint;
 }
@@ -403,6 +448,8 @@ function createStats(mode: ObfuscationMode, blocksBefore: number): ObfuscationSt
     inactiveFallbacksRemoved: 0,
     antiCheatDecoys: 0,
     antiSaveCanaries: 0,
+    privacyHatShadowSites: 0,
+    privacyHatShadowChanges: 0,
     warnings: [],
     caveats: []
   };
@@ -423,9 +470,28 @@ function validateArguments(mode: ObfuscationMode, seed: Uint8Array, options: Obf
   if (options.extra !== undefined && typeof options.extra !== 'boolean') {
     throw new InputError('extra must be a boolean');
   }
+  if (options.extraLevel !== undefined && !isExtraPrivacyLevel(options.extraLevel)) {
+    throw new InputError('extraLevel must be 0, 1, or 2');
+  }
+  if (
+    options.extra !== undefined
+    && options.extraLevel !== undefined
+    && options.extra !== (options.extraLevel > 0)
+  ) {
+    throw new InputError('extra conflicts with extraLevel');
+  }
   if (options.onProgress !== undefined && typeof options.onProgress !== 'function') {
     throw new InputError('onProgress must be a function');
   }
+}
+
+function resolveExtraLevel(options: ObfuscationOptions): ExtraPrivacyLevel {
+  if (options.extraLevel !== undefined) return options.extraLevel;
+  return options.extra === true ? 1 : 0;
+}
+
+function isExtraPrivacyLevel(value: unknown): value is ExtraPrivacyLevel {
+  return value === 0 || value === 1 || value === 2;
 }
 
 type ProgressReporter = (

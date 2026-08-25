@@ -444,6 +444,36 @@ describe('safe deterministic optimizer', () => {
     expect(mutable.monitors).toEqual([project.monitors[1], project.monitors[2]]);
     validateProject(mutable);
   });
+
+  it('restores only official orphaned shadow hats produced by an official save', () => {
+    const project = createFixtureProject();
+    const stage = project.targets[0];
+    if (!stage) throw new Error('fixture Stage is unavailable');
+    const hat = stage.blocks['start_script'];
+    if (!isScratchBlock(hat)) throw new Error('fixture hat is unavailable');
+    hat.shadow = true;
+    hat.topLevel = false;
+    delete hat.x;
+    delete hat.y;
+
+    expect(() => validateProject(project)).toThrow(/non-top-level block must have an owning parent/u);
+    expect(() => validateProject(project, {allowRecoverableOrphanedShadowHatRoots: true})).not.toThrow();
+
+    const result = optimizeProject(project, {foldConstants: false});
+    const restored = result.project.targets[0]?.blocks['start_script'];
+    expect(result.stats.orphanedShadowHatRootsRestored).toBe(1);
+    expect(restored).toEqual(expect.objectContaining({shadow: true, topLevel: true, parent: null, x: 0, y: 0}));
+    validateProject(result.project);
+
+    const unrelated = createFixtureProject();
+    const unrelatedStage = unrelated.targets[0];
+    if (!unrelatedStage) throw new Error('fixture Stage is unavailable');
+    unrelatedStage.blocks['orphan-shadow'] = {
+      opcode: 'looks_show', next: null, parent: null, inputs: {}, fields: {}, shadow: true, topLevel: false
+    };
+    expect(() => validateProject(unrelated, {allowRecoverableOrphanedShadowHatRoots: true}))
+      .toThrow(/non-top-level block must have an owning parent/u);
+  });
 });
 
 function operatorCaseProject(testCase: OperatorCase): ScratchProject {

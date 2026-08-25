@@ -1,6 +1,7 @@
-import type {ObfuscationMode, ObfuscationStats} from './types.js';
+import type {ExtraPrivacyLevel, ObfuscationMode, ObfuscationStats} from './types.js';
 import {RELEASE_TEST_COVERAGE, type ReleaseCoverageMetric} from './release-coverage.js';
 import {ANTI_SAVE_CAVEAT} from './obfuscation/antisave.js';
+import {EXTRA_EDITOR_SHADOW_CAVEAT} from './obfuscation/privacy.js';
 
 export type CliVerbosity = 'normal' | 'verbose' | 'max';
 
@@ -93,13 +94,14 @@ export function formatSuccessSummary(
   antiCheat: boolean,
   stats: ObfuscationStats,
   caveatCount: number = stats.caveats?.length ?? 0,
-  extra = false,
+  extra: ExtraPrivacyLevel | boolean = 0,
   allowSize = false,
   antiSave = false
 ): string {
+  const extraLevel = normalizeExtraLevel(extra);
   const summary = 'Obfuscation completed: 100% (operation completion, not protection strength)\n'
     + `Obfuscated ${JSON.stringify(inputName)} -> ${JSON.stringify(outputName)}`
-    + ` (mode=${mode}, anticheat=${antiCheat ? 'on' : 'off'}, extra=${extra ? 'on' : 'off'},`
+    + ` (mode=${mode}, anticheat=${antiCheat ? 'on' : 'off'}, extra=${extraLevel === 0 ? 'off' : extraLevel},`
     + ` allowsize=${allowSize ? 'on' : 'off'}, antisave=${antiSave ? 'on' : 'off'},`
     + ` blocks=${stats.blocksBefore}->${stats.blocksAfter}, renamed=${stats.identifiersRenamed + stats.symbolsRenamed},`
     + ` packed=${stats.variablesVirtualized ?? 0}, folded=${stats.constantsFolded ?? 0},`
@@ -140,7 +142,9 @@ export function formatVerboseReport(
         + ` anticheat-decoys=${stats.antiCheatDecoys ?? 0}, antisave-canaries=${stats.antiSaveCanaries ?? 0}`,
       `max-detail: privacy-names=${stats.privacyNamesRenamed ?? 0},`
         + ` privacy-monitors=${stats.privacyMonitorsCanonicalized ?? 0},`
-        + ` privacy-metadata-properties=${stats.privacyMetadataPropertiesRemoved ?? 0}`,
+        + ` privacy-metadata-properties=${stats.privacyMetadataPropertiesRemoved ?? 0},`
+        + ` privacy-shadow-hat-sites=${stats.privacyHatShadowSites ?? 0},`
+        + ` privacy-shadow-hat-changes=${stats.privacyHatShadowChanges ?? 0}`,
       `max-detail: static-verifier-caveats=${verification?.caveats ?? 0},`
         + ` attributed-passes=${verification?.attributedPasses ?? 0}`
     );
@@ -151,10 +155,11 @@ export function formatVerboseReport(
 export function cliCaveats(
   mode: ObfuscationMode,
   antiCheat: boolean,
-  extra = false,
+  extra: ExtraPrivacyLevel | boolean = 0,
   allowSize = false,
   antiSave = false
 ): string[] {
+  const extraLevel = normalizeExtraLevel(extra);
   const caveats: string[] = [];
   if (mode === 'no-preserve') {
     caveats.push(
@@ -168,17 +173,22 @@ export function cliCaveats(
         ? 'lossless common transforms preserve the original executable opcode topology before anti-cheat instrumentation; anti-cheat intentionally adds executable guard topology.'
         : 'lossless common transforms preserve the original executable opcode topology before instrumentation; antisave intentionally adds executable guard topology.'
     );
+  } else if (extraLevel === 2) {
+    caveats.push(
+      'lossless common transforms preserve executable opcode topology before the terminal extra level 2 shadow pass; that pass intentionally disables native event stacks.'
+    );
   } else {
     caveats.push('lossless preserves executable opcode topology; comments and workspace layout are intentionally not preserved.');
   }
   if (antiCheat) {
     caveats.push('anti-cheat is local tamper response; an editor with complete archive control remains outside its trust boundary.');
   }
-  if (extra) {
+  if (extraLevel >= 1) {
     caveats.push(
       'extra intentionally waives compatibility for computed name-based dispatch, editor-visible names and monitor presentation, and external target or asset-name consumers.'
     );
   }
+  if (extraLevel === 2) caveats.push(EXTRA_EDITOR_SHADOW_CAVEAT);
   if (allowSize && mode !== 'lossless') {
     caveats.push('allowsize permits expanded bounded block and file-size growth in the selected stronger mode.');
   } else if (allowSize) {
@@ -223,6 +233,12 @@ function percentage(numerator: number, denominator: number): string {
 
 function signedInteger(value: number): string {
   return value > 0 ? `+${value}` : String(value);
+}
+
+function normalizeExtraLevel(value: ExtraPrivacyLevel | boolean): ExtraPrivacyLevel {
+  if (value === true) return 1;
+  if (value === false) return 0;
+  return value;
 }
 
 function coverageEntries(): Array<readonly [string, ReleaseCoverageMetric]> {

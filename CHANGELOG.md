@@ -1,3 +1,23 @@
+### v0.8.0
+
+#### Added
+
+- Added opt-in `-extra 2` native event-hat shadowing with explicit runtime caveats.
+- Added manifest-bound shadow-pass verification and official VM save/reload coverage.
+- Added level-aware CLI summaries, progress details, release outputs, and cross-platform hashes.
+
+#### Fixed
+
+- Fixed semantic verification and anti-cheat checkpoints around the terminal shadow pass.
+- Fixed anti-save verification with gameplay integrity continuation guards.
+- Fixed re-obfuscation of official-VM-resaved shadow event stacks.
+- Fixed extra-level stats and deterministic repeated-flag reporting.
+- Fixed documentation to state that shadow hats disable stacks but do not prevent saving or guarantee an editor freeze.
+
+#### Vulnerabilities
+
+- None reported.
+
 ### v0.7.0
 
 #### Added

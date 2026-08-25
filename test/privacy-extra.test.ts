@@ -5,14 +5,19 @@ import {join} from 'node:path';
 import {afterEach, describe, expect, it} from 'vitest';
 import {parseCliArguments, runCli} from '../src/cli.js';
 import {DeterministicGenerator} from '../src/deterministic.js';
-import {isPrimitive, isScratchBlock} from '../src/model/blocks.js';
+import {countBlockEquivalents, isPrimitive, isScratchBlock} from '../src/model/blocks.js';
+import {isOfficialHatOpcode} from '../src/obfuscation/analysis.js';
 import {applyCommonTransforms} from '../src/obfuscation/common.js';
-import {obfuscateProject} from '../src/obfuscation/index.js';
+import {getAntiCheatReleaseCheckpoint, obfuscateProject} from '../src/obfuscation/index.js';
 import {
+  applyExtraEditorShadowTransform,
   applyExtraPrivacyTransform,
+  EXTRA_EDITOR_SHADOW_CAVEAT,
+  EXTRA_EDITOR_SHADOW_PASS_NAME,
   EXTRA_PRIVACY_ALLOWED_CHANGES,
   EXTRA_PRIVACY_GENERATOR_DOMAIN,
-  EXTRA_PRIVACY_PASS_NAME
+  EXTRA_PRIVACY_PASS_NAME,
+  isTrustedExtraEditorShadowManifest
 } from '../src/obfuscation/privacy.js';
 import type {JsonValue, ObfuscationStats, ScratchBlock, ScratchProject, ScratchTarget} from '../src/types.js';
 import {validateProject} from '../src/validation/index.js';
@@ -418,6 +423,116 @@ describe('extra privacy project pass', () => {
   });
 });
 
+describe('extra level 2 editor-shadow pass', () => {
+  it('marks every final native event hat and changes no other serialized value', () => {
+    const first = createFixtureProject();
+    const second = structuredClone(first);
+    const firstOrder = first.targets.map(target => Object.keys(target.blocks));
+    const equivalentsBefore = countBlockEquivalents(first);
+
+    const firstReport = applyExtraEditorShadowTransform(first);
+    const secondReport = applyExtraEditorShadowTransform(second);
+
+    expect(first).toEqual(second);
+    expect(firstReport).toEqual(secondReport);
+    expect(first.targets.map(target => Object.keys(target.blocks))).toEqual(firstOrder);
+    expect(countBlockEquivalents(first)).toBe(equivalentsBefore);
+    expect(firstReport.coveredHatCount).toBe(2);
+    expect(firstReport.changedHatCount).toBe(2);
+    expect(firstReport.manifest).toMatchObject({version: 1, changedHatCount: 2});
+    expect(firstReport.manifest.sites).toHaveLength(2);
+    expect(isTrustedExtraEditorShadowManifest(firstReport.manifest)).toBe(true);
+    expect(isTrustedExtraEditorShadowManifest(structuredClone(firstReport.manifest))).toBe(false);
+    expect(firstReport.caveats).toEqual([EXTRA_EDITOR_SHADOW_CAVEAT]);
+    expect(EXTRA_EDITOR_SHADOW_PASS_NAME).toBe('extra-editor-shadow-hats');
+
+    for (const target of first.targets) {
+      for (const value of Object.values(target.blocks)) {
+        if (!isScratchBlock(value) || !value.topLevel || !isOfficialHatOpcode(value.opcode)) continue;
+        expect(value.shadow).toBe(true);
+      }
+    }
+    expect(requiredBlock(requiredTarget(first, 0), 'set_score').shadow).toBe(false);
+    expect(requiredBlock(requiredTarget(first, 1), 'change_local').shadow).toBe(false);
+    validateProject(first);
+  });
+
+  it('records pre-existing shadow state and reports a project with no native hats', () => {
+    const project = createFixtureProject();
+    requiredBlock(requiredTarget(project, 0), 'start_script').shadow = true;
+    requiredTarget(project, 1).blocks = {};
+    const report = applyExtraEditorShadowTransform(project);
+
+    expect(report.coveredHatCount).toBe(1);
+    expect(report.changedHatCount).toBe(0);
+    expect(report.manifest.sites).toEqual([
+      expect.objectContaining({targetIndex: 0, previousShadow: true, opcode: 'event_whenflagclicked'})
+    ]);
+
+    requiredTarget(project, 0).blocks = {};
+    const empty = applyExtraEditorShadowTransform(project);
+    expect(empty.manifest.sites).toEqual([]);
+    expect(empty.caveats).toEqual(['Extra level 2 found no native event hats to hide.']);
+  });
+
+  it('runs through the engine with strict manifest verification and rejects conflicting API levels', () => {
+    const source = createFixtureProject();
+    const result = obfuscateProject(source, 'lossless', new Uint8Array(32).fill(94), {
+      extra: true,
+      extraLevel: 2
+    });
+    const finalHats = result.project.targets.flatMap(target => Object.values(target.blocks))
+      .filter(value => isScratchBlock(value) && value.topLevel && isOfficialHatOpcode(value.opcode));
+
+    expect(finalHats).toHaveLength(2);
+    expect(finalHats.every(value => isScratchBlock(value) && value.shadow)).toBe(true);
+    expect(result.stats.extraPrivacyLevel).toBe(2);
+    expect(result.stats.privacyHatShadowSites).toBe(2);
+    expect(result.stats.privacyHatShadowChanges).toBe(2);
+    expect(result.stats.verification).toEqual(expect.objectContaining({verdict: 'verified-with-caveats'}));
+    expect(result.stats.caveats).toEqual(expect.arrayContaining([EXTRA_EDITOR_SHADOW_CAVEAT]));
+
+    expect(() => obfuscateProject(source, 'lossless', new Uint8Array(32), {
+      extra: false,
+      extraLevel: 2
+    })).toThrow('extra conflicts with extraLevel');
+    expect(() => obfuscateProject(source, 'lossless', new Uint8Array(32), {
+      extra: true,
+      extraLevel: 0
+    })).toThrow('extra conflicts with extraLevel');
+    expect(() => obfuscateProject(source, 'lossless', new Uint8Array(32), {
+      extraLevel: 3 as 2
+    })).toThrow('extraLevel must be 0, 1, or 2');
+  });
+
+  it.each([
+    ['lossless', true, false],
+    ['lossless', false, true],
+    ['lossless', true, true],
+    ['lossy', true, false],
+    ['lossy', false, true],
+    ['lossy', true, true],
+    ['no-preserve', true, false],
+    ['no-preserve', false, true],
+    ['no-preserve', true, true]
+  ] as const)('verifies %s with antiCheat=%s and antiSave=%s', (mode, antiCheat, antiSave) => {
+    const result = obfuscateProject(createFixtureProject(), mode, new Uint8Array(32).fill(0x5f), {
+      antiCheat,
+      antiSave,
+      extraLevel: 2
+    });
+    const nativeHats = result.project.targets.flatMap(target => Object.values(target.blocks))
+      .filter(value => isScratchBlock(value) && value.topLevel && isOfficialHatOpcode(value.opcode));
+
+    expect(nativeHats.length).toBeGreaterThan(0);
+    expect(nativeHats.every(hat => isScratchBlock(hat) && hat.shadow)).toBe(true);
+    expect(result.stats.verification).toEqual(expect.objectContaining({verdict: 'verified-with-caveats'}));
+    if (antiCheat) expect(getAntiCheatReleaseCheckpoint(result)).toBeDefined();
+    if (antiSave) expect(result.stats.antiSaveCanaries).toBeGreaterThan(0);
+    validateProject(result.project);
+  });
+});
+
 describe('extra privacy CLI contract', () => {
   it('accepts the modifier independently, normalizes both spellings, and rejects assigned values', () => {
     expect(parseCliArguments(['input.sb3', '-extra'])).toMatchObject({mode: 'lossless', extra: true});
@@ -449,7 +564,7 @@ describe('extra privacy CLI contract', () => {
     expect(await runCli([input, '-extra', '-o', firstOutput], first.io), first.stderr.join('')).toBe(0);
     expect(await runCli([input, '--extra', '-o', secondOutput], second.io), second.stderr.join('')).toBe(0);
     expect(await readFile(firstOutput)).toEqual(await readFile(secondOutput));
-    expect(first.stdout.join('')).toContain('extra=on');
+    expect(first.stdout.join('')).toContain('extra=1');
     expect(first.stderr.join('')).toContain('binary asset bytes');
     expect(first.stderr.join('')).toContain('external target or asset-name consumers');
 

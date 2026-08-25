@@ -1,10 +1,12 @@
 export type ObfuscationMode = 'lossless' | 'lossy' | 'no-preserve';
+export type ExtraPrivacyLevel = 0 | 1 | 2;
 
 export interface ObfuscationOptions {
   readonly antiCheat?: boolean;
   readonly antiSave?: boolean;
   readonly allowSize?: boolean;
   readonly extra?: boolean;
+  readonly extraLevel?: ExtraPrivacyLevel;
   readonly onProgress?: (event: ObfuscationProgressEvent) => void;
 }
 
@@ -96,6 +98,7 @@ export interface LoadedArchive {
 
 export interface ObfuscationStats {
   mode: ObfuscationMode;
+  extraPrivacyLevel?: ExtraPrivacyLevel;
   blocksBefore: number;
   blocksAfter: number;
   identifiersRenamed: number;
@@ -112,6 +115,8 @@ export interface ObfuscationStats {
   privacyNamesRenamed?: number;
   privacyMonitorsCanonicalized?: number;
   privacyMetadataPropertiesRemoved?: number;
+  privacyHatShadowSites?: number;
+  privacyHatShadowChanges?: number;
   warnings: string[];
   caveats?: string[];
   verification?: ObfuscationVerificationSummary;

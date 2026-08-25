@@ -2,9 +2,13 @@ import type {DeterministicGenerator} from '../deterministic.js';
 import {isPrimitive, isScratchBlock, stageOf} from '../model/blocks.js';
 import {isRecord} from '../model/json.js';
 import type {JsonValue, ScratchBlock, ScratchInput, ScratchProject, ScratchTarget} from '../types.js';
+import {isOfficialHatOpcode} from './analysis.js';
 
 export const EXTRA_PRIVACY_GENERATOR_DOMAIN = 'extra:v1';
 export const EXTRA_PRIVACY_PASS_NAME = 'extra-project-privacy';
+export const EXTRA_EDITOR_SHADOW_PASS_NAME = 'extra-editor-shadow-hats';
+export const EXTRA_EDITOR_SHADOW_CAVEAT =
+  'Extra level 2 marks native event hats as top-level shadows. Official Scratch VM 15.1.0 removes those hats from its runnable script list during load, hides their columns, and can save them back as non-top-level blocks. Affected stacks do not execute. Testing did not reproduce an editor freeze, and this does not prevent saving.';
 
 /** Categories the engine must allow when this pass is moved into its verified pass trace. */
 export const EXTRA_PRIVACY_ALLOWED_CHANGES = Object.freeze([
@@ -16,6 +20,34 @@ export const EXTRA_PRIVACY_ALLOWED_CHANGES = Object.freeze([
   'serialized-block-data',
   'monitors'
 ] as const);
+
+export const EXTRA_EDITOR_SHADOW_ALLOWED_CHANGES = Object.freeze([
+  'executable-topology',
+  'executable-values',
+  'serialized-block-data'
+] as const);
+
+export interface ExtraEditorShadowHatSite {
+  readonly targetIndex: number;
+  readonly hatId: string;
+  readonly opcode: string;
+  readonly previousShadow: boolean;
+}
+
+export interface ExtraEditorShadowManifest {
+  readonly version: 1;
+  readonly sites: readonly ExtraEditorShadowHatSite[];
+  readonly changedHatCount: number;
+}
+
+export interface ExtraEditorShadowReport {
+  readonly manifest: ExtraEditorShadowManifest;
+  readonly coveredHatCount: number;
+  readonly changedHatCount: number;
+  readonly caveats: readonly string[];
+}
+
+const TRUSTED_EXTRA_EDITOR_SHADOW_MANIFESTS = new WeakSet<object>();
 
 export interface ExtraPrivacyOptions {
   readonly canonicalizeMonitorPresentation?: boolean;
@@ -113,11 +145,6 @@ const CORE_INPUT_SELECTORS: ReadonlyMap<string, SelectorPlan> = new Map([
   ['sound_playuntildone', {input: 'SOUND_MENU', kind: 'sound', menuOpcode: 'sound_sounds_menu'}]
 ]);
 
-/**
- * Apply the project-JSON portion of `--extra`. The CLI currently calls this after the
- * engine result; engine integration should use the exported pass name, domain, and
- * allowed-change list and place it before final post-transform verification.
- */
 export function applyExtraPrivacyTransform(
   project: ScratchProject,
   generator: DeterministicGenerator,
@@ -170,6 +197,44 @@ export function applyExtraPrivacyTransform(
     binaryAssetsPreserved: true,
     caveats
   };
+}
+
+/** Mark every serialized native event root as a top-level shadow for explicit editor disruption. */
+export function applyExtraEditorShadowTransform(project: ScratchProject): ExtraEditorShadowReport {
+  const sites: ExtraEditorShadowHatSite[] = [];
+  let changedHatCount = 0;
+  for (const [targetIndex, target] of project.targets.entries()) {
+    for (const [hatId, value] of Object.entries(target.blocks)) {
+      if (!isScratchBlock(value) || !value.topLevel || !isOfficialHatOpcode(value.opcode)) continue;
+      const previousShadow = value.shadow;
+      sites.push(Object.freeze({targetIndex, hatId, opcode: value.opcode, previousShadow}));
+      if (!previousShadow) {
+        value.shadow = true;
+        changedHatCount += 1;
+      }
+    }
+  }
+  const manifest = Object.freeze<ExtraEditorShadowManifest>({
+    version: 1,
+    sites: Object.freeze(sites),
+    changedHatCount
+  });
+  TRUSTED_EXTRA_EDITOR_SHADOW_MANIFESTS.add(manifest);
+  const caveats = sites.length === 0
+    ? Object.freeze(['Extra level 2 found no native event hats to hide.'])
+    : Object.freeze([EXTRA_EDITOR_SHADOW_CAVEAT]);
+  return Object.freeze({
+    manifest,
+    coveredHatCount: sites.length,
+    changedHatCount,
+    caveats
+  });
+}
+
+export function isTrustedExtraEditorShadowManifest(
+  value: ExtraEditorShadowManifest | undefined
+): value is ExtraEditorShadowManifest {
+  return value !== undefined && TRUSTED_EXTRA_EDITOR_SHADOW_MANIFESTS.has(value);
 }
 
 function buildPrivacyNamePlan(

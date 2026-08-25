@@ -24,10 +24,15 @@ import {
 import {obfuscateProject} from '../src/obfuscation/index.js';
 import {applySafeOptimizations} from '../src/obfuscation/optimizer.js';
 import {
+  applyExtraEditorShadowTransform,
   applyExtraPrivacyTransform,
+  EXTRA_EDITOR_SHADOW_ALLOWED_CHANGES,
+  EXTRA_EDITOR_SHADOW_CAVEAT,
+  EXTRA_EDITOR_SHADOW_PASS_NAME,
   EXTRA_PRIVACY_ALLOWED_CHANGES,
   EXTRA_PRIVACY_GENERATOR_DOMAIN,
-  EXTRA_PRIVACY_PASS_NAME
+  EXTRA_PRIVACY_PASS_NAME,
+  type ExtraEditorShadowManifest
 } from '../src/obfuscation/privacy.js';
 import type {
   JsonValue,
@@ -2221,7 +2226,157 @@ describe('extra privacy verification boundary', () => {
       expect.stringContaining('Extra privacy preserves binary asset bytes')
     ]));
   });
+
+  it('proves the final extra level 2 pass by exactly reversing its manifest-bound hat flags', () => {
+    const fixture = extraEditorShadowVerifierFixture();
+    const report = verifyPostTransform(fixture.source, fixture.transformed, fixture.options);
+
+    expect(report.verdict).toBe('verified-with-caveats');
+    expect(report.extra).toBe(true);
+    expect(report.extraLevel).toBe(2);
+    expect(report.failures).toEqual([]);
+    expect(report.provenInvariants).toEqual(expect.arrayContaining([
+      'extra-editor-shadow-covers-every-final-top-level-native-hat',
+      'extra-editor-shadow-pass-changes-only-manifest-bound-native-hat-flags',
+      'lossless-active-executable-topology-isomorphic'
+    ]));
+    expect(report.caveats).toContainEqual(expect.objectContaining({
+      code: 'extra-editor-shadow-disables-native-event-stacks',
+      message: EXTRA_EDITOR_SHADOW_CAVEAT
+    }));
+    expect(report.passAttributions).toEqual([
+      expect.objectContaining({
+        pass: EXTRA_EDITOR_SHADOW_PASS_NAME,
+        continuous: true,
+        unexpectedChanges: []
+      })
+    ]);
+  });
+
+  it('rejects laundering an unrelated executable change through the extra level 2 waiver', () => {
+    const fixture = extraEditorShadowVerifierFixture();
+    const body = fixture.transformed.targets.flatMap(target => Object.values(target.blocks))
+      .find(value => isScratchBlock(value) && value.opcode === 'motion_setx');
+    const literal = isScratchBlock(body) ? body.inputs['X']?.[1] : undefined;
+    if (!isPrimitive(literal)) throw new Error('extra level 2 laundering fixture was not found');
+    literal[1] = '999';
+    const after = captureProjectVerificationSnapshot(fixture.transformed);
+    const passTrace: VerificationPassBoundary[] = [{
+      ...fixture.options.passTrace?.[0] as VerificationPassBoundary,
+      after
+    }];
+
+    const report = verifyPostTransform(fixture.source, fixture.transformed, {
+      ...fixture.options,
+      passTrace
+    });
+
+    expect(report.verdict).toBe('failed');
+    expect(report.failures).toContainEqual(expect.objectContaining({
+      code: 'extra-editor-shadow-pass-not-isolated'
+    }));
+  });
+
+  it('rejects missing hat coverage, an untrusted manifest, and incompatible level options', () => {
+    const missingSite = extraEditorShadowVerifierFixture();
+    const firstHat = missingSite.transformed.targets.flatMap(target => Object.values(target.blocks))
+      .find(value => isScratchBlock(value) && value.topLevel && isOfficialHatOpcodeForTest(value.opcode));
+    if (!isScratchBlock(firstHat)) throw new Error('extra level 2 hat fixture was not found');
+    firstHat.shadow = false;
+    const missingAfter = captureProjectVerificationSnapshot(missingSite.transformed);
+    const missingReport = verifyPostTransform(missingSite.source, missingSite.transformed, {
+      ...missingSite.options,
+      passTrace: [{
+        ...missingSite.options.passTrace?.[0] as VerificationPassBoundary,
+        after: missingAfter
+      }]
+    });
+    expect(missingReport.failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({code: 'extra-editor-shadow-site-invalid'})
+    ]));
+    expect(missingReport.failures.map(finding => finding.code))
+      .not.toContain('lossless-executable-topology-changed');
+
+    const untrusted = extraEditorShadowVerifierFixture();
+    const copiedManifest = structuredClone(untrusted.options.extraEditorShadowManifest);
+    const untrustedReport = verifyPostTransform(untrusted.source, untrusted.transformed, {
+      ...untrusted.options,
+      extraEditorShadowManifest: copiedManifest
+    });
+    expect(untrustedReport.failures).toContainEqual(expect.objectContaining({
+      code: 'extra-editor-shadow-manifest-missing-or-untrusted'
+    }));
+    expect(untrustedReport.failures.map(finding => finding.code))
+      .not.toContain('lossless-executable-topology-changed');
+
+    const conflicting = extraEditorShadowVerifierFixture();
+    const conflictReport = verifyPostTransform(conflicting.source, conflicting.transformed, {
+      ...conflicting.options,
+      extra: false
+    });
+    expect(conflictReport.failures).toContainEqual(expect.objectContaining({code: 'extra-level-option-conflict'}));
+
+    const invalidLevel = extraEditorShadowVerifierFixture();
+    const invalidLevelReport = verifyPostTransform(invalidLevel.source, invalidLevel.transformed, {
+      ...invalidLevel.options,
+      extraLevel: 3 as 2
+    });
+    expect(invalidLevelReport.failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({code: 'extra-level-invalid'}),
+      expect.objectContaining({code: 'extra-editor-shadow-unexpected'})
+    ]));
+
+    const missingBoundary = extraEditorShadowVerifierFixture();
+    const missingBoundaryReport = verifyPostTransform(missingBoundary.source, missingBoundary.transformed, {
+      ...missingBoundary.options,
+      passTrace: []
+    });
+    expect(missingBoundaryReport.failures).toContainEqual(expect.objectContaining({
+      code: 'extra-editor-shadow-checkpoint-missing'
+    }));
+  });
 });
+
+interface ExtraEditorShadowVerifierFixture {
+  readonly source: ScratchProject;
+  readonly transformed: ScratchProject;
+  readonly options: PostTransformVerificationOptions & {
+    readonly extraEditorShadowManifest: ExtraEditorShadowManifest;
+    readonly passTrace: readonly VerificationPassBoundary[];
+  };
+}
+
+function extraEditorShadowVerifierFixture(): ExtraEditorShadowVerifierFixture {
+  const source = watermarkedClone(extraPrivacySurfaceFixture(), 0xe2);
+  applyExtraPrivacyTransform(
+    source,
+    new DeterministicGenerator(seed(0xe2), EXTRA_PRIVACY_GENERATOR_DOMAIN)
+  );
+  const transformed = structuredClone(source);
+  const before = captureProjectVerificationSnapshot(transformed);
+  const shadow = applyExtraEditorShadowTransform(transformed);
+  const after = captureProjectVerificationSnapshot(transformed);
+  return {
+    source,
+    transformed,
+    options: {
+      mode: 'lossless',
+      extra: true,
+      extraLevel: 2,
+      extraEditorShadowManifest: shadow.manifest,
+      passTrace: [{
+        pass: EXTRA_EDITOR_SHADOW_PASS_NAME,
+        before,
+        after,
+        allowedChanges: EXTRA_EDITOR_SHADOW_ALLOWED_CHANGES
+      }]
+    }
+  };
+}
+
+function isOfficialHatOpcodeForTest(opcode: string): boolean {
+  return opcode.startsWith('event_when') || opcode === 'control_start_as_clone';
+}
 
 function extraPrivacySurfaceFixture(): ScratchProject {
   const project = createFixtureProject();

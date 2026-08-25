@@ -3,6 +3,7 @@ import {readFile} from 'node:fs/promises';
 
 const expectedNames = [
   'lossless.sb3',
+  'lossless-extra2.sb3',
   'lossy.sb3',
   'no-preserve.sb3',
   'lossless-anticheat.sb3',

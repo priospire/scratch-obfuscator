@@ -18,7 +18,8 @@ afterEach(async () => {
 describe('CLI argument contract', () => {
   it('defaults to lossless and accepts requested single-hyphen flags', () => {
     expect(parseCliArguments(['input.sb3'])).toMatchObject({
-      kind: 'run', input: 'input.sb3', mode: 'lossless', antiCheat: false, allowSize: false, force: false
+      kind: 'run', input: 'input.sb3', mode: 'lossless', antiCheat: false, allowSize: false,
+      extra: false, extraLevel: 0, force: false
     });
     expect(parseCliArguments(['input.sb3', '-lossy', '--force'])).toMatchObject({mode: 'lossy', force: true});
     expect(parseCliArguments(['-no-preserve', '-o', 'out.sb3', 'input.sb3'])).toMatchObject({mode: 'no-preserve', output: 'out.sb3'});
@@ -43,6 +44,23 @@ describe('CLI argument contract', () => {
     expect(() => parseCliArguments(['input.sb3', '--allowsize=max'])).toThrow(UsageError);
   });
 
+  it('accepts extra level 2 only as a separate exact token and repeated flags take the maximum', () => {
+    expect(parseCliArguments(['input.sb3', '-extra'])).toMatchObject({extra: true, extraLevel: 1});
+    expect(parseCliArguments(['--extra', '2', 'input.sb3'])).toMatchObject({extra: true, extraLevel: 2});
+    expect(parseCliArguments(['input.sb3', '-extra', '2'])).toMatchObject({extra: true, extraLevel: 2});
+    expect(parseCliArguments(['-extra', '2', '--extra', 'input.sb3'])).toMatchObject({
+      extra: true,
+      extraLevel: 2
+    });
+    expect(parseCliArguments(['--extra', '-extra', '2', 'input.sb3'])).toMatchObject({
+      extra: true,
+      extraLevel: 2
+    });
+    expect(() => parseCliArguments(['input.sb3', '--extra=2'])).toThrow(UsageError);
+    expect(() => parseCliArguments(['input.sb3', '-extra=2'])).toThrow(UsageError);
+    expect(() => parseCliArguments(['input.sb3', '-extra', '1'])).toThrow(UsageError);
+  });
+
   it('rejects mode conflicts, missing values, unknown options, and extra inputs', () => {
     expect(() => parseCliArguments(['--lossless', '--lossy', 'input.sb3'])).toThrow(UsageError);
     expect(() => parseCliArguments(['input.sb3', '-o'])).toThrow(UsageError);
@@ -56,6 +74,11 @@ describe('CLI argument contract', () => {
     for (const input of ['-lossy', '-no-preserve', '-anticheat', '-allowsize', '-extra', '-verbose=max', '--help']) {
       expect(parseCliArguments(['--', input])).toMatchObject({input, mode: 'lossless'});
     }
+    expect(parseCliArguments(['-extra', '--', '2'])).toMatchObject({
+      input: '2',
+      extra: true,
+      extraLevel: 1
+    });
   });
 
   it('prints help/version and maps usage failures to exit code 2', async () => {
@@ -66,6 +89,7 @@ describe('CLI argument contract', () => {
     expect(stdout.join('')).toContain('Usage: scratch-obfuscator');
     expect(stdout.join('')).toContain('-anticheat, --anticheat');
     expect(stdout.join('')).toContain('-allowsize, --allowsize');
+    expect(stdout.join('')).toContain('-extra, --extra [2]');
     stdout.length = 0;
     expect(await runCli(['--version'], io)).toBe(0);
     const packageMetadata = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {version: string};
@@ -162,6 +186,38 @@ describe('CLI archive integration', () => {
     expect(await runCli([input, '-lossy', '-allowsize', '-o', first], firstIo)).toBe(0);
     expect(await runCli([input, '--lossy', '--allowsize', '-o', second], secondIo)).toBe(0);
     expect(await readFile(first)).toEqual(await readFile(second));
+  });
+
+  it('wires extra level 2 through both spellings and reports its disruptive contract', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'scratch-obfuscator-cli-extra2-'));
+    temporaryDirectories.push(directory);
+    const input = join(directory, 'input.sb3');
+    const first = join(directory, 'first.sb3');
+    const second = join(directory, 'second.sb3');
+    await writeFile(input, createFixtureArchive(createFixtureProject()));
+    const firstOutput: string[] = [];
+    const firstDiagnostics: string[] = [];
+    const secondDiagnostics: string[] = [];
+
+    expect(await runCli([input, '-extra', '2', '-o', first], {
+      stdout: text => firstOutput.push(text),
+      stderr: text => firstDiagnostics.push(text)
+    }), firstDiagnostics.join('')).toBe(0);
+    expect(await runCli([input, '--extra', '2', '-o', second], {
+      stdout: () => undefined,
+      stderr: text => secondDiagnostics.push(text)
+    }), secondDiagnostics.join('')).toBe(0);
+
+    expect(await readFile(first)).toEqual(await readFile(second));
+    expect(firstOutput.join('')).toContain('extra=2');
+    expect(firstDiagnostics.join('')).toContain('Affected stacks do not execute');
+    expect(firstDiagnostics.join('')).toContain('does not prevent saving');
+    const transformed = readProjectFromArchive(await readFile(first));
+    const eventHats = transformed.targets.flatMap(target => Object.values(target.blocks))
+      .filter(isScratchBlock)
+      .filter(block => block.topLevel && block.opcode.startsWith('event_'));
+    expect(eventHats.length).toBeGreaterThan(0);
+    expect(eventHats.every(block => block.shadow)).toBe(true);
   });
 
   it('normalizes recoverable editor artifacts before strict no-preserve output validation', async () => {

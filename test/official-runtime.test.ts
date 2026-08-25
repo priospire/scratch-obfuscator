@@ -34,6 +34,10 @@ interface RuntimeTarget {
   y: number;
   visible: boolean;
   variables: Record<string, RuntimeVariable>;
+  blocks: {
+    getScripts(): string[];
+    toXML(): string;
+  };
 }
 
 type ScratchVmConstructor = new () => ScratchVmInstance;
@@ -118,6 +122,79 @@ describe('official Scratch compatibility gates', () => {
     await writeFile(input, originalBytes);
     expect(await runCli([input, '-o', output, `--${mode}`], {stdout: () => undefined, stderr: () => undefined})).toBe(0);
     expect(await executeSnapshot(await readFile(output))).toEqual(await executeSnapshot(originalBytes));
+  }, 60_000);
+
+  it('extra level 2 hides and disables native event columns while remaining saveable', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'scratch-obfuscator-extra2-runtime-'));
+    directories.push(directory);
+    const input = join(directory, 'input.sb3');
+    const output = join(directory, 'output.sb3');
+    const resavedInput = join(directory, 'official-resave.sb3');
+    const reobfuscatedOutput = join(directory, 'reobfuscated.sb3');
+    await writeFile(input, createFixtureArchive());
+    const diagnostics: string[] = [];
+    expect(await runCli([input, '-o', output, '-extra', '2'], {
+      stdout: () => undefined,
+      stderr: text => diagnostics.push(text)
+    }), diagnostics.join('')).toBe(0);
+    expect(diagnostics.join('')).toContain('Affected stacks do not execute');
+    expect(diagnostics.join('')).toContain('does not prevent saving');
+
+    const outputBytes = await readFile(output);
+    const raw = readProjectFromArchive(outputBytes);
+    const rawHatSites = raw.targets.flatMap((target, targetIndex) => Object.entries(target.blocks)
+      .flatMap(([hatId, value]) => isScratchBlock(value)
+        && value.topLevel
+        && (value.opcode.startsWith('event_when') || value.opcode === 'control_start_as_clone')
+        ? [{targetIndex, hatId}]
+        : []));
+    expect(rawHatSites).toHaveLength(2);
+    expect(rawHatSites.every(site => {
+      const block = raw.targets[site.targetIndex]?.blocks[site.hatId];
+      return isScratchBlock(block) && block.shadow;
+    })).toBe(true);
+
+    const vm = createVm();
+    const reloaded = createVm();
+    const reobfuscated = createVm();
+    try {
+      await vm.loadProject(outputBytes);
+      expect(vm.runtime.targets.flatMap(target => target.blocks.getScripts())).toEqual([]);
+      expect(vm.runtime.targets.map(target => target.blocks.toXML())).toEqual(['', '']);
+      vm.start();
+      vm.greenFlag();
+      for (let step = 0; step < 20 && vm.runtime.threads.length > 0; step += 1) vm.runtime._step();
+      expect(vm.runtime.threads).toHaveLength(0);
+      const stage = vm.runtime.targets.find(target => target.isStage);
+      const sprite = vm.runtime.targets.find(target => !target.isStage);
+      expect(Object.values(stage?.variables ?? {}).some(variable => variable.value === 42)).toBe(false);
+      expect(sprite?.x).toBe(0);
+
+      const savedBytes = await blobBytes(await vm.saveProjectSb3());
+      expect(savedBytes.length).toBeGreaterThan(0);
+      const saved = readProjectFromArchive(savedBytes);
+      for (const site of rawHatSites) {
+        const block = saved.targets[site.targetIndex]?.blocks[site.hatId];
+        expect(isScratchBlock(block) && block.shadow).toBe(true);
+        expect(isScratchBlock(block) && block.topLevel).toBe(false);
+      }
+      await reloaded.loadProject(savedBytes);
+      expect(reloaded.runtime.targets.flatMap(target => target.blocks.getScripts())).toEqual([]);
+
+      await writeFile(resavedInput, savedBytes);
+      const reobfuscationDiagnostics: string[] = [];
+      expect(await runCli([resavedInput, '-o', reobfuscatedOutput, '-extra', '2'], {
+        stdout: () => undefined,
+        stderr: text => reobfuscationDiagnostics.push(text)
+      }), reobfuscationDiagnostics.join('')).toBe(0);
+      expect(reobfuscationDiagnostics.join('')).toContain('VM-normalized shadow event stack root');
+      await reobfuscated.loadProject(await readFile(reobfuscatedOutput));
+      expect(reobfuscated.runtime.targets.flatMap(target => target.blocks.getScripts())).toEqual([]);
+    } finally {
+      vm.quit();
+      reloaded.quit();
+      reobfuscated.quit();
+    }
   }, 60_000);
 });
 

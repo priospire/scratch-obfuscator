@@ -2,7 +2,7 @@ import {createRequire} from 'node:module';
 import {describe, expect, it} from 'vitest';
 import {DeterministicGenerator} from '../src/deterministic.js';
 import {isScratchBlock, stageOf} from '../src/model/blocks.js';
-import {collectVariableCandidates} from '../src/obfuscation/analysis.js';
+import {collectVariableCandidates, isOfficialHatOpcode} from '../src/obfuscation/analysis.js';
 import {
   applyAntiCheatTransform,
   applyGameplayStateProtection,
@@ -11,7 +11,7 @@ import {
   selectReservedGameplayStateCandidates,
   type GameplayStateProtectionResult
 } from '../src/obfuscation/anticheat.js';
-import {obfuscateProject} from '../src/obfuscation/index.js';
+import {getAntiCheatReleaseCheckpoint, obfuscateProject} from '../src/obfuscation/index.js';
 import type {JsonValue, ObfuscationMode, ScratchBlock, ScratchProject, ScratchTarget} from '../src/types.js';
 import {validateProject} from '../src/validation/project.js';
 import {createFixtureArchive, createFixtureProject} from './support.js';
@@ -65,6 +65,40 @@ describe('gameplay-state anti-tamper hardening', () => {
     expect(result.stats.virtualizedBlocks).toBe(4);
     expect(result.stats.warnings.some(warning => warning.includes('rolled back'))).toBe(false);
     expect(result.project.monitors).toHaveLength(0);
+    validateProject(result.project);
+  });
+
+  it('composes gameplay guards with anti-save entry guards in lossless mode', () => {
+    const result = obfuscateProject(
+      gameplayProject().project,
+      'lossless',
+      new Uint8Array(32).fill(0x62),
+      {antiCheat: true, antiSave: true}
+    );
+
+    expect(result.stats.antiSaveCanaries).toBeGreaterThan(0);
+    expect(result.stats.antiCheatDecoys).toBeGreaterThan(0);
+    expect(result.stats.verification).toEqual(expect.objectContaining({verdict: 'verified-with-caveats'}));
+    expect(getAntiCheatReleaseCheckpoint(result)).toBeDefined();
+    validateProject(result.project);
+  });
+
+  it('accepts the strongest modifier combination and shadows every final native hat', () => {
+    const result = obfuscateProject(
+      gameplayProject().project,
+      'no-preserve',
+      new Uint8Array(32).fill(0x63),
+      {antiCheat: true, antiSave: true, extraLevel: 2}
+    );
+    const nativeHats = result.project.targets.flatMap(target => Object.values(target.blocks))
+      .filter(value => isScratchBlock(value) && value.topLevel && isOfficialHatOpcode(value.opcode));
+
+    expect(nativeHats.length).toBeGreaterThan(0);
+    expect(nativeHats.every(hat => isScratchBlock(hat) && hat.shadow)).toBe(true);
+    expect(result.stats.extraPrivacyLevel).toBe(2);
+    expect(result.stats.privacyHatShadowSites).toBe(nativeHats.length);
+    expect(result.stats.verification).toEqual(expect.objectContaining({verdict: 'verified-with-caveats'}));
+    expect(getAntiCheatReleaseCheckpoint(result)).toBeDefined();
     validateProject(result.project);
   });
 

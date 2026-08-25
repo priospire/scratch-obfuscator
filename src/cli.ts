@@ -17,7 +17,13 @@ import {
 import {obfuscateProject} from './obfuscation/index.js';
 import {validateProject} from './validation/index.js';
 import {compareUtf8} from './deterministic.js';
-import {DEFAULT_LIMITS, type ArchiveEntry, type ObfuscationMode, type ObfuscationStats} from './types.js';
+import {
+  DEFAULT_LIMITS,
+  type ArchiveEntry,
+  type ExtraPrivacyLevel,
+  type ObfuscationMode,
+  type ObfuscationStats
+} from './types.js';
 import {
   CliProgressReporter,
   cliCaveats,
@@ -27,7 +33,7 @@ import {
   type CliVerbosity
 } from './cli-reporting.js';
 
-const VERSION = '0.7.0';
+const VERSION = '0.8.0';
 
 const HELP = `Scratch Obfuscator — PrioSDK Gen 4
 
@@ -44,7 +50,7 @@ Options:
   -anticheat, --anticheat     Add tamper-response sentinels and event guards
   -antisave, --antisave       Add signed-zero resave guards and Unicode canaries
   -allowsize, --allowsize     Permit expanded bounded block/JSON growth in stronger modes
-  -extra, --extra             Add compatibility-breaking project privacy transforms
+  -extra, --extra [2]         Level 1 adds project privacy; level 2 also disables and hides event stacks
   -verbose, --verbose [max]   Show progress and reporting; max adds safe details
   -o, --output <file.sb3>      Output path (default: <stem>.obfuscated.sb3)
   --force                     Replace an existing output transactionally
@@ -61,6 +67,7 @@ export interface ParsedCliArguments {
   readonly antiSave: boolean;
   readonly allowSize: boolean;
   readonly extra: boolean;
+  readonly extraLevel: ExtraPrivacyLevel;
   readonly force: boolean;
   readonly verbosity: CliVerbosity;
 }
@@ -112,7 +119,7 @@ export function parseCliArguments(arguments_: readonly string[]): ParsedCliArgum
   let antiCheat = false;
   let antiSave = false;
   let allowSize = false;
-  let extra = false;
+  let extraLevel: ExtraPrivacyLevel = 0;
   let verbosity: CliVerbosity = 'normal';
   let optionsEnded = false;
 
@@ -129,7 +136,9 @@ export function parseCliArguments(arguments_: readonly string[]): ParsedCliArgum
     } else if (!optionsEnded && argument === '--allowsize') {
       allowSize = true;
     } else if (!optionsEnded && argument === '--extra') {
-      extra = true;
+      const requestedLevel: ExtraPrivacyLevel = argumentsNormalized[index + 1] === '2' ? 2 : 1;
+      extraLevel = Math.max(extraLevel, requestedLevel) as ExtraPrivacyLevel;
+      if (requestedLevel === 2) index += 1;
     } else if (!optionsEnded && argument === '--verbose') {
       if (argumentsNormalized[index + 1] === 'max') {
         verbosity = 'max';
@@ -165,9 +174,10 @@ export function parseCliArguments(arguments_: readonly string[]): ParsedCliArgum
   if (positionals.length !== 1) throw new UsageError('exactly one input .sb3 file is required');
   const input = positionals[0] as string;
   const mode = modes.values().next().value ?? 'lossless';
+  const extra = extraLevel > 0;
   return output === undefined
-    ? {kind: 'run', input, mode, antiCheat, antiSave, allowSize, extra, force, verbosity}
-    : {kind: 'run', input, output, mode, antiCheat, antiSave, allowSize, extra, force, verbosity};
+    ? {kind: 'run', input, mode, antiCheat, antiSave, allowSize, extra, extraLevel, force, verbosity}
+    : {kind: 'run', input, output, mode, antiCheat, antiSave, allowSize, extra, extraLevel, force, verbosity};
 }
 
 export async function runCli(
@@ -197,7 +207,7 @@ export async function runCli(
     progress.complete();
     const caveats = new Set([
       ...(stats.caveats ?? []),
-      ...cliCaveats(parsed.mode, parsed.antiCheat, parsed.extra, parsed.allowSize, parsed.antiSave)
+      ...cliCaveats(parsed.mode, parsed.antiCheat, parsed.extraLevel, parsed.allowSize, parsed.antiSave)
     ]);
     io.stdout(formatSuccessSummary(
       basename(paths.inputPath),
@@ -206,7 +216,7 @@ export async function runCli(
       parsed.antiCheat,
       stats,
       caveats.size,
-      parsed.extra,
+      parsed.extraLevel,
       parsed.allowSize,
       parsed.antiSave
     ));
@@ -250,6 +260,7 @@ async function executeObfuscation(
     validateProject(source.project, {
       allowRecoverableLocalSymbolIdCollisions: true,
       allowRecoverableInactiveShadowOwnership: true,
+      allowRecoverableOrphanedShadowHatRoots: true,
       allowRecoverableStaleInvisibleMonitors: true
     });
     validateReferencedAssets(source.project, source.entries);
@@ -260,6 +271,7 @@ async function executeObfuscation(
       antiSave: parsed.antiSave,
       allowSize: parsed.allowSize,
       extra: parsed.extra,
+      extraLevel: parsed.extraLevel,
       onProgress: event => {
         progress.update(
           0.15 + ((event.percentage / 100) * 0.60),
@@ -348,8 +360,10 @@ const SAFE_PROGRESS_METRICS = new Set([
   'candidates',
   'canaries',
   'cap',
+  'changedHats',
   'commentsRemoved',
   'conditions',
+  'coveredHats',
   'decoyBlocks',
   'decoyVariables',
   'displayNames',

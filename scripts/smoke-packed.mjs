@@ -94,11 +94,23 @@ try {
   );
   await assertFilesEqual(antiSaveFirst, antiSaveSecond, 'antisave packed output changed across paths or timezone');
 
+  const extra2First = join(workspace, 'extra level 2 first.sb3');
+  const extra2Second = join(temporary, 'extra level 2 second.sb3');
+  assertSuccess(
+    await runCli([unicodeInput, '-o', extra2First, '-lossless', '-extra', '2'], installation, {TZ: 'UTC'}),
+    'extra level 2 packed invocation'
+  );
+  assertSuccess(
+    await runCli([unicodeInput, '-o', extra2Second, '--lossless', '--extra', '2'], alternateCwd, {TZ: 'Asia/Tokyo'}),
+    'extra level 2 packed repeat'
+  );
+  await assertFilesEqual(extra2First, extra2Second, 'extra level 2 packed output changed across paths or timezone');
+
   const strongestFirst = join(workspace, 'strongest first.sb3');
   const strongestSecond = join(temporary, 'strongest second.sb3');
   assertSuccess(
     await runCli(
-      [unicodeInput, '-o', strongestFirst, '-no-preserve', '-anticheat', '-extra', '-allowsize', '-antisave'],
+      [unicodeInput, '-o', strongestFirst, '-no-preserve', '-anticheat', '-extra', '2', '-allowsize', '-antisave'],
       installation,
       {TZ: 'UTC'}
     ),
@@ -106,7 +118,7 @@ try {
   );
   assertSuccess(
     await runCli(
-      [unicodeInput, '-o', strongestSecond, '--no-preserve', '--anticheat', '--extra', '--allowsize', '--antisave'],
+      [unicodeInput, '-o', strongestSecond, '--no-preserve', '--anticheat', '--extra', '2', '--allowsize', '--antisave'],
       alternateCwd,
       {TZ: 'Asia/Tokyo'}
     ),

@@ -33,7 +33,7 @@ Or run `npm pack` and install the resulting `.tgz` globally. Quote paths contain
 ```text
 scratch-obfuscator <input.sb3> [-o <output.sb3>]
   [-lossless | -lossy | -no-preserve]
-  [-anticheat] [-antisave] [-extra] [-allowsize]
+  [-anticheat] [-antisave] [-extra [2]] [-allowsize]
   [-verbose [max]] [--force]
 ```
 
@@ -42,6 +42,7 @@ scratch-obfuscator game.sb3
 scratch-obfuscator game.sb3 -lossy -verbose
 scratch-obfuscator game.sb3 -no-preserve -anticheat -antisave
 scratch-obfuscator game.sb3 -no-preserve -extra -allowsize -verbose max
+scratch-obfuscator game.sb3 -extra 2
 ```
 
 Mode and modifier flags accept single- and double-hyphen spellings. Modes are
@@ -57,6 +58,7 @@ cannot be the same file or link.
 | `-anticheat` | Adds decoys, integrity checks for eligible gameplay state, session latching, and stop paths. It combines with any mode. |
 | `-antisave` | Adds Unicode canaries and signed-zero guards that make an editor-resaved copy stop guarded event stacks on its next run. |
 | `-extra` | Renames project-visible identities and strips optional metadata under an explicit compatibility waiver. |
+| `-extra 2` | Also marks every final native event hat as a shadow, hiding its column and disabling that event stack in the pinned official VM. |
 | `-allowsize` | Raises finite block/JSON growth caps in stronger modes. Hard safety limits remain; it is inert in lossless mode. |
 | `-verbose` | Prints named progress stages and warnings. |
 | `-verbose max` | Adds safe pass details and counts, without printing source values or rename maps. |
@@ -94,6 +96,11 @@ the guards, and the option adds bounded startup work. Canaries avoid unsafe text
 computed name dispatch, monitor presentation, or optional metadata. Costume and
 sound asset bytes are not encrypted or transcoded: official Scratch cannot
 decode and install replacement assets from project blocks at runtime.
+
+`-extra 2` is intentionally destructive. Official VM 15.1.0 removes top-level
+shadow hats from runnable scripts, hides their columns, and can save them back as
+non-top-level blocks. Affected event stacks do not run. Testing did not reproduce
+an editor freeze, and this option does not prevent saving.
 
 A self-contained executable project contains enough information to run it.
 Obfuscation raises analysis cost but cannot make recovery impossible.

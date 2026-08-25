@@ -13,6 +13,7 @@ import {
 } from '../src/cli-reporting.js';
 import {parseCliArguments, runCli} from '../src/cli.js';
 import {UsageError} from '../src/errors.js';
+import {EXTRA_EDITOR_SHADOW_CAVEAT} from '../src/obfuscation/privacy.js';
 import {RELEASE_TEST_COVERAGE} from '../src/release-coverage.js';
 import type {ObfuscationStats} from '../src/types.js';
 import {createFixtureArchive, createFixtureProject} from './support.js';
@@ -150,11 +151,14 @@ describe('CLI completion reporting', () => {
       stats({caveats: ['first', 'second']})
     );
     expect(protectedSummary).toContain('anticheat=on');
+    expect(protectedSummary).toContain('extra=off');
     expect(protectedSummary).toContain('allowsize=off');
     expect(protectedSummary).toContain('caveats=2');
     expect(formatSuccessSummary('in.sb3', 'out.sb3', 'lossy', false, stats(), 7)).toContain('caveats=7');
     expect(formatSuccessSummary('in.sb3', 'out.sb3', 'lossy', false, stats(), 1, false, true))
       .toContain('allowsize=on');
+    expect(formatSuccessSummary('in.sb3', 'out.sb3', 'lossy', false, stats(), 1, 1)).toContain('extra=1');
+    expect(formatSuccessSummary('in.sb3', 'out.sb3', 'lossy', false, stats(), 1, 2)).toContain('extra=2');
     expect(formatSuccessSummary('in.sb3', 'out.sb3', 'lossy', false, statsWithoutOptionalCounters())).toContain(
       'packed=0, folded=0, fallbacks=0, comments=0, packed-lists=0'
     );
@@ -187,7 +191,16 @@ describe('CLI completion reporting', () => {
     const max = formatVerboseReport(withoutOptionalCounters, metrics(), 'max');
     expect(max).toContain('block-delta=-1, growth=-25.00%');
     expect(max).toContain('variables-packed=0, lists-packed=0, constants-folded=0');
+    expect(max).toContain('privacy-shadow-hat-sites=0');
+    expect(max).toContain('privacy-shadow-hat-changes=0');
     expect(max).toContain('static-verifier-caveats=0, attributed-passes=0');
+
+    const shadowed = formatVerboseReport(stats({
+      privacyHatShadowSites: 9,
+      privacyHatShadowChanges: 7
+    }), metrics(), 'max');
+    expect(shadowed).toContain('privacy-shadow-hat-sites=9');
+    expect(shadowed).toContain('privacy-shadow-hat-changes=7');
   });
 
   it('reports applicable mode, anti-cheat, and progress caveats at normal verbosity', () => {
@@ -216,6 +229,17 @@ describe('CLI completion reporting', () => {
     expect(cliCaveats('lossless', false, false, true)).toEqual(expect.arrayContaining([
       expect.stringContaining('does not change lossless executable growth limits')
     ]));
+    const levelTwo = cliCaveats('lossless', false, 2);
+    expect(levelTwo).toContain(EXTRA_EDITOR_SHADOW_CAVEAT);
+    expect(levelTwo).toEqual(expect.arrayContaining([
+      expect.stringContaining('before the terminal extra level 2 shadow pass'),
+      expect.stringContaining('intentionally disables native event stacks')
+    ]));
+    expect(levelTwo).not.toContain(
+      'lossless preserves executable opcode topology; comments and workspace layout are intentionally not preserved.'
+    );
+    expect(EXTRA_EDITOR_SHADOW_CAVEAT).toContain('Affected stacks do not execute');
+    expect(EXTRA_EDITOR_SHADOW_CAVEAT).toContain('does not prevent saving');
   });
 
   it('keeps the verifier topology caveat visible for lossless anti-cheat output', async () => {

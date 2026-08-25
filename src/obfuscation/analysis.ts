@@ -2,6 +2,7 @@ import {countBlockEquivalents, isPrimitive, isScratchBlock} from '../model/block
 import {isRecord} from '../model/json.js';
 import type {JsonValue, ScratchBlock, ScratchBlockValue, ScratchInput, ScratchProject, ScratchTarget} from '../types.js';
 import {
+  isOfficialHatOpcode as isRegisteredOfficialHatOpcode,
   OFFICIAL_CORE_OPCODES,
   OFFICIAL_EXTENSION_OPCODES,
   OFFICIAL_LITERAL_SHADOW_OPCODES
@@ -1048,13 +1049,7 @@ function isCoreBlock(opcode: string): boolean {
 }
 
 export function isOfficialHatOpcode(opcode: string): boolean {
-  if (OFFICIAL_CORE_OPCODES.has(opcode)) {
-    return opcode.startsWith('event_when') || opcode === 'control_start_as_clone';
-  }
-  const separator = opcode.indexOf('_');
-  return separator > 0
-    && isOfficialExtensionOpcode(opcode)
-    && opcode.slice(separator + 1).startsWith('when');
+  return isRegisteredOfficialHatOpcode(opcode);
 }
 
 type VariablesByTarget = Map<ScratchTarget, Set<string>>;

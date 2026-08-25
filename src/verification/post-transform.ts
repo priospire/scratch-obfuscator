@@ -9,9 +9,10 @@ import {
   transformedJsonSafetyLimit
 } from '../growth-policy.js';
 import {countBlockEquivalents, isPrimitive, isScratchBlock} from '../model/blocks.js';
-import {isRecord} from '../model/json.js';
+import {cloneProject, isRecord} from '../model/json.js';
 import {ANTI_CHEAT_DECOY_COUNT, ANTI_CHEAT_WATERMARK_NAME} from '../obfuscation/anticheat.js';
 import type {
+  ExtraPrivacyLevel,
   JsonValue,
   ObfuscationMode,
   ObfuscationStats,
@@ -31,6 +32,12 @@ import {
   type AntiSaveVerificationManifest
 } from '../obfuscation/antisave.js';
 import {isOfficialHatOpcode} from '../obfuscation/analysis.js';
+import {
+  EXTRA_EDITOR_SHADOW_CAVEAT,
+  EXTRA_EDITOR_SHADOW_PASS_NAME,
+  isTrustedExtraEditorShadowManifest,
+  type ExtraEditorShadowManifest
+} from '../obfuscation/privacy.js';
 
 const SNAPSHOT_VERSION = 2;
 const TRUSTED_VERIFICATION_SNAPSHOTS = new WeakSet<object>();
@@ -163,6 +170,11 @@ const FIXED_PASS_CHANGE_POLICIES: ReadonlyMap<string, readonly VerificationChang
     'executable-values',
     'serialized-block-data',
     'monitors'
+  ])],
+  [EXTRA_EDITOR_SHADOW_PASS_NAME, Object.freeze([
+    'executable-topology',
+    'executable-values',
+    'serialized-block-data'
   ])]
 ]);
 
@@ -243,9 +255,11 @@ export interface PostTransformVerificationOptions {
   readonly antiSave?: boolean;
   readonly allowSize?: boolean;
   readonly extra?: boolean;
+  readonly extraLevel?: ExtraPrivacyLevel;
   readonly stats?: Readonly<ObfuscationStats>;
   readonly passTrace?: readonly VerificationPassBoundary[];
   readonly antiSaveManifest?: AntiSaveVerificationManifest;
+  readonly extraEditorShadowManifest?: ExtraEditorShadowManifest;
   /** Strict lossless checkpoint captured after common transforms and before anti-cheat instrumentation. */
   readonly losslessCoreSnapshot?: ProjectVerificationSnapshot;
 }
@@ -257,6 +271,7 @@ export interface PostTransformVerificationReport {
   readonly antiCheat: boolean;
   readonly antiSave?: boolean;
   readonly extra: boolean;
+  readonly extraLevel: ExtraPrivacyLevel;
   readonly source: ProjectVerificationSnapshot;
   readonly transformed: ProjectVerificationSnapshot;
   readonly losslessCore?: ProjectVerificationSnapshot;
@@ -401,13 +416,14 @@ export function verifyPostTransform(
   transformed: ScratchProject,
   options: PostTransformVerificationOptions
 ): PostTransformVerificationReport {
-  const antiCheat = options.antiCheat === true;
-  const antiSave = options.antiSave === true;
-  const extra = options.extra === true;
-  const sourceSnapshot = captureProjectVerificationSnapshot(source);
-  const transformedSnapshot = captureProjectVerificationSnapshot(transformed);
   const failures: VerificationFinding[] = [];
   const caveats: VerificationFinding[] = [];
+  const antiCheat = options.antiCheat === true;
+  const antiSave = options.antiSave === true;
+  const extraLevel = resolveVerificationExtraLevel(options, failures);
+  const extra = extraLevel >= 1;
+  const sourceSnapshot = captureProjectVerificationSnapshot(source);
+  const transformedSnapshot = captureProjectVerificationSnapshot(transformed);
   const proven = new Set<string>();
   const losslessCore = options.losslessCoreSnapshot;
   if (losslessCore) requireSnapshotVersion(losslessCore);
@@ -429,8 +445,29 @@ export function verifyPostTransform(
   verifyTypedReferenceIntegrity(transformedSnapshot, failures, proven);
   verifyWatermark(sourceSnapshot, transformedSnapshot, failures, proven);
   verifyTransformedJsonSafetyCap(transformedSnapshot, options.mode, failures, proven);
-  verifyAntiCheatSurface(sourceSnapshot, transformedSnapshot, options, failures, caveats, proven);
   verifyAntiSaveSurface(transformed, options, failures, proven);
+  const extraEditorShadowCheckpoint = verifyExtraEditorShadowSurface(
+    transformed,
+    transformedSnapshot,
+    extraLevel,
+    options.passTrace,
+    options.extraEditorShadowManifest,
+    failures,
+    caveats,
+    proven
+  );
+  const semanticTransformedSnapshot = extraEditorShadowCheckpoint?.before ?? transformedSnapshot;
+  const semanticPassTrace = extraEditorShadowCheckpoint === undefined
+    ? options.passTrace
+    : options.passTrace?.slice(0, -1);
+  verifyAntiCheatSurface(
+    sourceSnapshot,
+    semanticTransformedSnapshot,
+    options,
+    failures,
+    caveats,
+    proven
+  );
   verifyMonitorPreservation(
     sourceSnapshot,
     transformedSnapshot,
@@ -444,20 +481,20 @@ export function verifyPostTransform(
   );
   verifyModeGraphPolicy(
     sourceSnapshot,
-    transformedSnapshot,
+    semanticTransformedSnapshot,
     losslessCore,
     options.mode,
     antiCheat,
     antiSave,
     options.allowSize === true,
-    options.passTrace,
+    semanticPassTrace,
     options.antiSaveManifest,
     extra,
     failures,
     caveats,
     proven
   );
-  verifyStats(sourceSnapshot, transformedSnapshot, options, failures, proven);
+  verifyStats(sourceSnapshot, transformedSnapshot, options, extraLevel, failures, proven);
   const passAttributions = verifyPassTrace(
     sourceSnapshot,
     transformedSnapshot,
@@ -466,7 +503,7 @@ export function verifyPostTransform(
     caveats,
     proven
   );
-  addScopeCaveats(options.mode, antiCheat, extra, caveats);
+  addScopeCaveats(options.mode, antiCheat, extraLevel, caveats);
 
   return Object.freeze({
     scope: 'static-project-structure',
@@ -475,6 +512,7 @@ export function verifyPostTransform(
     antiCheat,
     antiSave,
     extra,
+    extraLevel,
     source: sourceSnapshot,
     transformed: transformedSnapshot,
     ...(losslessCore === undefined ? {} : {losslessCore}),
@@ -483,6 +521,165 @@ export function verifyPostTransform(
     provenInvariants: Object.freeze([...proven].sort()),
     passAttributions: Object.freeze(passAttributions)
   });
+}
+
+function resolveVerificationExtraLevel(
+  options: PostTransformVerificationOptions,
+  failures: VerificationFinding[]
+): ExtraPrivacyLevel {
+  const supplied: unknown = options.extraLevel;
+  if (supplied === 0 || supplied === 1 || supplied === 2) {
+    if (options.extra !== undefined && options.extra !== (supplied > 0)) {
+      failures.push({
+        severity: 'failure',
+        code: 'extra-level-option-conflict',
+        message: 'The legacy extra option conflicts with the requested extra level.'
+      });
+    }
+    return supplied;
+  }
+  if (supplied !== undefined) {
+    failures.push({
+      severity: 'failure',
+      code: 'extra-level-invalid',
+      message: 'The verifier extra level must be 0, 1, or 2.'
+    });
+  }
+  return options.extra === true ? 1 : 0;
+}
+
+function verifyExtraEditorShadowSurface(
+  transformedProject: ScratchProject,
+  transformedSnapshot: ProjectVerificationSnapshot,
+  extraLevel: ExtraPrivacyLevel,
+  passTrace: readonly VerificationPassBoundary[] | undefined,
+  manifest: ExtraEditorShadowManifest | undefined,
+  failures: VerificationFinding[],
+  caveats: VerificationFinding[],
+  proven: Set<string>
+): VerificationPassBoundary | undefined {
+  const checkpoints = passTrace?.filter(boundary => boundary.pass === EXTRA_EDITOR_SHADOW_PASS_NAME) ?? [];
+  if (extraLevel !== 2) {
+    if (manifest !== undefined || checkpoints.length > 0) {
+      failures.push({
+        severity: 'failure',
+        code: 'extra-editor-shadow-unexpected',
+        message: 'An extra editor-shadow manifest or pass was supplied without extra level 2.'
+      });
+    }
+    return undefined;
+  }
+
+  const checkpoint = checkpoints.length === 1 ? checkpoints[0] : undefined;
+  if (
+    checkpoint === undefined
+    || passTrace?.at(-1) !== checkpoint
+    || checkpoint.after.fullDigest !== transformedSnapshot.fullDigest
+  ) {
+    failures.push({
+      severity: 'failure',
+      code: 'extra-editor-shadow-checkpoint-missing',
+      message: 'Extra level 2 requires exactly one final editor-shadow pass boundary matching the output.'
+    });
+    return undefined;
+  }
+  if (!isTrustedExtraEditorShadowManifest(manifest)) {
+    failures.push({
+      severity: 'failure',
+      code: 'extra-editor-shadow-manifest-missing-or-untrusted',
+      message: 'Extra level 2 requires the immutable editor-shadow manifest from the current transform attempt.'
+    });
+    return checkpoint;
+  }
+
+  requireSnapshotVersion(checkpoint.before);
+  requireSnapshotVersion(checkpoint.after);
+  const initialFailureCount = failures.length;
+  const actualSites = new Map<string, {readonly opcode: string; readonly shadow: boolean}>();
+  for (const [targetIndex, target] of transformedProject.targets.entries()) {
+    for (const [hatId, value] of Object.entries(target.blocks)) {
+      if (!isScratchBlock(value) || !value.topLevel || !isOfficialHatOpcode(value.opcode)) continue;
+      actualSites.set(`${targetIndex}\u0000${hatId}`, {opcode: value.opcode, shadow: value.shadow});
+    }
+  }
+
+  const seen = new Set<string>();
+  let changedHatCount = 0;
+  for (const site of manifest.sites) {
+    const key = `${site.targetIndex}\u0000${site.hatId}`;
+    const actual = actualSites.get(key);
+    if (
+      seen.has(key)
+      || actual === undefined
+      || actual.opcode !== site.opcode
+      || actual.shadow !== true
+    ) {
+      failures.push({
+        severity: 'failure',
+        code: 'extra-editor-shadow-site-invalid',
+        message: 'The trusted extra level 2 manifest does not exactly match a shadowed top-level native hat.'
+      });
+      continue;
+    }
+    seen.add(key);
+    if (!site.previousShadow) changedHatCount += 1;
+  }
+  if (seen.size !== actualSites.size || manifest.sites.length !== actualSites.size) {
+    failures.push({
+      severity: 'failure',
+      code: 'extra-editor-shadow-coverage-invalid',
+      message: 'Extra level 2 did not account for every final top-level native hat exactly once.'
+    });
+  }
+  if (manifest.changedHatCount !== changedHatCount) {
+    failures.push({
+      severity: 'failure',
+      code: 'extra-editor-shadow-count-invalid',
+      message: 'The extra level 2 changed-hat count does not match its immutable manifest sites.'
+    });
+  }
+
+  if (failures.length === initialFailureCount) {
+    const restored = cloneProject(transformedProject);
+    for (const site of manifest.sites) {
+      const block = restored.targets[site.targetIndex]?.blocks[site.hatId];
+      if (!isScratchBlock(block)) {
+        failures.push({
+          severity: 'failure',
+          code: 'extra-editor-shadow-restoration-failed',
+          message: 'A manifest-bound native hat could not be restored for exact pass verification.'
+        });
+        break;
+      }
+      block.shadow = site.previousShadow;
+    }
+    if (
+      failures.length === initialFailureCount
+      && captureProjectVerificationSnapshot(restored).fullDigest !== checkpoint.before.fullDigest
+    ) {
+      failures.push({
+        severity: 'failure',
+        code: 'extra-editor-shadow-pass-not-isolated',
+        message: 'Reversing the manifest-bound shadow flags did not exactly reconstruct the pre-pass project.'
+      });
+    }
+  }
+
+  if (failures.length !== initialFailureCount) return checkpoint;
+  proven.add('extra-editor-shadow-pass-changes-only-manifest-bound-native-hat-flags');
+  proven.add('extra-editor-shadow-covers-every-final-top-level-native-hat');
+  caveats.push(manifest.sites.length === 0
+    ? {
+        severity: 'caveat',
+        code: 'extra-editor-shadow-no-native-hats-found',
+        message: 'Extra level 2 found no top-level native event hats to mark as shadows.'
+      }
+    : {
+        severity: 'caveat',
+        code: 'extra-editor-shadow-disables-native-event-stacks',
+        message: EXTRA_EDITOR_SHADOW_CAVEAT
+      });
+  return checkpoint;
 }
 
 function validateForVerification(
@@ -495,6 +692,7 @@ function validateForVerification(
     validateProject(project, allowRecoverable ? {
       allowRecoverableInactiveShadowOwnership: true,
       allowRecoverableLocalSymbolIdCollisions: true,
+      allowRecoverableOrphanedShadowHatRoots: true,
       allowRecoverableStaleInvisibleMonitors: true
     } : {});
   } catch (error) {
@@ -973,7 +1171,7 @@ function verifyAntiSaveSurface(
       || !hat.topLevel
       || hat.opcode !== site.hatOpcode
       || !isOfficialHatOpcode(hat.opcode)
-      || !isExactAntiSaveCall(call, site.procedureCode, site.originalNext)
+      || !isExactAntiSaveCall(call, site.procedureCode)
     ) {
       addAntiSaveFailure(
         failures,
@@ -994,9 +1192,26 @@ function verifyAntiSaveSurface(
           : 'Each native hat must enter its anti-save call before the original continuation.'
       );
     }
+    const continuationParent = antiSaveContinuationParent(
+      target,
+      call,
+      site,
+      options.antiCheat === true
+    );
+    if (continuationParent === undefined) {
+      addAntiSaveFailure(
+        failures,
+        options.antiCheat === true
+          ? 'antisave-anticheat-wrapper-order-invalid'
+          : 'antisave-hat-guard-invalid',
+        options.antiCheat === true
+          ? 'Anti-cheat continuation guards must remain between each anti-save call and its original event continuation.'
+          : 'Each anti-save call must lead directly to its original event continuation.'
+      );
+    }
     if (site.originalNext !== null) {
       const successor = target.blocks[site.originalNext];
-      if (!isScratchBlock(successor) || successor.parent !== site.callId) {
+      if (!isScratchBlock(successor) || successor.parent !== continuationParent) {
         addAntiSaveFailure(
           failures,
           'antisave-original-successor-invalid',
@@ -1224,14 +1439,47 @@ function hasLocalProcedureDefinition(target: ScratchTarget, procedureCode: strin
   });
 }
 
+function antiSaveContinuationParent(
+  target: ScratchTarget,
+  call: ScratchBlock,
+  site: AntiSaveHatGuardManifest,
+  antiCheat: boolean
+): string | undefined {
+  let parentId = site.callId;
+  let nextId = call.next;
+  const visited = new Set<string>();
+  while (nextId !== site.originalNext) {
+    if (!antiCheat || nextId === null || visited.has(nextId)) return undefined;
+    visited.add(nextId);
+    const wrapper = target.blocks[nextId];
+    if (
+      !isScratchBlock(wrapper)
+      || wrapper.opcode !== 'procedures_call'
+      || wrapper.parent !== parentId
+      || wrapper.topLevel
+      || wrapper.shadow
+      || !hasOnlyKeys(wrapper.inputs, [])
+      || !hasOnlyKeys(wrapper.fields, [])
+    ) return undefined;
+    const wrapperCode = wrapper.mutation?.['proccode'];
+    if (
+      typeof wrapperCode !== 'string'
+      || wrapperCode === site.procedureCode
+      || !isExactAntiSaveMutation(wrapper.mutation, wrapperCode)
+      || !hasLocalProcedureDefinition(target, wrapperCode)
+    ) return undefined;
+    parentId = nextId;
+    nextId = wrapper.next;
+  }
+  return parentId;
+}
+
 function isExactAntiSaveCall(
   value: ScratchTarget['blocks'][string] | undefined,
-  procedureCode: string,
-  originalNext: string | null
+  procedureCode: string
 ): value is ScratchBlock {
   return isScratchBlock(value)
     && value.opcode === 'procedures_call'
-    && value.next === originalNext
     && !value.topLevel
     && !value.shadow
     && hasOnlyKeys(value.inputs, [])
@@ -1775,6 +2023,7 @@ function verifyStats(
   source: ProjectVerificationSnapshot,
   transformed: ProjectVerificationSnapshot,
   options: PostTransformVerificationOptions,
+  extraLevel: ExtraPrivacyLevel,
   failures: VerificationFinding[],
   proven: Set<string>
 ): void {
@@ -1812,13 +2061,36 @@ function verifyStats(
     stats.constantsFolded ?? 0,
     stats.inactiveFallbacksRemoved ?? 0,
     stats.antiCheatDecoys ?? 0,
-    stats.antiSaveCanaries ?? 0
+    stats.antiSaveCanaries ?? 0,
+    stats.privacyHatShadowSites ?? 0,
+    stats.privacyHatShadowChanges ?? 0
   ];
   if (counters.some(value => !Number.isSafeInteger(value) || value < 0)) {
     failures.push({
       severity: 'failure',
       code: 'stats-counter-invalid',
       message: 'One or more transform counters are negative or not safe integers.'
+    });
+  }
+  if (stats.extraPrivacyLevel !== undefined && stats.extraPrivacyLevel !== extraLevel) {
+    failures.push({
+      severity: 'failure',
+      code: 'stats-extra-level-mismatch',
+      message: `Stats report extra level ${String(stats.extraPrivacyLevel)}, but verification requested ${String(extraLevel)}.`
+    });
+  }
+  if (
+    extraLevel === 2
+    && isTrustedExtraEditorShadowManifest(options.extraEditorShadowManifest)
+    && (
+      stats.privacyHatShadowSites !== options.extraEditorShadowManifest.sites.length
+      || stats.privacyHatShadowChanges !== options.extraEditorShadowManifest.changedHatCount
+    )
+  ) {
+    failures.push({
+      severity: 'failure',
+      code: 'stats-extra-shadow-count-mismatch',
+      message: 'Stats do not match the manifest-bound extra level 2 covered-hat and changed-hat counts.'
     });
   }
   if (!failures.some(finding => finding.code.startsWith('stats-'))) {
@@ -1918,7 +2190,7 @@ function sameCategorySet(
 function addScopeCaveats(
   mode: ObfuscationMode,
   antiCheat: boolean,
-  extra: boolean,
+  extraLevel: ExtraPrivacyLevel,
   caveats: VerificationFinding[]
 ): void {
   caveats.push(
@@ -1964,7 +2236,7 @@ function addScopeCaveats(
       message: 'Anti-cheat mode intentionally changes behavior when protected state or sentinels are altered.'
     });
   }
-  if (extra) {
+  if (extraLevel >= 1) {
     caveats.push({
       severity: 'caveat',
       code: 'extra-name-and-editor-compatibility-waiver-active',

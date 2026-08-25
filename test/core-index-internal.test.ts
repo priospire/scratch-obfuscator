@@ -105,6 +105,7 @@ vi.mock('../src/verification/post-transform.js', async importOriginal => {
         mode: options.mode,
         antiCheat: options.antiCheat === true,
         extra: options.extra === true,
+        extraLevel: options.extraLevel ?? (options.extra === true ? 1 : 0),
         source: actual.captureProjectVerificationSnapshot(source),
         transformed: actual.captureProjectVerificationSnapshot(transformed),
         ...(options.losslessCoreSnapshot === undefined ? {} : {losslessCore: options.losslessCoreSnapshot}),
@@ -274,7 +275,7 @@ describe('obfuscation output invariant', () => {
     expect(result.stats.warnings).toContain(
       'Static verification rejected the lossy structural candidate '
         + '(codes=unexpected-live-change; passes=aggressive-structural-hardening; categories=executable-topology); '
-        + 'common lossless transforms plus anti-cheat instrumentation were emitted instead.'
+        + 'common lossless transforms were emitted with requested modifiers retained (anti-cheat).'
     );
     expect(result.stats.caveats).toEqual([
       'The requested lossy structural passes were rolled back after static verifier findings '

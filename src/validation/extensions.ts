@@ -364,6 +364,16 @@ export const OFFICIAL_LITERAL_SHADOW_OPCODES: ReadonlySet<string> = new Set([
   ))
 ]);
 
+export function isOfficialHatOpcode(opcode: string): boolean {
+  if (OFFICIAL_CORE_OPCODES.has(opcode)) {
+    return opcode.startsWith('event_when') || opcode === 'control_start_as_clone';
+  }
+  const separator = opcode.indexOf('_');
+  return separator > 0
+    && OFFICIAL_EXTENSION_OPCODES.get(opcode.slice(0, separator))?.has(opcode) === true
+    && opcode.slice(separator + 1).startsWith('when');
+}
+
 export function validateOfficialExtensions(project: ScratchProject): void {
   const declared = new Set<string>();
   for (const extension of project.extensions) {
